@@ -704,12 +704,12 @@ namespace UeAgentMaterialAuthoring
 					UeAgentAuthoringAssetIdentity::NormalizePackagePath(PackagePath);
 				if (!FPackageName::IsValidLongPackageName(PackagePath)
 					|| FPackageName::GetLongPackageAssetName(PackagePath).IsEmpty()
-					|| (!PackagePath.Equals(TEXT("/Game")) && !PackagePath.StartsWith(TEXT("/Game/"))))
+					|| (!PackagePath.StartsWith(TEXT("/Game/")) && !PackagePath.StartsWith(TEXT("/UeAgentInterface/Materials/"))))
 				{
 					SetFailure(OutFailure, AssetFailure(TEXT("invalid_asset_path"),
-						TEXT("Material asset_path must name a valid asset package under /Game."),
+						TEXT("Material asset_path must name a valid asset package under /Game or /UeAgentInterface/Materials."),
 						TEXT("asset_path"), Request.Input->Target->TryGetField(TEXT("asset_path")),
-						MakeShared<FJsonValueString>(TEXT("/Game/<folder>/<asset>")), Request.Input->Target.Get()));
+						MakeShared<FJsonValueString>(TEXT("/Game/<folder>/<asset> or /UeAgentInterface/Materials/<asset>")), Request.Input->Target.Get()));
 					return false;
 				}
 

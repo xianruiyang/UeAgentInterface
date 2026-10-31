@@ -17,6 +17,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 	{
 		FbxAnimation,
 		FbxSkeletalMesh,
+		FbxStaticMesh,
 		GeometryCache,
 		LightProfile,
 		SoundWave,

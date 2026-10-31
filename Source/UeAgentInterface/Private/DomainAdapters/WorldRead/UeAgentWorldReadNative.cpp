@@ -1,4 +1,5 @@
 #include "DomainAdapters/WorldRead/UeAgentWorldReadNative.h"
+#include "DomainAdapters/WorldRead/SceneAnalysis/UeAgentSceneAnalysis.h"
 #include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Components/PrimitiveComponent.h"
@@ -11,6 +12,7 @@
 #include "Dom/JsonValue.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "Engine/LevelStreaming.h"
+#include "Engine/LevelStreamingDynamic.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/StaticMesh.h"
@@ -38,6 +40,8 @@
 #include "WorldPartition/ErrorHandling/WorldPartitionStreamingGenerationErrorHandler.h"
 #include "WorldPartition/HLOD/HLODLayer.h"
 #include "WorldPartition/WorldPartition.h"
+#include "WorldPartition/WorldPartitionActorDescInstance.h"
+#include "WorldPartition/WorldPartitionHelpers.h"
 #include "WorldPartition/WorldPartitionActorDescInstanceViewInterface.h"
 
 namespace UE::UAI::DomainAdapters::WorldRead
@@ -296,7 +300,8 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			const FUeAgentCanonicalValuePtr& Value,
 			const FUeAgentOperationContext& Context,
 			TArray<FUeAgentStateEntry>& OutEntries,
-			FUeAgentWorldReadError& OutError)
+			FUeAgentWorldReadError& OutError,
+			const bool bNullable = false)
 		{
 			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
 			if (!Value.IsValid())
@@ -318,7 +323,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				FUeAgentCanonicalType(
 					TypeId,
 					Kind,
-					false,
+					bNullable,
 					Kind == EUeAgentValueKind::Object
 						? TEXT("object")
 						: Kind == EUeAgentValueKind::Array
@@ -363,17 +368,19 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			const TSharedPtr<FJsonValue>& JsonValue,
 			const FUeAgentOperationContext& Context,
 			TArray<FUeAgentStateEntry>& OutEntries,
-			FUeAgentWorldReadError& OutError)
+			FUeAgentWorldReadError& OutError,
+			const bool bNullable = false)
 		{
 			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
 			FUeAgentCanonicalValuePtr Value;
 			UE::UAI::Contract::FDiagnostic JsonError;
 			if (!CanonicalJson::TryFromJsonValue(JsonValue, Context.GetResourceTracker(), Value, JsonError))
 				return Fail(OutError, MoveTemp(JsonError), Selector);
-			if (Value->GetKind() != EUeAgentValueKind::Array && Value->GetKind() != EUeAgentValueKind::Object)
+			if (Value->GetKind() != EUeAgentValueKind::Array && Value->GetKind() != EUeAgentValueKind::Object
+				&& !(bNullable && Value->GetKind() == EUeAgentValueKind::Null))
 				return Fail(OutError, WorldReadFact(TEXT("world_read_value_invalid"),
-					TEXT("Captured structured field must be an object or array."), Selector,
-					WorldReadInputValue(JsonValue), MakeShared<FJsonValueString>(TEXT("object or array"))), OwnerId);
+					bNullable ? TEXT("Captured structured field must be an object, array or null.") : TEXT("Captured structured field must be an object or array."), Selector,
+					WorldReadInputValue(JsonValue), MakeShared<FJsonValueString>(bNullable ? TEXT("object, array or null") : TEXT("object or array"))), OwnerId);
 			return AddValueEntry(
 				SemanticId,
 				TargetKind,
@@ -386,7 +393,8 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				Value,
 				Context,
 				OutEntries,
-				OutError);
+				OutError,
+				bNullable);
 		}
 
 		bool AddString(
@@ -670,6 +678,28 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			const FString ProviderBinding;
 			const TSharedRef<IUeAgentWorldReadEnvironment>
 				Environment;
+		};
+
+		class FSceneAnalysisHook final : public FWorldReadHookBase
+		{
+		public:
+			using FWorldReadHookBase::FWorldReadHookBase;
+			bool TryCapture(const FUeAgentContractValue& CanonicalInput,
+				const TOptional<FUeAgentCandidateBinding>& Target,
+				const FUeAgentOperationContext& Context,
+				TSharedPtr<const FUeAgentCanonicalSnapshot>& OutSnapshot,
+				FUeAgentWorldReadError& OutError) override
+			{
+				UWorld* World = nullptr;
+				TSharedPtr<FJsonObject> Input, Output;
+				if (!ResolveWorld(Context, World, OutError) || !ParseInput(CanonicalInput, Input, OutError)) return false;
+				Contract::FDiagnostic Error;
+				if (!SceneAnalysis::Query(*World, ProviderBinding, Context.GetRequestId(), Input, Output, Error)) return Fail(OutError, Error);
+				TArray<FUeAgentStateEntry> Entries;
+				if (!AddJsonValue(ProviderBinding + TEXT(":analysis"), TEXT("world"), World->GetPathName(),
+					TEXT("analysis"), MakeShared<FJsonValueObject>(Output), Context, Entries, OutError)) return false;
+				return BuildSnapshot(ProviderBinding, Context, MoveTemp(Entries), OutSnapshot, OutError);
+			}
 		};
 
 		class FObjectHook final : public FWorldReadHookBase
@@ -1302,6 +1332,11 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Capsule half-height must be at least its radius."), TEXT("/half_height_cm"), MakeShared<FJsonValueNumber>(HalfHeight), MakeShared<FJsonValueNumber>(Radius), true));
 					if (Step <= 0.0)
 						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Capsule path step must be greater than zero."), TEXT("/step_cm"), MakeShared<FJsonValueNumber>(Step), MakeShared<FJsonValueString>(TEXT("greater than zero")), true));
+					bool bIncludeFirstHit = false;
+					bool bTraceComplex = false;
+					Input->TryGetBoolField(TEXT("include_first_hit"), bIncludeFirstHit);
+					Input->TryGetBoolField(TEXT("trace_complex"), bTraceComplex);
+					TSharedPtr<FJsonValue> FirstBlockingHit;
 					int32 BlockedSegments = 0;
 					for (int32 Segment = 0; Segment + 1 < Points.Num(); ++Segment)
 					{
@@ -1318,7 +1353,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 							FHitResult Hit;
 							FCollisionQueryParams Params(
 								SCENE_QUERY_STAT(UAIWorldReadCapsulePath),
-								false);
+								bTraceComplex);
 							if (World->SweepSingleByChannel(
 									Hit,
 									Start,
@@ -1329,6 +1364,19 @@ namespace UE::UAI::DomainAdapters::WorldRead
 									Params))
 							{
 								++BlockedSegments;
+								if (bIncludeFirstHit && !FirstBlockingHit.IsValid())
+								{
+									TSharedRef<FJsonObject> HitObject = MakeShared<FJsonObject>();
+									HitObject->SetNumberField(TEXT("segment_index"), Segment);
+									if (const UPrimitiveComponent* Component = Hit.GetComponent())
+										HitObject->SetStringField(TEXT("target_ref"), Component->GetPathName());
+									else
+										HitObject->SetField(TEXT("target_ref"), MakeShared<FJsonValueNull>());
+									HitObject->SetObjectField(TEXT("shape_location"), WorldPointJson(Hit.Location));
+									HitObject->SetObjectField(TEXT("impact_point"), WorldPointJson(Hit.ImpactPoint));
+									HitObject->SetBoolField(TEXT("start_penetrating"), Hit.bStartPenetrating);
+									FirstBlockingHit = MakeShared<FJsonValueObject>(HitObject);
+								}
 								break;
 							}
 						}
@@ -1344,6 +1392,17 @@ namespace UE::UAI::DomainAdapters::WorldRead
 							OutError))
 					{
 						return false;
+					}
+					if (bIncludeFirstHit)
+					{
+						if (!FirstBlockingHit.IsValid()) FirstBlockingHit = MakeShared<FJsonValueNull>();
+						if (!AddJsonValue(
+							TEXT("world.capsule_path:first_blocking_hit"),
+							TEXT("world"), World->GetPathName(), TEXT("first_blocking_hit"),
+							FirstBlockingHit, Context, Entries, OutError, true))
+						{
+							return false;
+						}
 					}
 				}
 				else
@@ -2301,6 +2360,37 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					Input->TryGetBoolField(
 						TEXT("include_loaded_regions"),
 						bIncludeLoadedRegions);
+					bool bIncludeActorDescriptors = false;
+					Input->TryGetBoolField(TEXT("include_actor_descriptors"), bIncludeActorDescriptors);
+					if (bIncludeActorDescriptors)
+					{
+						TArray<TSharedPtr<FJsonValue>> Actors;
+						if (Partition)
+						{
+							FWorldPartitionHelpers::ForEachActorDescInstance(Partition,
+								[&Actors](const FWorldPartitionActorDescInstance* Desc)
+								{
+									auto Row = MakeShared<FJsonObject>();
+									Row->SetStringField(TEXT("object_path"), Desc->GetActorSoftPath().ToString());
+									Row->SetStringField(TEXT("package"), Desc->GetActorPackage().ToString());
+									Row->SetStringField(TEXT("label"), Desc->GetActorLabelOrName().ToString());
+									Row->SetStringField(TEXT("native_class"), Desc->GetNativeClass().ToString());
+									Row->SetBoolField(TEXT("loaded"), Desc->IsLoaded());
+									Row->SetBoolField(TEXT("spatially_loaded"), Desc->GetIsSpatiallyLoaded());
+									Row->SetStringField(TEXT("runtime_grid"), Desc->GetRuntimeGrid().ToString());
+									Row->SetStringField(TEXT("hlod_layer"), Desc->GetHLODLayer().ToString());
+									TArray<TSharedPtr<FJsonValue>> Layers;
+									for (const FName& Layer : Desc->GetDataLayers()) Layers.Add(MakeShared<FJsonValueString>(Layer.ToString()));
+									Row->SetArrayField(TEXT("data_layers"), MoveTemp(Layers));
+									Actors.Add(MakeShared<FJsonValueObject>(Row));
+									return true;
+								});
+							}
+						Actors.Sort([](const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right)
+							{ return Left->AsObject()->GetStringField(TEXT("object_path")) < Right->AsObject()->GetStringField(TEXT("object_path")); });
+						if (!AddJsonValue(TEXT("world.partition:actor_descriptors"), TEXT("world"), World->GetPathName(),
+							TEXT("actor_descriptors"), MakeShared<FJsonValueArray>(MoveTemp(Actors)), Context, Entries, OutError)) return false;
+					}
 					if (Partition)
 					{
 						if (!AddString(
@@ -2556,6 +2646,18 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						{
 							return false;
 						}
+						const auto State = [&](const TCHAR* Field, bool Value) {
+							return AddBoolean(TEXT("world.topology:streaming_level"), TEXT("streaming_level"),
+								Level->GetPathName(), Field, Value, Context, Entries, OutError);
+						};
+						if (!State(TEXT("loaded"), Level->GetLoadedLevel() != nullptr)
+							|| !State(TEXT("visible"), Level->IsLevelVisible())
+							|| !State(TEXT("editor_visible"), Level->GetShouldBeVisibleInEditor())
+							|| !State(TEXT("should_be_loaded"), Level->ShouldBeLoaded())
+							|| !State(TEXT("should_be_visible"), Level->GetShouldBeVisibleFlag())) return false;
+						if (const auto* Dynamic = Cast<ULevelStreamingDynamic>(Level))
+							if (!State(TEXT("initially_loaded"), Dynamic->bInitiallyLoaded)
+								|| !State(TEXT("initially_visible"), Dynamic->bInitiallyVisible)) return false;
 					}
 				}
 				if (ProviderBinding
@@ -3084,6 +3186,10 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				MakeShared<FObjectHook>(
 					ProviderBinding,
 					MoveTemp(Environment));
+		}
+		else if (ProviderBinding == TEXT("world.read.scene_context") || ProviderBinding == TEXT("world.read.geometry_overlap"))
+		{
+			OutHook = MakeShared<FSceneAnalysisHook>(ProviderBinding, MoveTemp(Environment));
 		}
 		else if (ProviderBinding == TEXT("world.read.content"))
 		{

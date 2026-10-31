@@ -24,13 +24,14 @@ namespace UE::UAI::Module::CommandRegistration::Query
 			const TCHAR* WireType,
 			const bool bRequired,
 			const TCHAR* Description,
-			FString SchemaJson = {})
+			FString SchemaJson = {},
+			const bool bNullable = false)
 		{
 			return {
 				Name,
 				WireType,
 				bRequired,
-				false,
+				bNullable,
 				Description,
 				MoveTemp(SchemaJson),
 			};
@@ -149,7 +150,8 @@ namespace UE::UAI::Module::CommandRegistration::Query
 					*PublicField.Name,
 					*PublicField.WireType,
 					PublicField.bRequired && !bHasCapabilityObservation,
-					*PublicField.Description));
+					*PublicField.Description,
+					{}, PublicField.bNullable));
 			}
 			if (bHasCapabilityObservation)
 			{

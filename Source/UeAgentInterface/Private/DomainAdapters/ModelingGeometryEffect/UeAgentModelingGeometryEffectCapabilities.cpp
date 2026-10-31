@@ -593,6 +593,12 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				&& bValue)
 			{
 				AddRequired(TEXT("target_ref"), StringSchema());
+				Properties->SetObjectField(TEXT("material_ref"), StringSchema());
+				const TSharedPtr<FJsonObject> ColorChannel = MakeShared<FJsonObject>();
+				ColorChannel->SetStringField(TEXT("type"), TEXT("number"));
+				ColorChannel->SetNumberField(TEXT("minimum"), 0.0);
+				ColorChannel->SetNumberField(TEXT("maximum"), 1.0);
+				Properties->SetObjectField(TEXT("color"), ArraySchema(ColorChannel, 3));
 			}
 			if (Row->TryGetBoolField(
 					TEXT("existing_target"),

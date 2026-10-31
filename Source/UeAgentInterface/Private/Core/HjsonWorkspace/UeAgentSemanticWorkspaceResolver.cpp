@@ -13,6 +13,7 @@
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -32,11 +33,33 @@ namespace UE::UAI::HjsonWorkspace
 			FString SourceUnit;
 			FString Text;
 			FHjsonDocumentPtr Parsed;
+			TMap<EUeAgentResourceDimension, int64> ParseCharges;
+			bool bExactParseCharges = false;
 		};
 		FSemanticWorkspaceReadState* Previous = nullptr;
 		TMap<FString, FDocument> Documents;
+		int32 ReusedPublicSyntax = 0;
+		TMap<FString, FString> HashOnlyDocuments;
+		TMap<FString, FString> ResolvedHashOnlyDocuments;
+		// Only one completed resolution is retained, and only for this synchronous
+		// import. Reuse is conditional on rereading every source byte, not timestamps.
+		FString ResolvedRoot;
+		ESemanticWorkspaceMode ResolvedMode = ESemanticWorkspaceMode::State;
+		bool bResolvedManagedEdits = false;
+		FResolvedSemanticWorkspacePtr ResolvedWorkspace;
+		FWorkspaceError ResolvedDiagnostics;
+		TMap<FString, FHjsonDocumentPtr> ResolvedDocuments;
 	};
 	static thread_local FSemanticWorkspaceReadState* ActiveReadState = nullptr;
+	struct FCompletedDocumentRead
+	{
+		FString SourceUnit, ContentHash;
+		FHjsonDocumentPtr Parsed;
+		TMap<EUeAgentResourceDimension, int64> ParseCharges;
+	};
+	// One successful resolver's public documents. Private baseline envelopes
+	// keep their existing bounded typed/row proofs instead of retaining a second AST.
+	static thread_local TMap<FString, FCompletedDocumentRead> PreviousDocumentReads;
 
 	FSemanticWorkspaceReadScope::FSemanticWorkspaceReadScope()
 		: State(MakeUnique<FSemanticWorkspaceReadState>())
@@ -68,11 +91,20 @@ namespace UE::UAI::HjsonWorkspace
 			FString UnitPointer;
 			FString ContentHash;
 			FString EditHash;
+			FString EnvelopeRef;
 			TArray<FString> ContentFiles;
 			const FHjsonNode* SourceNode = nullptr;
 			const FHjsonNode* Envelope = nullptr;
+			FHjsonNodePtr RetainedSourceNode;
+			FString SourceRowHash;
 		};
 
+		struct FBaselineParseProof
+		{
+			FString ContentHash;
+			TMap<EUeAgentResourceDimension, int64> Charges;
+			bool bExact = false;
+		};
 		struct FParsedSource
 		{
 			FHjsonDocumentPtr Envelope;
@@ -83,7 +115,54 @@ namespace UE::UAI::HjsonWorkspace
 			TArray<FHjsonNodeRef> AssembledRows;
 			TArray<const FHjsonNode*> UnitEnvelopes;
 			TArray<FString> ManagedPaths;
+			TSet<FString> ContentReferenceUnits;
+			TMap<FString, FBaselineParseProof> BaselineProofs;
+			TMap<FString, FString> InventoryHashes;
 		};
+
+		// A proof is produced by successful resolution, never by the export model.
+		// It retains typed rows and their small source subtrees, not the manifest AST.
+		struct FResolvedRowProof
+		{
+			FString InputHash;
+			TOptional<FSemanticUnit> Unit;
+			TOptional<FSemanticUnit> Baseline;
+			TOptional<FSourceProvenance> Source;
+			FHjsonDocumentPtr SourceDocument;
+			TSet<FString> KeyedRoots;
+			TMap<EUeAgentResourceDimension, int64> Charges;
+			FWorkspaceError Diagnostics;
+			bool bEdited = false;
+		};
+		struct FResolvedRowsProof
+		{
+			FString Root;
+			FString ReferenceMapHash;
+			ESemanticWorkspaceMode Mode = ESemanticWorkspaceMode::State;
+			bool bManagedEdits = false;
+			TMap<FString, FResolvedRowProof> Rows;
+			TMap<FString, FBaselineParseProof> Baselines;
+		};
+		static thread_local TSharedPtr<const FResolvedRowsProof> PreviousResolvedRows;
+		struct FManifestIndexProof
+		{
+			FString Root;
+			FString ContentHash;
+			FString ReferenceMapHash;
+			FHjsonDocumentPtr Header;
+			TArray<uint8> Utf8;
+			TArray<FInventoryRow> Inventory;
+			TMap<EUeAgentResourceDimension, int64> ParseCharges;
+		};
+		static thread_local TSharedPtr<const FManifestIndexProof> PreviousManifestIndex;
+		struct FInventoryDocumentProof
+		{
+			FString ContentHash;
+			TArray<FInventoryRow> Rows;
+			TMap<EUeAgentResourceDimension, int64> ParseCharges;
+		};
+		static thread_local FString InventoryProofRoot;
+		static thread_local TMap<FString, TSharedPtr<const FInventoryDocumentProof>> InventoryProofs;
 
 		bool Fail(
 			FWorkspaceError& OutError,
@@ -286,13 +365,13 @@ namespace UE::UAI::HjsonWorkspace
 				|| FailResource(OutError, ResourceError);
 		}
 
-		FString Sha256(const TArray<uint8>& Bytes)
+		FString Sha256(const uint8* Bytes, const int64 Num)
 		{
 			uint8 Digest[SHA256_DIGEST_LENGTH] = {};
 			const uint8 Empty = 0;
 			SHA256(
-				Bytes.IsEmpty() ? &Empty : Bytes.GetData(),
-				static_cast<size_t>(Bytes.Num()),
+				Num == 0 ? &Empty : Bytes,
+				static_cast<size_t>(Num),
 				Digest);
 			FString Hex;
 			Hex.Reserve(SHA256_DIGEST_LENGTH * 2);
@@ -303,6 +382,11 @@ namespace UE::UAI::HjsonWorkspace
 			return TEXT("sha256:") + Hex;
 		}
 
+		FString Sha256(const TArray<uint8>& Bytes)
+		{
+			return Sha256(Bytes.GetData(), Bytes.Num());
+		}
+
 		FString Sha256Text(const FString& Text)
 		{
 			const FTCHARToUTF8 Utf8(*Text);
@@ -311,6 +395,17 @@ namespace UE::UAI::HjsonWorkspace
 				reinterpret_cast<const uint8*>(Utf8.Get()),
 				Utf8.Length());
 			return Sha256(Bytes);
+		}
+
+		FString HashReferenceMap(const TArray<FInventoryRow>& Inventory)
+		{
+			TArray<const FInventoryRow*> Sorted;
+			for (const auto& Row : Inventory) Sorted.Add(&Row);
+			Sorted.Sort([](const FInventoryRow& A, const FInventoryRow& B) { return A.PublicRef < B.PublicRef; });
+			FString Material;
+			for (const auto* Row : Sorted)
+				Material += FString::Printf(TEXT("%d:%s%d:%s"), Row->PublicRef.Len(), *Row->PublicRef, Row->UnitId.Len(), *Row->UnitId);
+			return Sha256Text(Material);
 		}
 
 		bool TryCanonicalValue(const FHjsonNode& Root, FUeAgentResourceTracker& Resources,
@@ -1816,7 +1911,7 @@ namespace UE::UAI::HjsonWorkspace
 			const FString& SourceUnit,
 			FUeAgentResourceTracker& Resources,
 			FHjsonDocumentPtr& OutDocument,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError, FString* OutContentHash = nullptr)
 		{
 			if (IsReparsePoint(Path))
 			{
@@ -1843,12 +1938,15 @@ namespace UE::UAI::HjsonWorkspace
 					SourceUnit);
 			}
 			FString CachePath;
+			if (OutContentHash) *OutContentHash = Sha256Text(Text);
 			if (ActiveReadState)
 			{
 				CachePath = FPaths::ConvertRelativePathToFull(Path);
 				FPaths::NormalizeFilename(CachePath);
 				const auto* Cached = ActiveReadState->Documents.Find(CachePath);
 				if (Cached && Cached->SourceUnit.Equals(SourceUnit, ESearchCase::CaseSensitive)
+					&& (SourceUnit != ManifestPath || Cached->Parsed->GetRoot()->Get(TEXT("unit_inventory"))
+						|| Cached->Parsed->GetRoot()->Get(TEXT("unit_inventory_files")))
 					&& Cached->Text.Equals(Text, ESearchCase::CaseSensitive))
 				{
 					OutDocument = Cached->Parsed;
@@ -1856,19 +1954,62 @@ namespace UE::UAI::HjsonWorkspace
 					return true;
 				}
 			}
-			if (!TryParseHjsonDocument(
+			const auto BeforeParse = Resources.Snapshot();
+			TMap<EUeAgentResourceDimension, int64> ParseCharges;
+			bool bExactParseCharges = true;
+			const auto* PreviousDocument = ActiveReadState ? PreviousDocumentReads.Find(CachePath) : nullptr;
+			const bool bReuseDocument = PreviousDocument && PreviousDocument->SourceUnit == SourceUnit
+				&& PreviousDocument->ContentHash == Sha256Text(Text);
+			if (bReuseDocument) {
+				++ActiveReadState->ReusedPublicSyntax;
+				FUeAgentResourceChargeError ResourceError;
+				if (!Resources.TryChargeMany(PreviousDocument->ParseCharges, TEXT("semantic_workspace:actual_public_document"), ResourceError))
+					return FailResource(OutError, ResourceError);
+				OutDocument = PreviousDocument->Parsed;
+				ParseCharges = PreviousDocument->ParseCharges;
+			} else if (!TryParseHjsonDocument(
 				Text,
 				SourceUnit,
 				Resources,
 				OutDocument,
 				OutError)) return false;
+			if (!bReuseDocument) {
+				const auto After = Resources.Snapshot();
+				for (uint8 D = 0; D <= static_cast<uint8>(EUeAgentResourceDimension::EstimatedMemoryBytes); ++D) {
+					const auto Dimension = static_cast<EUeAgentResourceDimension>(D);
+					const int64 A = BeforeParse.Consumed(Dimension), B = After.Consumed(Dimension);
+					if (B == MAX_int64 || B < A) { bExactParseCharges = false; break; }
+					if (B > A) ParseCharges.Add(Dimension, B - A);
+				}
+			}
 			if (ActiveReadState)
 			{
 				auto& Cached = ActiveReadState->Documents.FindOrAdd(CachePath);
 				Cached.SourceUnit = SourceUnit;
 				Cached.Text = MoveTemp(Text);
 				Cached.Parsed = OutDocument;
+				Cached.ParseCharges = MoveTemp(ParseCharges);
+				Cached.bExactParseCharges = bExactParseCharges;
 			}
+			return true;
+		}
+
+		bool AddInventoryIdentity(const FInventoryRow& Row, TSet<FString>& UnitIds,
+			TSet<FString>& PublicRefs, TSet<FString>& LogicalPaths, FWorkspaceError& OutError)
+		{
+			if (UnitIds.Contains(Row.UnitId))
+				return FailField(OutError, TEXT("semantic_workspace_unit_duplicate"),
+					TEXT("The workspace inventory contains a duplicate unit identity."), *Row.SourceNode, TEXT("unit_id"),
+					MakeShared<FJsonValueString>(TEXT("unique unit identity")), false);
+			if (PublicRefs.Contains(Row.PublicRef))
+				return FailField(OutError, TEXT("semantic_workspace_public_ref_duplicate"),
+					TEXT("The workspace inventory contains a duplicate public reference."), *Row.SourceNode, TEXT("public_ref"),
+					MakeShared<FJsonValueString>(TEXT("unique public reference")));
+			if (LogicalPaths.Contains(Row.LogicalPath))
+				return FailField(OutError, TEXT("semantic_workspace_inventory_path_duplicate"),
+					TEXT("The workspace inventory contains a duplicate logical path."), *Row.SourceNode, TEXT("logical_path"),
+					MakeShared<FJsonValueString>(TEXT("unique logical path")));
+			UnitIds.Add(Row.UnitId); PublicRefs.Add(Row.PublicRef); LogicalPaths.Add(Row.LogicalPath);
 			return true;
 		}
 
@@ -1977,6 +2118,18 @@ namespace UE::UAI::HjsonWorkspace
 						}
 					}
 					Row.Envelope = Item->Get(TEXT("envelope"));
+					if (!OptionalString(Item.Get(), TEXT("envelope_ref"), Row.EnvelopeRef, OutError)) return false;
+					if (!Row.EnvelopeRef.IsEmpty())
+					{
+						FString Safe;
+						if (Row.Envelope || !SafeRelativePath(Row.EnvelopeRef, Safe)
+							|| !Safe.StartsWith(TEXT(".uai/baselines/"), ESearchCase::CaseSensitive)
+							|| !Safe.EndsWith(TEXT(".hjson"), ESearchCase::CaseSensitive))
+							return FailField(OutError, TEXT("semantic_workspace_envelope_ref_invalid"),
+								TEXT("A captured envelope must be inline or reference a managed baseline document, exclusively."),
+								Item.Get(), TEXT("envelope_ref"));
+						Row.EnvelopeRef = MoveTemp(Safe);
+					}
 					if (Row.Envelope != nullptr
 						&& Row.Envelope->GetKind() != EHjsonNodeKind::Object)
 					{
@@ -1988,27 +2141,7 @@ namespace UE::UAI::HjsonWorkspace
 						return FailField(OutError, TEXT("semantic_workspace_inventory_invalid"),
 							TEXT("The inventory unit_kind is unsupported."), Item.Get(), TEXT("unit_kind"), UnitKindChoices());
 					}
-					if (UnitIds.Contains(Row.UnitId))
-					{
-						return FailField(OutError, TEXT("semantic_workspace_unit_duplicate"),
-							TEXT("The workspace inventory contains a duplicate unit identity."), Item.Get(), TEXT("unit_id"),
-							MakeShared<FJsonValueString>(TEXT("unique unit identity")), false);
-					}
-					if (PublicRefs.Contains(Row.PublicRef))
-					{
-						return FailField(OutError, TEXT("semantic_workspace_public_ref_duplicate"),
-							TEXT("The workspace inventory contains a duplicate public reference."), Item.Get(), TEXT("public_ref"),
-							MakeShared<FJsonValueString>(TEXT("unique public reference")));
-					}
-					if (LogicalPaths.Contains(Row.LogicalPath))
-					{
-						return FailField(OutError, TEXT("semantic_workspace_inventory_path_duplicate"),
-							TEXT("The workspace inventory contains a duplicate logical path."), Item.Get(), TEXT("logical_path"),
-							MakeShared<FJsonValueString>(TEXT("unique logical path")));
-					}
-					UnitIds.Add(Row.UnitId);
-					PublicRefs.Add(Row.PublicRef);
-					LogicalPaths.Add(Row.LogicalPath);
+					if (!AddInventoryIdentity(Row, UnitIds, PublicRefs, LogicalPaths, OutError)) return false;
 					OutRows.Add(MoveTemp(Row));
 					return true;
 				};
@@ -2027,13 +2160,156 @@ namespace UE::UAI::HjsonWorkspace
 				: nullptr;
 		}
 
+		bool MaterializeInventoryRow(FInventoryRow& Row, const FManifestIndexProof& Proof,
+			FUeAgentResourceTracker& Resources, FWorkspaceError& OutError)
+		{
+			if (!Row.EnvelopeRef.IsEmpty()) return true; // The complete thin row is already retained.
+			const FSourceProvenance Origin = Row.SourceNode->GetProvenance();
+			const int64 Start = Origin.GetByteStart(), End = Origin.GetByteEnd();
+			if (Start < 0 || End <= Start || End > Proof.Utf8.Num()) return false;
+			FString Text;
+			FFileHelper::BufferToString(Text, Proof.Utf8.GetData() + Start, static_cast<int32>(End - Start));
+			FHjsonDocumentPtr Document;
+			if (!TryParseHjsonDocument(Text, ManifestPath, Resources, Document, OutError)) return false;
+			// Restore exact source locations after parsing just this original span.
+			// Use an iterative copy so nesting cannot turn this optimization into a
+			// recursive stack limit absent from the normal parser.
+			TArray<TPair<const FHjsonNode*, bool>> Stack;
+			TMap<const FHjsonNode*, FHjsonNodeRef> Rebased;
+			Stack.Emplace(&Document->GetRoot().Get(), false);
+			while (!Stack.IsEmpty())
+			{
+				const auto Task = Stack.Pop(EAllowShrinking::No);
+				const FHjsonNode& Node = *Task.Key;
+				if (!Task.Value)
+				{
+					Stack.Emplace(Task.Key, true);
+					for (const auto& Child : Node.GetItems()) Stack.Emplace(&Child.Get(), false);
+					for (const auto& Child : Node.GetEntries()) Stack.Emplace(&Child.Value.Get(), false);
+					continue;
+				}
+				TArray<FHjsonNodeRef> Items;
+				TArray<TPair<FString, FHjsonNodeRef>> Entries;
+				for (const auto& Child : Node.GetItems()) Items.Add(Rebased.FindChecked(&Child.Get()));
+				for (const auto& Child : Node.GetEntries()) Entries.Emplace(Child.Key, Rebased.FindChecked(&Child.Value.Get()));
+				const auto& Location = Node.GetProvenance();
+				if (!Charge(Resources, {{EUeAgentResourceDimension::WorkUnits, 1},
+					{EUeAgentResourceDimension::EstimatedMemoryBytes, sizeof(FHjsonNode)}},
+					TEXT("semantic_workspace:row_source"), OutError)) return false;
+				const FString Pointer = Location.GetJsonPointer() == TEXT("/")
+					? Origin.GetJsonPointer() : Origin.GetJsonPointer() + Location.GetJsonPointer();
+				FSourceProvenance Source(Origin.GetSourceUnit(), Pointer,
+					Origin.GetLine() + Location.GetLine() - 1,
+					Location.GetLine() == 1 ? Origin.GetColumn() + Location.GetColumn() - 1 : Location.GetColumn(),
+					Start + Location.GetByteStart(), Start + Location.GetByteEnd(), Location.GetOriginalKey());
+				Rebased.Add(Task.Key, MakeShared<FHjsonNode>(Node.GetKind(), MoveTemp(Source),
+					Node.GetLexeme(), Node.GetText(), Node.GetBoolean(), MoveTemp(Items), MoveTemp(Entries)));
+			}
+			Row.RetainedSourceNode = Rebased.FindChecked(&Document->GetRoot().Get());
+			Row.SourceNode = Row.RetainedSourceNode.Get();
+			Row.Envelope = Row.SourceNode->Get(TEXT("envelope"));
+			return true;
+		}
+
+		TSharedPtr<const FInventoryDocumentProof> MakeInventoryDocumentProof(const FString& Root,
+			const FString& Path, const FString& ContentHash, const FHjsonDocument& Document,
+			const TArray<uint8>& Utf8, const TMap<EUeAgentResourceDimension, int64>& ParseCharges,
+			FWorkspaceError& OutError)
+		{
+			auto Proof = MakeShared<FInventoryDocumentProof>();
+			if (!ParseInventory(*Document.GetRoot(), Proof->Rows, OutError)) return {};
+			Proof->ContentHash = ContentHash; Proof->ParseCharges = ParseCharges;
+			const auto& Nodes = Document.GetRoot()->Get(TEXT("unit_inventory"))->GetItems();
+			for (int32 Index = 0; Index < Proof->Rows.Num(); ++Index) {
+				auto& Row = Proof->Rows[Index];
+				const auto& Span = Row.SourceNode->GetProvenance();
+				if (Span.GetByteStart() < 0 || Span.GetByteEnd() <= Span.GetByteStart() || Span.GetByteEnd() > Utf8.Num()) {
+					Fail(OutError, TEXT("semantic_workspace_inventory_source_invalid"),
+						TEXT("The parsed inventory row has no valid source byte range."), Path); return {};
+				}
+				Row.SourceRowHash = Sha256(Utf8.GetData() + Span.GetByteStart(), Span.GetByteEnd() - Span.GetByteStart());
+				Row.RetainedSourceNode = Nodes[Index];
+			}
+			if (InventoryProofRoot != Root) { InventoryProofs.Reset(); InventoryProofRoot = Root; PreviousManifestIndex.Reset(); }
+			int64 Rows = Proof->Rows.Num();
+			for (const auto& Existing : InventoryProofs) if (Existing.Key != Path) Rows += Existing.Value->Rows.Num();
+			if (Rows > 200000 || (!InventoryProofs.Contains(Path) && InventoryProofs.Num() >= 256)) InventoryProofs.Reset();
+			if (Proof->Rows.Num() <= 200000) InventoryProofs.Add(Path, Proof);
+			return Proof;
+		}
+
+		bool ReadInventoryDocuments(const FString& Root, const FHjsonNode& Manifest,
+			FUeAgentResourceTracker& Resources, FParsedSource& Parsed, TArray<FInventoryRow>& Rows,
+			FWorkspaceError& OutError)
+		{
+			const auto* Files = Manifest.Get(TEXT("unit_inventory_files"));
+			if (!Files || Files->GetKind() != EHjsonNodeKind::Array || Manifest.Get(TEXT("unit_inventory")))
+				return FailField(OutError, TEXT("semantic_workspace_inventory_invalid"),
+					TEXT("Workspace metadata requires inline unit_inventory or unit_inventory_files, exclusively."), Manifest, TEXT("unit_inventory_files"));
+			TSet<FString> Paths, UnitIds, PublicRefs, LogicalPaths;
+			int32 ReusedFiles = 0;
+			for (const auto& File : Files->GetItems()) {
+				FString Path;
+				if (File->GetKind() != EHjsonNodeKind::String || !SafeRelativePath(File->GetText(), Path)
+					|| !Path.StartsWith(TEXT(".uai/inventory/"), ESearchCase::CaseSensitive)
+					|| !Path.EndsWith(TEXT(".hjson"), ESearchCase::CaseSensitive) || Paths.Contains(Path))
+					return FailNode(OutError, TEXT("semantic_workspace_inventory_ref_invalid"),
+						TEXT("Inventory files must be unique managed relative paths under .uai/inventory/."), *File);
+				Paths.Add(Path);
+				const FString FullPath = FPaths::Combine(Root, Path);
+				if (IsReparsePoint(FullPath)) return Fail(OutError, TEXT("workspace_reparse_point_rejected"),
+					TEXT("The inventory document or an ancestor is a reparse point."), Path);
+				FString Text;
+				if (!FFileHelper::LoadFileToString(Text, *FullPath)) return Fail(OutError,
+					TEXT("workspace_source_read_failed"), TEXT("The inventory document could not be read."), Path);
+				const FString Hash = Sha256Text(Text);
+				auto Proof = InventoryProofRoot == Root ? InventoryProofs.FindRef(Path) : nullptr;
+				if (Proof && Proof->ContentHash == Hash) {
+					if (!Charge(Resources, {{EUeAgentResourceDimension::Files, 1}}, TEXT("semantic_workspace:") + Path, OutError)) return false;
+					FUeAgentResourceChargeError Error;
+					if (!Resources.TryChargeMany(Proof->ParseCharges, TEXT("semantic_workspace:validated_inventory"), Error)) return FailResource(OutError, Error);
+					++ReusedFiles;
+				} else {
+					const auto Before = Resources.Snapshot();
+					FHjsonDocumentPtr Document; FString ParsedHash;
+					if (!ReadDocument(FullPath, Path, Resources, Document, OutError, &ParsedHash)) return false;
+					if (ParsedHash != Hash) return Fail(OutError, TEXT("workspace_source_changed_during_read"),
+						TEXT("The inventory document changed while this workspace was being resolved."), Path);
+					TMap<EUeAgentResourceDimension, int64> Charges;
+					const auto After = Resources.Snapshot();
+					for (uint8 D = 0; D <= static_cast<uint8>(EUeAgentResourceDimension::EstimatedMemoryBytes); ++D) {
+						const auto Dimension = static_cast<EUeAgentResourceDimension>(D);
+						const int64 Delta = After.Consumed(Dimension) - Before.Consumed(Dimension);
+						if (Dimension != EUeAgentResourceDimension::Files && Delta > 0) Charges.Add(Dimension, Delta);
+					}
+					const FTCHARToUTF8 Converted(*Text); TArray<uint8> Utf8;
+					Utf8.Append(reinterpret_cast<const uint8*>(Converted.Get()), Converted.Length());
+					Proof = MakeInventoryDocumentProof(Root, Path, Hash, *Document, Utf8, Charges, OutError);
+					if (!Proof) return false;
+				}
+				for (const auto& Row : Proof->Rows) {
+					if (!AddInventoryIdentity(Row, UnitIds, PublicRefs, LogicalPaths, OutError)) return false;
+					Rows.Add(Row);
+				}
+				Parsed.ManagedPaths.Add(Path);
+				Parsed.InventoryHashes.Add(Path, Hash);
+				if (ActiveReadState) ActiveReadState->HashOnlyDocuments.Add(FullPath, Hash);
+			}
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=inventory_documents files=%d reused_syntax=%d rows=%d"),
+				Paths.Num(), ReusedFiles, Rows.Num());
+			return true;
+		}
+
 		bool ReadDirectorySource(
 			const FWorkspaceSource& Source,
 			FUeAgentResourceTracker& Resources,
 			FParsedSource& OutParsed,
 			TArray<FInventoryRow>& OutInventory,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			const TOptional<ESemanticWorkspaceMode> ExpectedMode = {},
+			const bool bAllowManagedUnitEdits = false)
 		{
+			const double DirectoryStarted = FPlatformTime::Seconds();
 			FString Root =
 				FPaths::ConvertRelativePathToFull(Source.GetPath());
 			FPaths::NormalizeDirectoryName(Root);
@@ -2063,13 +2339,38 @@ namespace UE::UAI::HjsonWorkspace
 						"semantic_workspace_manifest_missing"), TEXT("The directory has no semantic workspace metadata; export the workspace again."),
 					ManifestPath);
 			}
-			if (!ReadDocument(
+			TSharedPtr<const FManifestIndexProof> ManifestIndex;
+			if (ExpectedMode.IsSet() && ActiveReadState && PreviousManifestIndex && PreviousResolvedRows
+				&& PreviousManifestIndex->Root == Root && PreviousResolvedRows->Root == Root
+				&& PreviousResolvedRows->Mode == ExpectedMode.GetValue()
+				&& PreviousResolvedRows->bManagedEdits == bAllowManagedUnitEdits
+				&& PreviousResolvedRows->ReferenceMapHash == PreviousManifestIndex->ReferenceMapHash
+				&& !IsReparsePoint(FullManifest))
+			{
+				TArray<uint8> ActualBytes;
+				if (FFileHelper::LoadFileToArray(ActualBytes, *FullManifest)
+					&& Sha256(ActualBytes) == PreviousManifestIndex->ContentHash)
+				{
+					if (!Charge(Resources, {{EUeAgentResourceDimension::Files, 1}}, TEXT("semantic_workspace:manifest"), OutError)) return false;
+					FUeAgentResourceChargeError ResourceError;
+					if (!Resources.TryChargeMany(PreviousManifestIndex->ParseCharges, TEXT("semantic_workspace:validated_manifest"), ResourceError))
+						return FailResource(OutError, ResourceError);
+					ManifestIndex = PreviousManifestIndex;
+					OutParsed.ManifestDocument = ManifestIndex->Header;
+					auto& Cached = ActiveReadState->Documents.FindOrAdd(FullManifest);
+					Cached.SourceUnit = ManifestPath;
+					FFileHelper::BufferToString(Cached.Text, ActualBytes.GetData(), ActualBytes.Num());
+					Cached.Parsed = OutParsed.ManifestDocument;
+					OutInventory = ManifestIndex->Inventory;
+				}
+			}
+			if (!ManifestIndex && (!ReadDocument(
 					FullManifest,
 					ManifestPath,
 					Resources,
 					OutParsed.ManifestDocument,
 					OutError)
-				|| !OutParsed.ManifestDocument.IsValid())
+				|| !OutParsed.ManifestDocument.IsValid()))
 			{
 				return false;
 			}
@@ -2078,22 +2379,33 @@ namespace UE::UAI::HjsonWorkspace
 			FWorkspaceError Diagnostics;
 			if (OutParsed.Manifest->GetKind() != EHjsonNodeKind::Object)
 				return Fail(OutError, TEXT("semantic_workspace_inventory_invalid"), TEXT("The workspace metadata root must be an object."), ManifestPath);
-			if (!ParseInventory(*OutParsed.Manifest, OutInventory, OutError))
+			const bool bInventoryDocuments = OutParsed.Manifest->Get(TEXT("unit_inventory_files")) != nullptr;
+			if (!ManifestIndex && !(bInventoryDocuments
+				? ReadInventoryDocuments(Root, *OutParsed.Manifest, Resources, OutParsed, OutInventory, OutError)
+				: ParseInventory(*OutParsed.Manifest, OutInventory, OutError)))
 			{
 				Diagnostics.Append(OutError);
 				Diagnostics.MarkUnchecked(TEXT("inventory_units"), FString(), TEXT("invalid_inventory_rows"));
 			}
+			const bool bReusePriorRows = ManifestIndex || (bInventoryDocuments && ExpectedMode.IsSet() && ActiveReadState
+				&& PreviousResolvedRows && PreviousResolvedRows->Root == Root
+				&& PreviousResolvedRows->Mode == ExpectedMode.GetValue()
+				&& PreviousResolvedRows->bManagedEdits == bAllowManagedUnitEdits
+				&& PreviousResolvedRows->ReferenceMapHash == HashReferenceMap(OutInventory));
+			const double InventoryReadFinished = FPlatformTime::Seconds();
 
 			TSet<FString> ManagedDocumentPaths;
 			TSet<FString> DocumentPointers;
 			TMap<FString, FHjsonDocumentPtr> Documents;
 			TMap<FString, FHjsonDocumentPtr> ContentDocuments;
+			TMap<FString, bool> DocumentExistence;
 			TSet<FString> FailedDocuments;
-			TArray<FString> SourcePaths;
+			TSet<FString> UniqueSourcePaths;
 			for (const FInventoryRow& Row : OutInventory)
 			{
-				SourcePaths.AddUnique(Row.DocumentPath);
+				UniqueSourcePaths.Add(Row.DocumentPath);
 			}
+			TArray<FString> SourcePaths = UniqueSourcePaths.Array();
 			SourcePaths.Sort();
 			for (const FString& Path : SourcePaths)
 			{
@@ -2120,12 +2432,50 @@ namespace UE::UAI::HjsonWorkspace
 
 			OutParsed.UnitDocuments.Reserve(
 				OutInventory.Num());
+			const double DocumentsReadFinished = FPlatformTime::Seconds();
+			double BaselineParseSeconds = 0, BaselineReadSeconds = 0;
+			double RowPathsSeconds = 0, RowExistsSeconds = 0, RowPointerSeconds = 0, RowProofSeconds = 0;
 			OutParsed.UnitRows.Reserve(OutInventory.Num());
+			TMap<FString, FString> CurrentDocumentHashes;
+			TMap<FString, FHjsonDocumentPtr> BaselineDocuments;
+			auto LoadBaseline = [&](const FString& Path) -> bool
+			{
+				if (BaselineDocuments.Contains(Path)) return true;
+				const double Started = FPlatformTime::Seconds();
+				FHjsonDocumentPtr Document;
+				FString ParsedHash;
+				const auto Before = Resources.Snapshot();
+				if (!ReadDocument(FPaths::Combine(Root, Path), Path, Resources, Document, OutError, &ParsedHash)) return false;
+				if (ParsedHash != OutParsed.BaselineProofs.FindChecked(Path).ContentHash)
+					return Fail(OutError, TEXT("workspace_source_changed"),
+						TEXT("The captured baseline document changed while this workspace was being resolved."), Path);
+				if (Document->GetRoot()->GetKind() != EHjsonNodeKind::Object)
+					return FailNode(OutError, TEXT("semantic_workspace_envelope_ref_invalid"),
+						TEXT("A baseline document must contain envelopes keyed by unit identity."), *Document->GetRoot(),
+						MakeShared<FJsonValueString>(TEXT("object")), false);
+				auto& Proof = OutParsed.BaselineProofs.FindChecked(Path);
+				Proof.Charges.Reset(); Proof.bExact = true;
+				const auto After = Resources.Snapshot();
+				for (uint8 D = 0; D <= static_cast<uint8>(EUeAgentResourceDimension::EstimatedMemoryBytes); ++D)
+				{
+					const auto Dimension = static_cast<EUeAgentResourceDimension>(D);
+					const int64 A = Before.Consumed(Dimension), B = After.Consumed(Dimension);
+					if (B == MAX_int64 || B < A) { Proof.bExact = false; break; }
+					if (B > A) Proof.Charges.Add(Dimension, B - A);
+				}
+				BaselineDocuments.Add(Path, Document);
+				OutParsed.UnitDocuments.Add(Document);
+				BaselineParseSeconds += FPlatformTime::Seconds() - Started;
+				return true;
+			};
+			int32 ReusedManifestRows = 0;
 			for (FInventoryRow& Row : OutInventory)
 			{
 				OutError.Reset();
 				auto ReadRow = [&]() -> bool
 				{
+					const double PathsStarted = FPlatformTime::Seconds();
+					double ThisBaselineRead = 0;
 					FString Relative;
 					if (!SafeRelativePath(
 							Row.DocumentPath,
@@ -2139,6 +2489,24 @@ namespace UE::UAI::HjsonWorkspace
 					}
 					Row.DocumentPath = Relative;
 					if (FailedDocuments.Contains(Relative)) return false;
+					if (!Row.EnvelopeRef.IsEmpty() && !OutParsed.BaselineProofs.Contains(Row.EnvelopeRef))
+					{
+						const double Started = FPlatformTime::Seconds();
+						const FString Path = FPaths::Combine(Root, Row.EnvelopeRef);
+						if (IsReparsePoint(Path)) return Fail(OutError, TEXT("workspace_reparse_point_rejected"),
+							TEXT("The baseline document or an ancestor is a reparse point."), Row.EnvelopeRef);
+						if (!Charge(Resources, {{EUeAgentResourceDimension::Files, 1}},
+							TEXT("semantic_workspace:") + Row.EnvelopeRef, OutError)) return false;
+						FString Text;
+						if (!FFileHelper::LoadFileToString(Text, *Path)) return Fail(OutError,
+							TEXT("workspace_source_read_failed"), TEXT("The captured baseline document could not be read."), Row.EnvelopeRef);
+						FBaselineParseProof Proof; Proof.ContentHash = Sha256Text(Text);
+						if (ActiveReadState) ActiveReadState->HashOnlyDocuments.Add(Path, Proof.ContentHash);
+						OutParsed.BaselineProofs.Add(Row.EnvelopeRef, MoveTemp(Proof));
+						ManagedDocumentPaths.Add(Row.EnvelopeRef);
+						OutParsed.ManagedPaths.Add(Row.EnvelopeRef);
+						ThisBaselineRead = FPlatformTime::Seconds() - Started; BaselineReadSeconds += ThisBaselineRead;
+					}
 					for (int32 Index = 0; Index < Row.ContentFiles.Num(); ++Index)
 					{
 						const FString& ContentPath = Row.ContentFiles[Index];
@@ -2165,6 +2533,7 @@ namespace UE::UAI::HjsonWorkspace
 						}
 						Row.LogicalPath = Logical;
 					}
+					RowPathsSeconds += FPlatformTime::Seconds() - PathsStarted - ThisBaselineRead;
 					if (DocumentPointers.Contains(Row.DocumentPath + TEXT("|") + Row.UnitPointer))
 					{
 						auto Diagnostic = HjsonNodeFailure(TEXT("semantic_workspace_unit_pointer_duplicate"),
@@ -2177,7 +2546,12 @@ namespace UE::UAI::HjsonWorkspace
 					DocumentPointers.Add(Row.DocumentPath + TEXT("|") + Row.UnitPointer);
 					const FString FullPath =
 						FPaths::Combine(Root, Relative);
-					if (!IFileManager::Get().FileExists(*FullPath))
+					const double ExistsStarted = FPlatformTime::Seconds();
+					const bool* Exists = DocumentExistence.Find(FullPath);
+					if (!Exists) Exists = &DocumentExistence.Add(FullPath, IFileManager::Get().FileExists(*FullPath));
+					const bool bDocumentExists = *Exists;
+					RowExistsSeconds += FPlatformTime::Seconds() - ExistsStarted;
+					if (!bDocumentExists)
 					{
 						const auto* DocumentPath = Row.SourceNode->Get(TEXT("document_path"));
 						const auto* PathNode = DocumentPath && !DocumentPath->GetText().TrimStartAndEnd().IsEmpty()
@@ -2204,7 +2578,39 @@ namespace UE::UAI::HjsonWorkspace
 						OutParsed.UnitDocuments.Add(Document);
 						ExistingDocument = Documents.Find(Row.DocumentPath);
 					}
+					bool bReuseResolvedRow = false;
+					const double ProofStarted = FPlatformTime::Seconds();
+					if (bReusePriorRows)
+					{
+						const auto* Previous = PreviousResolvedRows->Rows.Find(Row.UnitId);
+						const auto* Current = ActiveReadState->Documents.Find(FullPath);
+						if (Previous && Current && Row.ContentFiles.IsEmpty())
+						{
+							FString* Hash = CurrentDocumentHashes.Find(Row.DocumentPath);
+							if (!Hash) Hash = &CurrentDocumentHashes.Add(Row.DocumentPath, Sha256Text(Current->Text));
+							const auto& Span = Row.SourceNode->GetProvenance();
+							const FString RowHash = !Row.SourceRowHash.IsEmpty() ? Row.SourceRowHash
+								: Sha256(ManifestIndex->Utf8.GetData() + Span.GetByteStart(), Span.GetByteEnd() - Span.GetByteStart());
+							const FString InputHash = RowHash + *Hash
+								+ (Row.EnvelopeRef.IsEmpty() ? FString() : OutParsed.BaselineProofs.FindChecked(Row.EnvelopeRef).ContentHash);
+							bReuseResolvedRow = Previous->InputHash == InputHash;
+						}
+						if (!bReuseResolvedRow && ManifestIndex && !MaterializeInventoryRow(Row, *ManifestIndex, Resources, OutError)) return false;
+						if (bReuseResolvedRow) ++ReusedManifestRows;
+					}
+					RowProofSeconds += FPlatformTime::Seconds() - ProofStarted;
+					if (!bReuseResolvedRow && !Row.EnvelopeRef.IsEmpty())
+					{
+						if (!LoadBaseline(Row.EnvelopeRef)) return false;
+						Row.Envelope = BaselineDocuments.FindChecked(Row.EnvelopeRef)->GetRoot()->Get(Row.UnitId);
+						if (!Row.Envelope || Row.Envelope->GetKind() != EHjsonNodeKind::Object)
+							return FailField(OutError, TEXT("semantic_workspace_envelope_missing"),
+								TEXT("The referenced baseline document has no object envelope for this unit identity."),
+								*Row.SourceNode, TEXT("envelope_ref"));
+					}
+					const double PointerStarted = FPlatformTime::Seconds();
 					const FHjsonNode* Unit = (*ExistingDocument)->Find(Row.UnitPointer);
+					RowPointerSeconds += FPlatformTime::Seconds() - PointerStarted;
 					if (Unit == nullptr
 						|| Unit->GetKind()
 							!= EHjsonNodeKind::Object)
@@ -2221,6 +2627,7 @@ namespace UE::UAI::HjsonWorkspace
 						OutError.Locate(*(*ExistingDocument)->GetRoot());
 						return false;
 					}
+					if (!bReuseResolvedRow)
 					{
 						TSet<FString> Expanding;
 						TFunction<bool(const FHjsonNodeRef&, FHjsonNodePtr&)> Expand;
@@ -2232,6 +2639,7 @@ namespace UE::UAI::HjsonWorkspace
 								if (Reference && Node->GetEntries().Num() == 1
 									&& Reference->GetKind() == EHjsonNodeKind::String)
 								{
+									OutParsed.ContentReferenceUnits.Add(Row.UnitId);
 									FString Path;
 									if (!SafeRelativePath(Reference->GetText(), Path))
 										return FailNode(OutError, TEXT("workspace_path_invalid"),
@@ -2274,9 +2682,11 @@ namespace UE::UAI::HjsonWorkspace
 									return bExpanded;
 								}
 								bool bChildrenValid = true;
-							TArray<TPair<FString, FHjsonNodeRef>> Entries;
-								for (const auto& Field : Node->GetEntries())
+								bool bChildrenChanged = false;
+								TArray<TPair<FString, FHjsonNodeRef>> Entries;
+								for (int32 EntryIndex = 0; EntryIndex < Node->GetEntries().Num(); ++EntryIndex)
 								{
+									const auto& Field = Node->GetEntries()[EntryIndex];
 									FHjsonNodePtr Value;
 									if (!Expand(Field.Value, Value))
 								{
@@ -2285,18 +2695,27 @@ namespace UE::UAI::HjsonWorkspace
 									bChildrenValid = false;
 									continue;
 								}
-									Entries.Emplace(Field.Key, Value.ToSharedRef());
+									if (Value.Get() != &Field.Value.Get())
+									{
+										if (!bChildrenChanged) Entries = Node->GetEntries();
+										bChildrenChanged = true;
+										Entries[EntryIndex].Value = Value.ToSharedRef();
+									}
 								}
 								if (!bChildrenValid) return false;
-							Out = MakeShared<FHjsonNode>(EHjsonNodeKind::Object, Node->GetProvenance(),
-									FString(), FString(), false, TArray<FHjsonNodeRef>{}, MoveTemp(Entries));
+								if (bChildrenChanged)
+									Out = MakeShared<FHjsonNode>(EHjsonNodeKind::Object, Node->GetProvenance(),
+										FString(), FString(), false, TArray<FHjsonNodeRef>{}, MoveTemp(Entries));
+								else Out = Node;
 							}
 							else if (Node->GetKind() == EHjsonNodeKind::Array)
 							{
 								bool bChildrenValid = true;
-							TArray<FHjsonNodeRef> Items;
-								for (const auto& Item : Node->GetItems())
+								bool bChildrenChanged = false;
+								TArray<FHjsonNodeRef> Items;
+								for (int32 ItemIndex = 0; ItemIndex < Node->GetItems().Num(); ++ItemIndex)
 								{
+									const auto& Item = Node->GetItems()[ItemIndex];
 									FHjsonNodePtr Value;
 									if (!Expand(Item, Value))
 								{
@@ -2305,11 +2724,18 @@ namespace UE::UAI::HjsonWorkspace
 									bChildrenValid = false;
 									continue;
 								}
-									Items.Add(Value.ToSharedRef());
+									if (Value.Get() != &Item.Get())
+									{
+										if (!bChildrenChanged) Items = Node->GetItems();
+										bChildrenChanged = true;
+										Items[ItemIndex] = Value.ToSharedRef();
+									}
 								}
 								if (!bChildrenValid) return false;
-							Out = MakeShared<FHjsonNode>(EHjsonNodeKind::Array, Node->GetProvenance(),
-									FString(), FString(), false, MoveTemp(Items), TArray<TPair<FString, FHjsonNodeRef>>{});
+								if (bChildrenChanged)
+									Out = MakeShared<FHjsonNode>(EHjsonNodeKind::Array, Node->GetProvenance(),
+										FString(), FString(), false, MoveTemp(Items), TArray<TPair<FString, FHjsonNodeRef>>{});
+								else Out = Node;
 							}
 							else Out = Node; // Preserve scalar lexemes, including exact integers.
 							return true;
@@ -2336,6 +2762,25 @@ namespace UE::UAI::HjsonWorkspace
 					Diagnostics.MarkUnchecked(TEXT("unit_semantics"), Row.DocumentPath, TEXT("unit_or_dependency_invalid"));
 				}
 			}
+			int32 ReusedBaselineSyntax = 0;
+			const double RowsReadFinished = FPlatformTime::Seconds();
+			if (!Diagnostics.HasErrors()) for (auto& Baseline : OutParsed.BaselineProofs)
+			{
+				if (BaselineDocuments.Contains(Baseline.Key)) continue;
+				const auto* Prior = bReusePriorRows && PreviousResolvedRows
+					? PreviousResolvedRows->Baselines.Find(Baseline.Key) : nullptr;
+				if (Prior && Prior->bExact && Prior->ContentHash == Baseline.Value.ContentHash)
+				{
+					FUeAgentResourceChargeError ResourceError;
+					if (!Resources.TryChargeMany(Prior->Charges, TEXT("semantic_workspace:validated_baseline"), ResourceError))
+						return FailResource(OutError, ResourceError);
+					Baseline.Value = *Prior; ++ReusedBaselineSyntax;
+				}
+				else if (!LoadBaseline(Baseline.Key)) return false;
+			}
+			if (!OutParsed.BaselineProofs.IsEmpty())
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=baseline_documents files=%d parsed_files=%d reused_syntax=%d"),
+					OutParsed.BaselineProofs.Num(), BaselineDocuments.Num(), ReusedBaselineSyntax);
 			for (const TPair<FString, FHjsonDocumentPtr>& DocumentPair : Documents)
 			{
 				OutError.Reset();
@@ -2405,6 +2850,14 @@ namespace UE::UAI::HjsonWorkspace
 				OutError = MoveTemp(Diagnostics);
 				return false;
 			}
+			if (bReusePriorRows)
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=manifest_index reused_rows=%d parsed_rows=%d"),
+					ReusedManifestRows, OutInventory.Num() - ReusedManifestRows);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=directory_source rows=%d documents=%d reused_public_syntax=%d inventory_s=%.6f documents_s=%.6f rows_s=%.6f row_paths_s=%.6f row_exists_s=%.6f row_pointer_s=%.6f row_proof_s=%.6f baseline_read_s=%.6f baseline_parse_s=%.6f total_s=%.6f"),
+				OutInventory.Num(), Documents.Num(), ActiveReadState ? ActiveReadState->ReusedPublicSyntax : 0, InventoryReadFinished - DirectoryStarted,
+				DocumentsReadFinished - InventoryReadFinished, RowsReadFinished - DocumentsReadFinished,
+				RowPathsSeconds, RowExistsSeconds, RowPointerSeconds, RowProofSeconds, BaselineReadSeconds, BaselineParseSeconds,
+				FPlatformTime::Seconds() - DirectoryStarted);
 			return true;
 		}
 
@@ -2733,6 +3186,55 @@ namespace UE::UAI::HjsonWorkspace
 		}
 	}
 
+	void RememberParsedSemanticManifest(const FString& WorkspaceRoot, const FString& ContentHash,
+		const FHjsonDocument& Document, const TArray<uint8>& Utf8,
+		const TMap<EUeAgentResourceDimension, int64>& ParseCharges)
+	{
+		FString Root = FPaths::ConvertRelativePathToFull(WorkspaceRoot);
+		FPaths::NormalizeDirectoryName(Root);
+		if (Document.GetSourceUnit().StartsWith(TEXT(".uai/inventory/"), ESearchCase::CaseSensitive)) {
+			FWorkspaceError Error;
+			MakeInventoryDocumentProof(Root, Document.GetSourceUnit(), ContentHash, Document, Utf8, ParseCharges, Error);
+			return;
+		}
+		if (!PreviousResolvedRows || PreviousResolvedRows->Root != Root
+			|| Utf8.Num() > 512LL * 1024 * 1024) return;
+		const auto* Schema = Document.GetRoot()->Get(TEXT("workspace_schema"));
+		const auto* Rows = Document.GetRoot()->Get(TEXT("unit_inventory"));
+		if (!Schema || Schema->GetText() != GetSemanticWorkspaceSchemaId() || !Rows
+			|| Rows->GetKind() != EHjsonNodeKind::Array || Rows->GetItems().Num() > 200000) return;
+		auto Proof = MakeShared<FManifestIndexProof>();
+		FWorkspaceError Error;
+		if (!ParseInventory(*Document.GetRoot(), Proof->Inventory, Error)) return;
+		Proof->ReferenceMapHash = HashReferenceMap(Proof->Inventory);
+		if (Proof->ReferenceMapHash != PreviousResolvedRows->ReferenceMapHash) return;
+		Proof->Root = MoveTemp(Root);
+		Proof->ContentHash = ContentHash;
+		Proof->Utf8 = Utf8;
+		Proof->ParseCharges = ParseCharges;
+		TArray<TPair<FString, FHjsonNodeRef>> HeaderFields;
+		for (const auto& Field : Document.GetRoot()->GetEntries())
+			if (Field.Key != TEXT("unit_inventory")) HeaderFields.Add(Field);
+		Proof->Header = MakeShared<FHjsonDocument>(Document.GetSourceUnit(), MakeShared<FHjsonNode>(
+			EHjsonNodeKind::Object, Document.GetRoot()->GetProvenance(), FString(), FString(), false,
+			TArray<FHjsonNodeRef>{}, MoveTemp(HeaderFields)));
+		for (auto& Row : Proof->Inventory)
+		{
+			const auto& Span = Row.SourceNode->GetProvenance();
+			if (Span.GetByteStart() < 0 || Span.GetByteEnd() <= Span.GetByteStart() || Span.GetByteEnd() > Utf8.Num()) return;
+			// Keep only the small index/diagnostic fields. Large captured envelopes
+			// remain exact UTF-8 spans and are parsed lazily for changed rows.
+			TArray<TPair<FString, FHjsonNodeRef>> Fields;
+			for (const auto& Field : Row.SourceNode->GetEntries())
+				if (Field.Key != TEXT("envelope")) Fields.Add(Field);
+			Row.RetainedSourceNode = MakeShared<FHjsonNode>(EHjsonNodeKind::Object, Span,
+				FString(), FString(), false, TArray<FHjsonNodeRef>{}, MoveTemp(Fields));
+			Row.SourceNode = Row.RetainedSourceNode.Get();
+			Row.Envelope = nullptr;
+		}
+		PreviousManifestIndex = MoveTemp(Proof);
+	}
+
 	bool TryCollectSemanticWorkspaceManagedPaths(
 		const FString& WorkspaceRoot, FUeAgentResourceTracker& Resources,
 		TArray<FString>& OutPaths, FWorkspaceError& OutError)
@@ -2754,8 +3256,71 @@ namespace UE::UAI::HjsonWorkspace
 		FResolvedSemanticWorkspacePtr& OutWorkspace,
 		FWorkspaceError& OutError)
 	{
+		const double ResolveStarted = FPlatformTime::Seconds();
 		OutWorkspace.Reset();
 		OutError.Reset();
+		FString ResolutionRoot;
+		if (ActiveReadState && Source.GetKind() == EWorkspaceSourceKind::Directory)
+		{
+			ResolutionRoot = FPaths::ConvertRelativePathToFull(Source.GetPath());
+			FPaths::NormalizeDirectoryName(ResolutionRoot);
+			auto& Cached = *ActiveReadState;
+			bool bReusable = Cached.ResolvedWorkspace.IsValid()
+				&& Cached.ResolvedRoot.Equals(ResolutionRoot, ESearchCase::CaseSensitive)
+				&& Cached.ResolvedMode == ExpectedMode
+				&& Cached.bResolvedManagedEdits == bAllowManagedUnitEdits
+				&& Cached.ResolvedDocuments.Contains(FPaths::Combine(ResolutionRoot, ManifestPath))
+				&& IFileManager::Get().DirectoryExists(*ResolutionRoot)
+				&& !IsReparsePoint(ResolutionRoot);
+			if (bReusable)
+			{
+				for (const auto& Document : Cached.ResolvedDocuments)
+				{
+					const auto* Parsed = Cached.Documents.Find(Document.Key);
+					FString CurrentText;
+					if (!Parsed || Parsed->Parsed != Document.Value || IsReparsePoint(Document.Key)
+						|| !FFileHelper::LoadFileToString(CurrentText, *Document.Key)
+						|| !Parsed->Text.Equals(CurrentText, ESearchCase::CaseSensitive))
+					{
+						bReusable = false;
+						break;
+					}
+				}
+			}
+			if (bReusable)
+			{
+				for (const auto& Document : Cached.ResolvedHashOnlyDocuments)
+				{
+					FString Text;
+					if (IsReparsePoint(Document.Key) || !FFileHelper::LoadFileToString(Text, *Document.Key)
+						|| Sha256Text(Text) != Document.Value) { bReusable = false; break; }
+				}
+			}
+			if (bReusable)
+			{
+				// Interface references are checked for existence by ReadDirectorySource
+				// without parsing their contents. Preserve that input as well.
+				for (const FString& Path : Cached.ResolvedWorkspace->GetManagedUnitPaths())
+				{
+					if (!IFileManager::Get().FileExists(*FPaths::Combine(ResolutionRoot, Path)))
+					{
+						bReusable = false;
+						break;
+					}
+				}
+			}
+			if (bReusable)
+			{
+				if (!Charge(Resources, {{EUeAgentResourceDimension::Files,
+					Cached.ResolvedDocuments.Num() + Cached.ResolvedHashOnlyDocuments.Num()}},
+					TEXT("semantic_workspace:validated_resolution"), OutError)) return false;
+				OutWorkspace = Cached.ResolvedWorkspace;
+				OutError = Cached.ResolvedDiagnostics;
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_resolve cached=true files=%d total_s=%.6f"),
+					Cached.ResolvedDocuments.Num(), FPlatformTime::Seconds() - ResolveStarted);
+				return true;
+			}
+		}
 		FParsedSource Parsed;
 		TArray<FInventoryRow> Inventory;
 		const bool bRead =
@@ -2766,7 +3331,7 @@ namespace UE::UAI::HjsonWorkspace
 					Resources,
 					Parsed,
 					Inventory,
-					OutError)
+					OutError, ExpectedMode, bAllowManagedUnitEdits)
 				: ReadEmbeddedSource(
 					Source,
 					Resources,
@@ -2777,6 +3342,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return false;
 		}
+		const double SourceReadFinished = FPlatformTime::Seconds();
 
 		FString Schema;
 		FString ModeText;
@@ -2892,12 +3458,79 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			PublicRefToUnitId.Add(Row.PublicRef, Row.UnitId);
 		}
+		TSharedPtr<FResolvedRowsProof> NextRows;
+		TSharedPtr<const FResolvedRowsProof> PriorRows;
+		TArray<uint8> ManifestUtf8;
+		TMap<FString, FString> DocumentHashes;
+		int32 ReusedSemanticRows = 0;
+		if (ActiveReadState && !ResolutionRoot.IsEmpty() && Inventory.Num() <= 200000)
+		{
+			int64 SourceCharacters = 0;
+				for (const auto& Document : ActiveReadState->Documents)
+					if (!Parsed.BaselineProofs.Contains(Document.Value.SourceUnit)) SourceCharacters += Document.Value.Text.Len();
+			const auto* Manifest = ActiveReadState->Documents.Find(FPaths::Combine(ResolutionRoot, ManifestPath));
+			if (Manifest && SourceCharacters <= 256LL * 1024 * 1024)
+			{
+				const FTCHARToUTF8 Utf8(*Manifest->Text);
+				ManifestUtf8.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+				NextRows = MakeShared<FResolvedRowsProof>();
+				NextRows->Root = ResolutionRoot;
+				NextRows->Mode = ExpectedMode;
+				NextRows->bManagedEdits = bAllowManagedUnitEdits;
+				NextRows->ReferenceMapHash = HashReferenceMap(Inventory);
+				NextRows->Baselines = Parsed.BaselineProofs;
+				if (PreviousResolvedRows && PreviousResolvedRows->Root == ResolutionRoot
+					&& PreviousResolvedRows->Mode == ExpectedMode
+					&& PreviousResolvedRows->bManagedEdits == bAllowManagedUnitEdits
+					&& PreviousResolvedRows->ReferenceMapHash == NextRows->ReferenceMapHash)
+					PriorRows = PreviousResolvedRows;
+			}
+		}
 		FWorkspaceError UnitDiagnostics;
 		for (int32 Index = 0;
 			Index < Parsed.UnitRows.Num();
 			++Index)
 		{
 			OutError.Reset();
+			FString RowInputHash;
+			const auto& ProofInventory = Inventory[Index];
+			if (NextRows && ProofInventory.SourceNode && ProofInventory.ContentFiles.IsEmpty()
+				&& !Parsed.ContentReferenceUnits.Contains(ProofInventory.UnitId))
+			{
+				const auto& Span = ProofInventory.SourceNode->GetProvenance();
+				const int64 Start = Span.GetByteStart(), End = Span.GetByteEnd();
+				const FString FullPath = FPaths::Combine(ResolutionRoot, ProofInventory.DocumentPath);
+				const auto* Document = ActiveReadState->Documents.Find(FullPath);
+				if (Document && (!ProofInventory.SourceRowHash.IsEmpty() || (Start >= 0 && End > Start && End <= ManifestUtf8.Num())))
+				{
+					FString* Hash = DocumentHashes.Find(ProofInventory.DocumentPath);
+					if (!Hash) Hash = &DocumentHashes.Add(ProofInventory.DocumentPath, Sha256Text(Document->Text));
+					RowInputHash = (!ProofInventory.SourceRowHash.IsEmpty() ? ProofInventory.SourceRowHash
+						: Sha256(ManifestUtf8.GetData() + Start, End - Start)) + *Hash
+						+ (ProofInventory.EnvelopeRef.IsEmpty() ? FString()
+							: Parsed.BaselineProofs.FindChecked(ProofInventory.EnvelopeRef).ContentHash);
+				}
+			}
+			const auto* Prior = PriorRows ? PriorRows->Rows.Find(ProofInventory.UnitId) : nullptr;
+			if (Prior && !RowInputHash.IsEmpty() && Prior->InputHash == RowInputHash && Prior->Unit.IsSet())
+			{
+				FUeAgentResourceChargeError ResourceError;
+				if (!Resources.TryChargeMany(Prior->Charges, TEXT("semantic_workspace:validated_row"), ResourceError))
+					return FailResource(OutError, ResourceError);
+				Units.Add(Prior->Unit.GetValue());
+				SeenUnitIds.Add(ProofInventory.UnitId);
+				if (Prior->Baseline.IsSet()) BaselineUnits.Add(ProofInventory.UnitId, Prior->Baseline.GetValue());
+				if (Prior->Source.IsSet()) UnitSources.Add(ProofInventory.UnitId, Prior->Source.GetValue());
+				if (Prior->SourceDocument) UnitSourceDocuments.Add(ProofInventory.UnitId, Prior->SourceDocument.ToSharedRef());
+				if (!Prior->KeyedRoots.IsEmpty()) ResolvedKeyedOperationRoots.Add(ProofInventory.UnitId, Prior->KeyedRoots);
+				if (Prior->bEdited) EditedUnitIds.Add(ProofInventory.UnitId);
+				OutError = Prior->Diagnostics;
+				NextRows->Rows.Add(ProofInventory.UnitId, *Prior);
+				++ReusedSemanticRows;
+				continue;
+			}
+			const auto UsageBefore = Resources.Snapshot();
+			const int32 EditedBefore = EditedUnitIds.Num();
 			auto ParseUnit = [&]() -> bool
 			{
 				const FHjsonNode* UnitEnvelope =
@@ -3059,6 +3692,28 @@ namespace UE::UAI::HjsonWorkspace
 				OutError.Locate(Parsed.UnitRows[Index]->GetProvenance());
 				UnitDiagnostics.Append(OutError);
 				UnitDiagnostics.MarkUnchecked(TEXT("unit_semantics"), Inventory[Index].DocumentPath, TEXT("unit_structure_invalid"));
+			}
+			else if (NextRows && !RowInputHash.IsEmpty())
+			{
+				FResolvedRowProof Proof;
+				Proof.InputHash = MoveTemp(RowInputHash);
+				Proof.Unit = Units.Last(); // Before graph-layout derived values below.
+				Proof.bEdited = EditedUnitIds.Num() != EditedBefore;
+				Proof.Diagnostics = OutError;
+				if (const auto* Value = BaselineUnits.Find(ProofInventory.UnitId)) Proof.Baseline = *Value;
+				if (const auto* Value = UnitSources.Find(ProofInventory.UnitId)) Proof.Source = *Value;
+				if (const auto* Value = UnitSourceDocuments.Find(ProofInventory.UnitId)) Proof.SourceDocument = *Value;
+				if (const auto* Value = ResolvedKeyedOperationRoots.Find(ProofInventory.UnitId)) Proof.KeyedRoots = *Value;
+				const auto UsageAfter = Resources.Snapshot();
+				bool bExact = true;
+				for (uint8 D = 0; D <= static_cast<uint8>(EUeAgentResourceDimension::EstimatedMemoryBytes); ++D)
+				{
+					const auto Dimension = static_cast<EUeAgentResourceDimension>(D);
+					const int64 Before = UsageBefore.Consumed(Dimension), After = UsageAfter.Consumed(Dimension);
+					if (After == MAX_int64 || After < Before) { bExact = false; break; }
+					if (After > Before) Proof.Charges.Add(Dimension, After - Before);
+				}
+				if (bExact) NextRows->Rows.Add(ProofInventory.UnitId, MoveTemp(Proof));
 			}
 		}
 		if (UnitDiagnostics.HasErrors())
@@ -3284,6 +3939,16 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			WorkspaceMaterial += TEXT("|") + Path;
 		}
+		TArray<FString> BaselinePaths;
+		Parsed.BaselineProofs.GetKeys(BaselinePaths);
+		BaselinePaths.Sort();
+		for (const FString& Path : BaselinePaths)
+			WorkspaceMaterial += TEXT("|baseline:") + Path + TEXT("|")
+				+ Parsed.BaselineProofs.FindChecked(Path).ContentHash;
+		TArray<FString> InventoryPaths;
+		Parsed.InventoryHashes.GetKeys(InventoryPaths); InventoryPaths.Sort();
+		for (const FString& Path : InventoryPaths)
+			WorkspaceMaterial += TEXT("|inventory:") + Path + TEXT("|") + Parsed.InventoryHashes.FindChecked(Path);
 		TMap<FString, FString> BaselineUnitHashes;
 		for (const FInventoryRow& Row : Inventory)
 		{
@@ -3320,6 +3985,42 @@ namespace UE::UAI::HjsonWorkspace
 			OutError.SetFailure(MoveTemp(Diagnostic));
 			return false;
 		}
+		if (ActiveReadState && !ResolutionRoot.IsEmpty())
+		{
+			auto& Cached = *ActiveReadState;
+			Cached.ResolvedRoot = ResolutionRoot;
+			Cached.ResolvedMode = ExpectedMode;
+			Cached.bResolvedManagedEdits = bAllowManagedUnitEdits;
+			Cached.ResolvedWorkspace = OutWorkspace;
+			Cached.ResolvedDiagnostics = OutError;
+			Cached.ResolvedDocuments.Reset();
+			Cached.ResolvedHashOnlyDocuments.Reset();
+			const FString Prefix = ResolutionRoot + TEXT("/");
+			for (const auto& Document : Cached.Documents)
+			{
+				if (Document.Key.StartsWith(Prefix, ESearchCase::CaseSensitive))
+					Cached.ResolvedDocuments.Add(Document.Key, Document.Value.Parsed);
+			}
+			for (const auto& Document : Cached.HashOnlyDocuments)
+				if (Document.Key.StartsWith(Prefix, ESearchCase::CaseSensitive)
+					&& !Cached.ResolvedDocuments.Contains(Document.Key))
+					Cached.ResolvedHashOnlyDocuments.Add(Document.Key, Document.Value);
+		}
+		if (NextRows) {
+			TMap<FString, FCompletedDocumentRead> CompletedDocuments;
+			if (ActiveReadState) for (const auto& Document : ActiveReadState->Documents) {
+				if (!Document.Key.StartsWith(ResolutionRoot + TEXT("/")) || Document.Value.SourceUnit.StartsWith(TEXT(".uai/"))
+					|| !Document.Value.bExactParseCharges) continue;
+				CompletedDocuments.Add(Document.Key, {Document.Value.SourceUnit, Sha256Text(Document.Value.Text),
+					Document.Value.Parsed, Document.Value.ParseCharges});
+			}
+			PreviousDocumentReads = MoveTemp(CompletedDocuments);
+			PreviousResolvedRows = MoveTemp(NextRows);
+		}
+		else PreviousResolvedRows.Reset();
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_resolve cached=false units=%d reused_rows=%d source_read_s=%.6f semantic_s=%.6f total_s=%.6f"),
+			OutWorkspace->GetModel()->GetUnits().Num(), ReusedSemanticRows, SourceReadFinished - ResolveStarted,
+			FPlatformTime::Seconds() - SourceReadFinished, FPlatformTime::Seconds() - ResolveStarted);
 		return true;
 	}
 

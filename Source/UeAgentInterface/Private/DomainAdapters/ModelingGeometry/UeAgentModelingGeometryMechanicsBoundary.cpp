@@ -44,6 +44,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry
 			TEXT("mesh.primitive.ramp.create"), TEXT("mesh.primitive.ramp_corner.create"),
 			TEXT("mesh.primitive.sphere.create"), TEXT("mesh.primitive.stairs.create"),
 			TEXT("mesh.topology.boolean"), TEXT("mesh.topology.edges.bevel"),
+			TEXT("mesh.topology.components.remove"), TEXT("mesh.topology.components.translate"),
 			TEXT("mesh.topology.edges.weld"), TEXT("mesh.topology.faces.duplicate"),
 			TEXT("mesh.topology.faces.extrude"), TEXT("mesh.topology.faces.inset"),
 			TEXT("mesh.topology.faces.offset"), TEXT("mesh.topology.faces.push_pull"),

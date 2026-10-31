@@ -63,6 +63,10 @@ namespace UeAgentAuthoringState
 	struct UEAGENTINTERFACE_API FEditablePropertyReadOptions
 	{
 		FString SemanticId = TEXT("core.property");
+		/** Optional immutable identity-builder scope, supplied by its domain owner.
+		 * Equal scope guarantees equal snapshot identity for the same property path.
+		 * Selection/support and current limits are always evaluated afresh. */
+		FString RequestIdentityScope;
 		FReadLimits Limits;
 		TSet<FName> ExcludedProperties;
 		TFunction<bool(const FProperty* Property, const void* ValuePtr, const UObject* Owner)> IncludeProperty;
@@ -144,6 +148,9 @@ namespace UeAgentAuthoringState
 
 	struct UEAGENTINTERFACE_API FStateEntry
 	{
+		// Identity of an immutable, actually captured JSON/metadata observation.
+		// Writable copies drop it; it never substitutes for a current native read.
+		TSharedPtr<const uint8> Observation;
 		FString SemanticId;
 		UeAgentAuthoringIdentity::FCanonicalIdentity TargetIdentity;
 		UeAgentAuthoringTypeDescriptors::FDescriptor Type;
@@ -190,11 +197,20 @@ namespace UeAgentAuthoringState
 			const FString& TargetCanonicalKey,
 			FStateEntry& OutEntry) const;
 		TArray<FStateEntry> CopyEntries() const;
+		/** Immutable observation view; callers must not mutate referenced JSON. */
+		const TArray<FStateEntry>& GetEntries() const { return Entries; }
+		/** Replace already captured identities, retaining the complete baseline. */
+		bool TryOverlay(const FStateSnapshot& ActualEntries, FStateSnapshot& OutSnapshot,
+			FDiagnostic& OutError, bool bReuseIdenticalObservations = false) const;
 		/** Release native property storage while retaining the canonical snapshot and metadata. */
 		void ReleaseNativeValues();
+		/** Domain lifecycle may retain only storage whose field/type lifetime it owns. */
+		void ReleaseNativeValuesIf(TFunctionRef<bool(const FStateEntry&)> ShouldRelease);
 		TSharedRef<FJsonObject> ToJsonObject() const;
 
 	private:
+		bool TryOverlayInPlace(const FStateSnapshot& ActualEntries, FDiagnostic& OutError,
+			bool bReuseIdenticalObservations);
 		TArray<FStateEntry> Entries;
 		friend class FSnapshotBuilder;
 	};

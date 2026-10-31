@@ -42,6 +42,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 		IDomainOperationInvocationFactory> GetOperationInvocationFactory(
 		const FString& CommandId);
 
+	/** Prepare native package publishers with the process-owned journal/fence,
+	 * so their recovery handles use the same maintenance entry points. */
+	UEAGENTINTERFACE_API bool TryPrepareDurableJournal(
+		const AssetDurable::FAssetDurableRequest& Request,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		AssetDurable::FAssetDurableSessionPtr& OutSession,
+		AssetDurable::FAssetDurableError& OutError);
+
 	UEAGENTINTERFACE_API bool TryInspectDurableJournal(
 		const FString& JournalId,
 		ContextResource::FUeAgentResourceTracker& Resources,

@@ -1,4 +1,6 @@
 #include "DomainAdapters/WorldSpatial/UeAgentLevelWorldDomainMechanics.h"
+#include "DomainAdapters/WorldRead/SceneAnalysis/UeAgentSceneAnalysis.h"
+#include "Core/HjsonWorkspace/UeAgentWorkspaceRefresh.h"
 #include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
@@ -27,6 +29,8 @@
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringRegistration.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringSpatial.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
+#include "Domains/Level/Authoring/UeAgentLevelComponentCandidates.h"
+#include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Editor.h"
 #include "Engine/World.h"
@@ -1042,7 +1046,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			if (!State.IsValid()) return Reject(TEXT("/"), MakeShared<FJsonValueNull>());
 			if (bActorState)
 			{
-				for (const TCHAR* Field : { TEXT("label"), TEXT("folder_path"), TEXT("tags"), TEXT("attachment") })
+				for (const TCHAR* Field : { TEXT("label"), TEXT("folder_path"), TEXT("tags"), TEXT("attachment"), TEXT("level") })
 				{
 					if (const TSharedPtr<FJsonValue> Value = State->TryGetField(Field); Value.IsValid())
 						OutExtension->SetField(Field, Value);
@@ -1116,12 +1120,13 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				const FString AuthoringKey = Identity.GetSelector(TEXT("authoring_target_identity_key"));
 				const FSemanticUnit* SourceUnit = nullptr;
 				bool bAmbiguousSource = false;
-				for (const FSemanticUnit& Unit : Workspace->GetModel()->GetUnits())
+				auto SourceUnits = Workspace->GetModel()->FindUnitsForTargetIdentity(Identity.GetCanonicalKey());
+				if (!AuthoringKey.IsEmpty() && AuthoringKey != Identity.GetCanonicalKey())
+					SourceUnits.Append(Workspace->GetModel()->FindUnitsForTargetIdentity(AuthoringKey));
+				for (const FSemanticUnit* Unit : SourceUnits)
 				{
-					if (Unit.GetTargetIdentityKey() != Identity.GetCanonicalKey()
-						&& (AuthoringKey.IsEmpty() || Unit.GetTargetIdentityKey() != AuthoringKey)) continue;
 					if (SourceUnit) { bAmbiguousSource = true; break; }
-					SourceUnit = &Unit;
+					SourceUnit = Unit;
 				}
 				const FString SourceUnitId = !bAmbiguousSource && SourceUnit ? SourceUnit->GetUnitId() : FString();
 				ON_SCOPE_EXIT
@@ -1142,8 +1147,9 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					Identity.GetSemanticId() == UeAgentLevelAuthoring::ActorStateSemanticId;
 				const bool bComponentState =
 					Identity.GetSemanticId() == UeAgentLevelAuthoring::ComponentStateSemanticId;
+				const bool bWorldState = Identity.GetSemanticId() == UeAgentLevelAuthoring::WorldStateSemanticId;
 				if ((!PropertyPath || PropertyPath->IsEmpty())
-					&& !bActorState && !bComponentState)
+					&& !bActorState && !bComponentState && !bWorldState)
 				{
 					auto Error = LevelNativeFact(TEXT("level_semantic_change_kind_unsupported"),
 						TEXT("The semantic change is neither a property update nor a supported actor or component state."),
@@ -1222,6 +1228,29 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					Target->SetStringField(TEXT("actor_guid"), ActorGuid);
 				}
 				Unit->SetObjectField(TEXT("target"), Target);
+				}
+				if (bWorldState)
+				{
+					if (Value->Type != EJson::Object) return Fail(OutError, LevelInputFact(
+						TEXT("level_semantic_world_state_invalid"), TEXT("World state must be an object."), TEXT("/"), Value,
+						MakeShared<FJsonValueString>(TEXT("object")), WorldPath));
+					auto Extension = CopyObject(Value->AsObject());
+					const TSharedPtr<FJsonObject>* Levels = nullptr;
+					if (Extension->TryGetObjectField(TEXT("streaming_levels"), Levels))
+						for (const auto& Pair : (*Levels)->Values)
+						{
+							if (Pair.Value->Type != EJson::Object) continue;
+							const auto Row = Pair.Value->AsObject();
+							const TSharedPtr<FJsonObject>* Transform = nullptr;
+							if (Row->TryGetObjectField(TEXT("transform"), Transform))
+							{
+								TSharedPtr<FJsonObject> Converted;
+								if (!TransformForLevel(*Transform, true, WorldPath, TEXT("/streaming_levels/transform"), Converted, OutError)) return false;
+								Row->SetObjectField(TEXT("transform"), Converted);
+							}
+						}
+					Unit->SetObjectField(TEXT("provider_extension"), Extension);
+					continue;
 				}
 				if (bActorState || bComponentState)
 				{
@@ -1398,7 +1427,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 						TSharedRef<FJsonObject> Extension = MakeShared<FJsonObject>();
 						for (const TCHAR* Field : {
 							TEXT("candidate"), TEXT("label"), TEXT("folder_path"),
-							TEXT("tags"), TEXT("attachment"),
+							TEXT("tags"), TEXT("attachment"), TEXT("level"),
 							TEXT("placement_context")})
 						{
 							if (const TSharedPtr<FJsonValue> Value = Row->TryGetField(Field);
@@ -1449,6 +1478,114 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					}
 				}
 			}
+			// Component membership is authored in an Actor-owned collection. Existing
+			// component state/property documents keep their original native bindings.
+			for (const FSemanticUnit& Collection : Workspace->GetModel()->GetUnits())
+			{
+				if (Collection.GetRole() != TEXT("level_components")
+					|| !Workspace->GetEditedUnitIds().IsSet()
+					|| !Workspace->GetEditedUnitIds()->Contains(Collection.GetUnitId())) continue;
+				const auto* Owner = Workspace->GetModel()->FindUnit(Collection.GetOwnerRef());
+				const auto* Components = Collection.GetValues().Find(TEXT("components"));
+				if (!Owner || !Components || (*Components)->GetKind() != EUeAgentValueKind::Object)
+					return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_collection_invalid"),
+						TEXT("The Level component collection has no captured Actor owner or component map."), TEXT("component_project")));
+				auto OwnerString = [Owner](const TCHAR* Field) {
+					const auto* Value = Owner->GetValues().Find(Field);
+					return Value && (*Value)->GetKind() == EUeAgentValueKind::String ? (*Value)->GetText() : FString();
+				};
+				const FString ManagedId = OwnerString(TEXT("managed_id"));
+				const FString ActorGuid = OwnerString(TEXT("actor_guid"));
+				const FString OwnerKey = WorkspaceWorldPath + TEXT("|") + (ManagedId.IsEmpty() ? ActorGuid : ManagedId) + TEXT("|");
+				for (const auto& ComponentRow : (*Components)->GetObjectItems())
+				{
+					const FString Pointer = TEXT("/components/") + EscapeJsonPointerSegment(ComponentRow.Key);
+					ON_SCOPE_EXIT {
+						if (!OutError.HasErrors()) return;
+						auto Error = OutError.GetDiagnostic();
+						SupplementLevelSemanticSource(Workspace, Collection.GetUnitId(), Pointer, Error);
+						OutError.SetFailure(MoveTemp(Error));
+					};
+					Contract::FDiagnostic Error;
+					TSharedPtr<FJsonValue> Value;
+					if (!StateSemantic::CanonicalJson::TryToJsonValue(ComponentRow.Value.Get(), Value, Error)) return Fail(OutError, Error);
+					if (!Value.IsValid() || Value->Type != EJson::Object)
+						return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_row_invalid"), TEXT("Each component row must be an object."), TEXT("component_project")));
+					const auto Row = Value->AsObject();
+					if (Row->HasField(TEXT("parent")))
+						return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_parent_shape_invalid"),
+							TEXT("Level components use attachment.parent_component; parent belongs to the Blueprint component tree."), TEXT("component_project")));
+					FString Operation, ComponentName, ClassPath, AssetOverride;
+					Row->TryGetStringField(TEXT("operation"), Operation);
+					Row->TryGetStringField(TEXT("component_name"), ComponentName);
+					Row->TryGetStringField(TEXT("component_class"), ClassPath);
+					if (Operation == TEXT("create"))
+					{
+						ComponentName = ComponentRow.Key;
+						FText NameError;
+						if (ComponentName.IsEmpty() || !FName::IsValidXName(ComponentName, INVALID_OBJECTNAME_CHARACTERS, &NameError))
+							return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_name_invalid"),
+								TEXT("The component map key must be a valid UE object name: ") + NameError.ToString(), TEXT("component_project")));
+						const TSharedPtr<FJsonObject>* Candidate = nullptr;
+						if (!Row->TryGetObjectField(TEXT("candidate"), Candidate))
+							return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_candidate_required"), TEXT("A new component requires a native candidate name."), TEXT("component_project")));
+						if (!UeAgentLevelAuthoring::ResolveComponentCreationCandidate(*Candidate, ClassPath, AssetOverride, Error)) return Fail(OutError, Error);
+					}
+					else if (Operation != TEXT("update") && Operation != TEXT("remove"))
+						return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_operation_invalid"), TEXT("Expected a projected component create, update or remove."), TEXT("component_project")));
+					FString AuthoredClass;
+					if (Row->TryGetStringField(TEXT("class"), AuthoredClass) && AuthoredClass != ClassPath)
+						return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_class_conflict"), TEXT("class is captured context and must match the selected component class; replace membership to change type."), TEXT("component_project")));
+					const FString Key = OwnerKey + ComponentName;
+					if (const auto ActorOperation = UnitsByKey.FindRef(OwnerKey); ActorOperation.IsValid()
+						&& ActorOperation->GetStringField(TEXT("operation")) == TEXT("remove"))
+						return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_owner_remove_conflict"), TEXT("Component edits conflict with removal of their owning Actor."), TEXT("component_project")));
+					if (Operation == TEXT("remove") && UnitsByKey.Contains(Key))
+						return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_remove_edit_conflict"), TEXT("Removing a component conflicts with state or property edits to that component."), TEXT("component_project")));
+					auto Target = MakeShared<FJsonObject>();
+					Target->SetStringField(TEXT("world_path"), WorkspaceWorldPath);
+					Target->SetStringField(ManagedId.IsEmpty() ? TEXT("owner_actor_guid") : TEXT("owner_managed_id"), ManagedId.IsEmpty() ? ActorGuid : ManagedId);
+					Target->SetStringField(TEXT("component_name"), ComponentName);
+					Target->SetStringField(TEXT("component_class"), ClassPath);
+					auto& Projected = UnitsByKey.FindOrAdd(Key);
+					if (!Projected.IsValid()) Projected = MakeShared<FJsonObject>();
+					Projected->SetStringField(TEXT("operation"), Operation);
+					Projected->SetObjectField(TEXT("target"), Target);
+					ActorSourcesByKey.Add(Key, {Collection.GetUnitId(), Pointer});
+					if (Operation == TEXT("remove")) continue;
+					auto Extension = MakeShared<FJsonObject>();
+					if (!TryBuildLevelProviderExtension(Row, false, ComponentName, Extension, OutError)) return false;
+					if (!AssetOverride.IsEmpty()) Extension->SetStringField(TEXT("asset_override"), AssetOverride);
+					const TSharedPtr<FJsonObject>* ExistingExtension = nullptr;
+					if (Projected->TryGetObjectField(TEXT("provider_extension"), ExistingExtension))
+					{
+						TSharedPtr<FJsonObject> Merged;
+						if (!TryMergeKeyedItemStateEdits(CapturedExtensionsByKey.FindRef(Key), *ExistingExtension, Extension, Merged, Error)) return Fail(OutError, Error);
+						Projected->SetObjectField(TEXT("provider_extension"), Merged);
+					}
+					else Projected->SetObjectField(TEXT("provider_extension"), Extension);
+					if (Row->HasField(TEXT("properties")))
+					{
+						if (Operation != TEXT("create"))
+							return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_initial_properties_only"), TEXT("Use the component's properties.hjson for existing property edits; inline properties initialize new components."), TEXT("component_project")));
+						TSharedPtr<FJsonObject> Document;
+						TArray<TSharedPtr<FJsonValue>> Properties;
+						if (!UeAgentDetailsAuthoringService::ReadPropertyPayload(Row, TEXT("properties"), Document, Error)
+							|| !UeAgentDetailsAuthoringService::DecodePropertiesDocument(Document, Properties, Error)) return Fail(OutError, Error);
+						PropertiesByKey.FindOrAdd(Key).Append(Properties);
+					}
+				}
+			}
+			// A separate component property file may be edited without its collection.
+			for (const auto& Pair : UnitsByKey)
+			{
+				const auto Target = Pair.Value->GetObjectField(TEXT("target"));
+				FString ComponentName;
+				if (!Target->TryGetStringField(TEXT("component_name"), ComponentName)) continue;
+				const FString OwnerKey = Pair.Key.LeftChop(ComponentName.Len());
+				if (const auto Owner = UnitsByKey.FindRef(OwnerKey); Owner.IsValid() && Owner->GetStringField(TEXT("operation")) == TEXT("remove"))
+					return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("level_component_owner_remove_conflict"), TEXT("Component edits conflict with removal of their owning Actor."), TEXT("component_project")));
+			}
 			if (WorkspaceWorldPath.IsEmpty())
 			{
 				return Fail(OutError, LevelNativeFact(TEXT("level_semantic_world_path_missing"),
@@ -1486,6 +1623,36 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 						TEXT("component_name"),
 						ComponentName);
 				}
+				if (Workspace->GetModel()->GetProfileId() == UeAgentLevelAuthoring::SceneEditingProfileId)
+				{
+					for (const auto& Property : Properties)
+					{
+						const TSharedPtr<FJsonObject>* Row = nullptr;
+						FString PropertyPath;
+						if (!Property.IsValid() || !Property->TryGetObject(Row) || !Row->IsValid()
+							|| !(*Row)->TryGetStringField(TEXT("property_path"), PropertyPath)) continue;
+						if (UeAgentLevelAuthoring::IsSceneEditingProperty(PropertyPath, !ComponentName.IsEmpty())
+							|| UeAgentLevelAuthoring::RequiresSceneEditingClassCheck(PropertyPath, !ComponentName.IsEmpty())) continue;
+						auto Error = Contract::FDiagnostic::Failure(TEXT("level_scene_editing_property_unsupported"),
+							TEXT("This Actor/Component property is outside scene_editing; use a full llm_authoring workspace to edit it."), TEXT("level_profile"));
+						Error.PropertyPath = PropertyPath;
+						Error.ActualValue = MakeShared<FJsonValueString>(PropertyPath);
+						if (const auto* Source = ActorSourcesByKey.Find(Pair.Key))
+							SupplementLevelSemanticSource(Workspace, Source->Key, Source->Value + TEXT("/properties"), Error);
+						return Fail(OutError, MoveTemp(Error));
+					}
+					const TSharedPtr<FJsonObject>* Extension = nullptr;
+					if (!ComponentName.IsEmpty() && Pair.Value->TryGetObjectField(TEXT("provider_extension"), Extension)
+						&& (*Extension)->HasField(TEXT("pcg")))
+					{
+						auto Error = Contract::FDiagnostic::Failure(TEXT("level_scene_editing_state_unsupported"),
+							TEXT("PCG authoring state is outside scene_editing; use a full llm_authoring workspace to edit it."), TEXT("level_profile"));
+						Error.PropertyPath = TEXT("pcg");
+						if (const auto* Source = ActorSourcesByKey.Find(Pair.Key))
+							SupplementLevelSemanticSource(Workspace, Source->Key, Source->Value + TEXT("/pcg"), Error);
+						return Fail(OutError, MoveTemp(Error));
+					}
+				}
 				const FString UnitPath = ComponentName.IsEmpty()
 					? FString::Printf(
 						TEXT("actors/items/actor_%04d/actor.hjson"),
@@ -1505,7 +1672,9 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					const auto* Binding = Bindings.Find(UnitPath);
 					if (!Binding) return Location;
 					FString Relative = Pointer;
-					if (Relative.StartsWith(TEXT("/properties/"))) return Location;
+					// Captured property edits carry their own exact source. Initial
+					// component properties instead originate in this collection row.
+					if (Relative.StartsWith(TEXT("/properties/")) && !Binding->Value.StartsWith(TEXT("/components/"))) return Location;
 					Relative.RemoveFromStart(TEXT("/provider_extension"));
 					Relative.RemoveFromStart(TEXT("/target"));
 					FString SourcePointer = Binding->Value + (Relative.IsEmpty() || Relative == TEXT("/") ? FString() : Relative);
@@ -1522,27 +1691,32 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 						if (!SourcePointer.FindLastChar(TEXT('/'), Slash) || Slash < Binding->Value.Len()) break;
 						SourcePointer.LeftInline(Slash);
 					}
+					// A removed captured row has no authored node. Point at the
+					// collection file rather than leaking the generated native bundle.
+					if (const auto* Source = Workspace->GetUnitSources().Find(Binding->Key))
+					{
+						FWorkspaceError Located;
+						Located.Locate(*Source);
+						Location = Located.GetDiagnostic().Source;
+						Location.JsonPath = Binding->Value;
+					}
 					return Location;
 				};
 			}
 			return true;
 		}
 
-	namespace
+	bool TryPrepareLevelWorkspace(UWorld& World, const FString& WorkspaceRoot, const FString& ProfileId,
+		Composition::HjsonImport::FPreparedAuthoringImportPtr& OutPrepared,
+		TSharedRef<FJsonObject>& OutBundle, FWorkspaceError& OutError,
+		TFunction<Contract::FSourceLocation(const FString&, const FString&)>* OutSourceResolver,
+		UeAgentLevelAuthoring::FLevelAuthoringCapture* OutCapture)
 	{
-
-		bool ApplySemanticWorkspace(
-			UWorld& World,
-			const FString& WorkspaceRoot,
-			const FString& RequestId,
-			const UeAgentLevelAuthoring::FWorkspaceApplyOptions& Options,
-			UeAgentLevelAuthoring::FWorkspaceApplyResult& OutResult,
-			FWorkspaceError& OutError)
-		{
+			if (!EnsureAuthoringRegistered(OutError)) return false;
 			UeAgentLevelAuthoring::FLevelAuthoringCapture Capture;
 			UE::UAI::Contract::FDiagnostic CaptureError;
 			if (!UeAgentLevelAuthoring::TryCaptureLevelAuthoringState(
-					World, Capture, CaptureError)
+					World, Capture, CaptureError, ProfileId)
 				|| !Capture.CanonicalSnapshot.IsValid()
 				|| !Capture.Model.IsValid())
 			{
@@ -1555,7 +1729,6 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				return false;
 			}
 			FUeAgentResourceTracker Resources = MakeSemanticWorkspaceResourceTracker();
-			UE::UAI::Composition::HjsonImport::FPreparedAuthoringImportPtr Prepared;
 			UE::UAI::Composition::HjsonImport::FSemanticWorkspaceImportError ImportError;
 			const Contract::FUeAgentCallerContext Caller(
 				TEXT("level-world-semantic-import"),
@@ -1572,26 +1745,55 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					TEXT("sha256:0000000000000000000000000000000000000000000000000000000000000000")),
 				TEXT("level-semantic-import"),
 				TEXT("level-semantic-import"),
-				Caller, false, FString(), FString(), Resources, Prepared, ImportError)
-			|| !Prepared.IsValid())
+				Caller, false, FString(), FString(), Resources, OutPrepared, ImportError)
+			|| !OutPrepared.IsValid())
 		{
 			OutError.SetFailure(!ImportError.IsEmpty() ? MoveTemp(ImportError) : LevelNativeFact(TEXT("level_semantic_preparation_missing"),
 				TEXT("Semantic workspace preparation returned no prepared import."), TEXT("/semantic_import/prepared"),
 				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), World.GetPathName()));
 			return false;
 		}
+		if (!TryBuildLevelSemanticWorkspaceBundle(OutPrepared->GetWorkspace(),
+			OutPrepared->GetChangeSetDraft().GetChanges(), OutBundle, OutError, OutSourceResolver)) return false;
+		if (OutCapture) *OutCapture = MoveTemp(Capture);
+		return true;
+	}
+
+	namespace
+	{
+
+		bool ApplySemanticWorkspace(
+			UWorld& World,
+			const FString& WorkspaceRoot,
+			const FString& RequestId,
+			const UeAgentLevelAuthoring::FWorkspaceApplyOptions& Options,
+			UeAgentLevelAuthoring::FWorkspaceApplyResult& OutResult,
+			FWorkspaceError& OutError,
+			const FString& WorkspaceProfileId, const FString& AnalysisRef, bool& bMutationStarted)
+		{
+		Composition::HjsonImport::FPreparedAuthoringImportPtr Prepared;
 		TSharedRef<FJsonObject> Bundle = MakeShared<FJsonObject>();
 		TFunction<Contract::FSourceLocation(const FString&, const FString&)> SourceResolver;
-		if (!TryBuildLevelSemanticWorkspaceBundle(
-			Prepared->GetWorkspace(), Prepared->GetChangeSetDraft().GetChanges(),
-			Bundle, OutError, &SourceResolver)) return false;
+		UeAgentLevelAuthoring::FLevelAuthoringCapture BeforeCapture;
+		if (!TryPrepareLevelWorkspace(World, WorkspaceRoot, WorkspaceProfileId,
+			Prepared, Bundle, OutError, &SourceResolver, Options.bPersistentReadback ? &BeforeCapture : nullptr)) return false;
+		if (!AnalysisRef.IsEmpty())
+		{
+			Contract::FDiagnostic AnalysisError;
+			if (!SceneAnalysis::ValidateForApply(World, WorkspaceRoot, AnalysisRef, *Prepared, Bundle, AnalysisError))
+			{ OutError.SetFailure(AnalysisError); return false; }
+		}
 		auto Source = UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeInlineObject(
 			Bundle, TEXT("inline://semantic-level-workspace"));
 		Source.ResolveSource = MoveTemp(SourceResolver);
+		if (Options.bPersistentReadback) UeAgentLevelAuthoring::PrepareLevelCaptureReuse(World, BeforeCapture, WorkspaceProfileId);
+		auto ApplyOptions = Options;
+		ApplyOptions.AuthoringProfileId = Prepared->GetWorkspace()->GetModel()->GetProfileId();
+		bMutationStarted = true;
 		const bool bApplied = UeAgentLevelAuthoring::ApplyWorkspaceSource(
 			World,
 			Source,
-			Options, OutResult, RequestId);
+			ApplyOptions, OutResult, RequestId);
 		return bApplied;
 		}
 
@@ -1985,7 +2187,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			}
 
 			TMap<FString, UObject*> Objects;
-			for (TActorIterator<AActor> It(&World); It; ++It)
+			for (TActorIterator<AActor> It(&World, AActor::StaticClass(), EActorIteratorFlags::SkipPendingKill); It; ++It)
 			{
 				AActor* Actor = *It;
 				if (!IsValid(Actor))
@@ -2099,7 +2301,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				WorldPartitionLoadResult;
 			RetainWorldPartitionActorsForAuthoring(
 				World, WorldPartitionLoadResult);
-			for (TActorIterator<AActor> It(&World); It; ++It)
+			for (TActorIterator<AActor> It(&World, AActor::StaticClass(), EActorIteratorFlags::SkipPendingKill); It; ++It)
 			{
 				if (*It) Actors.AddUnique(*It);
 			}
@@ -2173,6 +2375,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				ActorObject->SetStringField(TEXT("type"),
 					Actor->GetClass()->GetPathName());
 				ActorObject->SetStringField(TEXT("label"), Actor->GetActorLabel());
+				ActorObject->SetStringField(TEXT("level"), Actor->GetLevel()->GetPackage()->GetName());
 				ActorObject->SetStringField(TEXT("folder_path"),
 					UeAgentLevelAuthoring::GetActorFolderPathText(*Actor));
 				ActorObject->SetObjectField(TEXT("transform"),
@@ -2307,7 +2510,8 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			UWorld& World,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport)
 		{
 			if (!EnsureAuthoringRegistered(OutError))
 			{
@@ -2336,8 +2540,8 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 
 			UeAgentLevelAuthoring::FLevelExportResult ExportResult;
 			UE::UAI::Contract::FDiagnostic ExportError;
-			if (!UeAgentLevelAuthoring::ExportLevelWorkspace(World, WorkspacePath, ProfileId, ExportResult)
-				|| !ExportResult.IsWritten())
+			if (!UeAgentLevelAuthoring::ExportLevelWorkspace(World, WorkspacePath, ProfileId, ExportResult, PreparedExport)
+				|| (PreparedExport ? !PreparedExport->Plan.IsValid() : !ExportResult.IsWritten()))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic.IsEmpty() ? LevelNativeFact(TEXT("level_world_domain_export_failed"),
 					TEXT("Level workspace export did not produce a written workspace receipt."), TEXT("/workspace_export/written"),
@@ -2345,6 +2549,12 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
                 return false;
 			}
 
+			if (PreparedExport)
+			{
+				const TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+				Response->SetStringField(TEXT("status"), TEXT("prepared"));
+				return CanonicalObject(Response, OutPayload, OutError);
+			}
 			TSharedRef<FJsonObject> Response =
 				UeAgentExportWorkspaceWriter::
 					MakePublicWorkspaceSuccessResult(ExportResult.PublisherReceipt);
@@ -2352,7 +2562,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 		}
 
 		bool FinalizeWorldImport(const FString& Target, const FString& PackageName,
-			UWorld& World, FString& OutPayload, FWorkspaceError& OutError)
+			UWorld& World, FString& OutPayload, FWorkspaceError& OutError, const FString& AnalysisRef)
 		{
 			FString Revision, Readback;
 			if (!StableRevision(PackageName, Revision, OutError)
@@ -2368,14 +2578,21 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			Receipt.bNativeUpdateSettled = true;
 			Receipt.bPackageSaved = true;
 			Receipt.PersistenceReceiptId = TEXT("map-reload:") + PackageName;
-			return DomainAuthoring::TryBuildImportSuccessPayload(ProviderId, Target, Revision,
-				Receipt, ReadbackObject, MakeShared<FJsonObject>(), OutPayload, OutError);
+			if (!DomainAuthoring::TryBuildImportSuccessPayload(ProviderId, Target, Revision,
+				Receipt, ReadbackObject, MakeShared<FJsonObject>(), OutPayload, OutError)) return false;
+			if (AnalysisRef.IsEmpty()) return true;
+			TSharedPtr<FJsonObject> PayloadObject;
+			if (!Json::TryParseObject(OutPayload, PayloadObject, JsonError))
+				return Fail(OutError, AsLevelNativeResult(MoveTemp(JsonError)));
+			PayloadObject->SetObjectField(TEXT("scene_analysis"), SceneAnalysis::ReadApplied(World, AnalysisRef));
+			return CanonicalObject(PayloadObject.ToSharedRef(), OutPayload, OutError);
 		}
 
 		bool ImportWorld(const FString& Target, const FString& PackageName,
 			const FString& ObjectName, const FString& ExpectedRevision,
 			const DomainAuthoring::FResolvedDomainHjsonDocument& DocumentSource, const FString& SemanticWorkspaceRoot,
-			FString& OutPayload, FWorkspaceError& OutError, const FString& RequestId)
+			FString& OutPayload, FWorkspaceError& OutError, const FString& RequestId,
+			const FString& WorkspaceProfileId, const FString& AnalysisRef)
 		{
 			const auto& Document = DocumentSource.Root;
 			DomainAuthoring::FScopedDomainHjsonDiagnosticSource DiagnosticSource(DocumentSource, OutError);
@@ -2585,12 +2802,16 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			Options.bDryRun = false;
 			Options.bUseEditorTransaction = true;
 			Options.bPersistentReadback = bPersistentUpdate;
+			Options.AuthoringProfileId = WorkspaceProfileId;
 			if (bPersistentUpdate)
 			{
 				Options.FinalReadback = [&](UeAgentAuthoringOperationApply::FOperationFailure& Failure)
 				{
 					UWorld* Reloaded = FindObject<UWorld>(nullptr, *(PackageName + TEXT(".") + ObjectName));
-					if (Reloaded && FinalizeWorldImport(Target, PackageName, *Reloaded, OutPayload, OutError)) return true;
+					if (Reloaded && FinalizeWorldImport(Target, PackageName, *Reloaded, OutPayload, OutError, AnalysisRef))
+					{
+						return true;
+					}
 					Failure.Diagnostic = OutError.HasErrors() ? OutError.GetDiagnostic() : LevelNativeFact(TEXT("level_world_domain_reload_failed"),
 						TEXT("The saved world object was not found for final readback."), TEXT("/final_readback/world_loaded"),
 						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target);
@@ -2604,15 +2825,15 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					};
 			}
 			UeAgentLevelAuthoring::FWorkspaceApplyResult ApplyResult;
-			bNativeMutationStarted = true;
 			bool bApplied = false;
 			if (!SemanticWorkspaceRoot.IsEmpty())
 			{
 				bApplied =
-					ApplySemanticWorkspace(*World, SemanticWorkspaceRoot, RequestId, Options, ApplyResult, OutError);
+					ApplySemanticWorkspace(*World, SemanticWorkspaceRoot, RequestId, Options, ApplyResult, OutError, WorkspaceProfileId, AnalysisRef, bNativeMutationStarted);
 			}
 			else
 			{
+				bNativeMutationStarted = true;
 				auto Source = UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeInlineObject(Bundle, TEXT("inline://level-world-domain"));
 				Source.ResolveSource = [DocumentSource, SourceBindings](const FString& UnitPath, const FString& Pointer)
 				{
@@ -2692,7 +2913,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
                               MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), PackageName) : MoveTemp(Diagnostic));
                           return false;
                         }
-                        if (!FinalizeWorldImport(Target, PackageName, *World, OutPayload, OutError)) {
+                        if (!FinalizeWorldImport(Target, PackageName, *World, OutPayload, OutError, AnalysisRef)) {
                           return false;
                         }
                         WorldPartitionLoadResult.ActorReferences.Reset();
@@ -2781,7 +3002,9 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
 		FWorkspaceError& OutError,
-		const FString& RequestId)
+		const FString& RequestId,
+		HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport,
+		const FString& WorkspaceProfileId)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -2854,8 +3077,16 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			DomainAuthoring::FResolvedDomainHjsonDocument Document;
 			if (SemanticWorkspaceRoot.IsEmpty()
 				&& !ParseDocument(Target, CanonicalParamsJson, Document, OutError)) return false;
+			FString AnalysisRef;
+			if (Params->HasField(TEXT("analysis_ref")))
+			{
+				if (!Params->TryGetStringField(TEXT("analysis_ref"), AnalysisRef) || AnalysisRef.IsEmpty()
+					|| SemanticWorkspaceRoot.IsEmpty() || WorkspaceProfileId != TEXT("scene_editing"))
+					return Fail(OutError, Contract::FDiagnostic::Failure(TEXT("scene_analysis_binding_invalid"),
+						TEXT("analysis_ref requires a nonempty reference and a Level scene_editing workspace."),TEXT("scene_analysis")));
+			}
 			return ImportWorld(Target, PackageName, ObjectName, ExpectedRevision,
-				Document, SemanticWorkspaceRoot, OutPayloadJson, OutError, RequestId);
+				Document, SemanticWorkspaceRoot, OutPayloadJson, OutError, RequestId, WorkspaceProfileId, AnalysisRef);
 		}
 		if (!CommandId.StartsWith(TEXT("content_graph.")))
 		{
@@ -2875,7 +3106,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			if (CommandId == TEXT("content_graph.export_workspace"))
 			{
 				bCaptured = ExportWorldWorkspace(
-					*World, Params, OutPayloadJson, OutError);
+					*World, Params, OutPayloadJson, OutError, PreparedExport);
 			}
 			else
 			{

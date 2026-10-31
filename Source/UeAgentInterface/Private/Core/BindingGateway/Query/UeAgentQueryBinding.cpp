@@ -1122,7 +1122,7 @@ namespace UE::UAI::BindingGateway::Query
 		{
 			// Presence belongs to the native observation. A returned empty business
 			// container is a result, distinct from an option that was not requested.
-			if (Value.IsValid() && (Field.bAuthoringValue
+			if (Value.IsValid() && (Field.bAuthoringValue || (Field.bNullable && Value->IsNull())
 				|| (!Value->IsNull() && (Field.bArray || Field.bScalarMap || Field.bStructuredValue))))
 			{
 				return false;
@@ -1164,6 +1164,7 @@ namespace UE::UAI::BindingGateway::Query
 			if (Field.bAuthoringValue) return Source;
 			if (Source->IsNull())
 			{
+				if (Field.bNullable) return Source;
 				if (Field.bRequired) return Invalid(TEXT("A required query result field is null."));
 				return nullptr;
 			}
@@ -1572,7 +1573,7 @@ namespace UE::UAI::BindingGateway::Query
 						const TSharedPtr<FJsonValue>* FieldValue =
 							Source->Values.Find(Field.Selector);
 						if (!FieldValue || !FieldValue->IsValid()
-							|| (*FieldValue)->IsNull())
+							|| ((*FieldValue)->IsNull() && !Field.bNullable))
 						{
 							if (Field.bRequired)
 							{

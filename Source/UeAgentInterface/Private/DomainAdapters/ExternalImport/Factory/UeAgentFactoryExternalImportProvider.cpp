@@ -19,6 +19,7 @@
 #include "Factories/FbxFactory.h"
 #include "Factories/FbxImportUI.h"
 #include "Factories/FbxSkeletalMeshImportData.h"
+#include "Factories/FbxStaticMeshImportData.h"
 #include "GeometryCache.h"
 #include "HAL/FileManager.h"
 #include "IAssetTools.h"
@@ -211,6 +212,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				return USoundWave::StaticClass();
 			case EFactoryExternalImportKind::SparseVolumeTexture:
 				return USparseVolumeTexture::StaticClass();
+			case EFactoryExternalImportKind::FbxStaticMesh:
 			case EFactoryExternalImportKind::StaticMesh:
 				return UStaticMesh::StaticClass();
 			case EFactoryExternalImportKind::Texture:
@@ -226,6 +228,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			{
 			case EFactoryExternalImportKind::FbxAnimation:
 			case EFactoryExternalImportKind::FbxSkeletalMesh:
+			case EFactoryExternalImportKind::FbxStaticMesh:
 				return {TEXT("fbx")};
 			case EFactoryExternalImportKind::GeometryCache:
 				return {TEXT("abc")};
@@ -401,6 +404,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				}
 				break;
 			}
+			case EFactoryExternalImportKind::FbxStaticMesh:
 			case EFactoryExternalImportKind::StaticMesh:
 			{
 				UStaticMesh* const Mesh = Cast<UStaticMesh>(&Asset);
@@ -650,7 +654,8 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				return Factory;
 			}
 			if (Spec.Kind != EFactoryExternalImportKind::FbxAnimation
-				&& Spec.Kind != EFactoryExternalImportKind::FbxSkeletalMesh)
+				&& Spec.Kind != EFactoryExternalImportKind::FbxSkeletalMesh
+				&& Spec.Kind != EFactoryExternalImportKind::FbxStaticMesh)
 			{
 				UFactory* Factory = SelectNativeImportFactory(ExpectedClassFor(Spec.Kind), Source);
 				if (!Factory) OutError = NativeValueFailure(TEXT("factory_import_native_factory_unavailable"), TEXT("No native import factory supports this source file and asset class."),
@@ -666,7 +671,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			}
 			Factory->SetDetectImportTypeOnImport(false);
 			Factory->ImportUI->bAutomatedImportShouldDetectType = false;
-			Factory->ImportUI->bImportAsSkeletal = true;
+			Factory->ImportUI->bImportAsSkeletal = Spec.Kind != EFactoryExternalImportKind::FbxStaticMesh;
 			Factory->ImportUI->bIsReimport = false;
 			Factory->ImportUI->ReimportMesh = nullptr;
 			Factory->ImportUI->bAllowContentTypeImport = true;
@@ -679,7 +684,22 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			Factory->ImportUI->bImportRigidMesh = false;
 			Factory->ImportUI->bIsObjImport = false;
 			Factory->ImportUI->bOverrideFullName = true;
-			if (Spec.Kind == EFactoryExternalImportKind::FbxAnimation)
+			if (Spec.Kind == EFactoryExternalImportKind::FbxStaticMesh)
+			{
+				Factory->ImportUI->MeshTypeToImport = FBXIT_StaticMesh;
+				Factory->ImportUI->OriginalImportType = FBXIT_StaticMesh;
+				Factory->ImportUI->bImportAnimations = false;
+				Factory->ImportUI->bImportMesh = true;
+				Factory->ImportUI->Skeleton = nullptr;
+				Factory->ImportUI->bCreatePhysicsAsset = false;
+				// One destination owns all source mesh nodes and their material slots.
+				Factory->ImportUI->StaticMeshImportData->bCombineMeshes = true;
+				Factory->ImportUI->StaticMeshImportData->bConvertScene = true;
+				Factory->ImportUI->StaticMeshImportData->bConvertSceneUnit = true;
+				Factory->ImportUI->StaticMeshImportData->bTransformVertexToAbsolute = true;
+				Factory->ImportUI->StaticMeshImportData->NormalImportMethod = FBXNIM_ImportNormalsAndTangents;
+			}
+			else if (Spec.Kind == EFactoryExternalImportKind::FbxAnimation)
 			{
 				USkeleton* const Skeleton = LoadObject<USkeleton>(
 					nullptr,

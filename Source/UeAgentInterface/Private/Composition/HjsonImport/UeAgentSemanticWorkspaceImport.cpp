@@ -25,6 +25,7 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "HAL/PlatformTime.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
@@ -36,6 +37,16 @@ namespace UE::UAI::Composition::HjsonImport
 
 	namespace
 	{
+		TArray<const FSemanticUnit*> FindIdentityUnits(const FAuthoringModelRef& Model,
+			const FString& IdentityKey, const FString& AuthoringTargetIdentityKey)
+		{
+			auto Units = Model->FindUnitsForTargetIdentity(IdentityKey);
+			if (!AuthoringTargetIdentityKey.IsEmpty() && AuthoringTargetIdentityKey != IdentityKey)
+				Units.Append(Model->FindUnitsForTargetIdentity(AuthoringTargetIdentityKey));
+			Units.Sort([](const FSemanticUnit& Left, const FSemanticUnit& Right) { return &Left < &Right; });
+			return Units;
+		}
+
 		UE::UAI::Contract::FDiagnostic ImportFailure(FString Code, const UE::UAI::Contract::FDiagnostic& Cause, const FString& PublicReason);
 		const FSemanticUnit* FindPropertyUnitForIdentity(const FAuthoringModelRef& Model,
 			const FString& IdentityKey, const FString& AuthoringTargetIdentityKey);
@@ -49,14 +60,13 @@ namespace UE::UAI::Composition::HjsonImport
 		if (TargetKey.IsEmpty()) return;
 		const FSourceProvenance* Match = nullptr;
 		FString SourceUnit;
-		for (const auto& Unit : Workspace->GetModel()->GetUnits())
+		for (const auto* Unit : Workspace->GetModel()->FindUnitsForTargetIdentity(TargetKey))
 		{
-			if (Unit.GetTargetIdentityKey() != TargetKey) continue;
-			const auto* Source = Workspace->GetUnitSources().Find(Unit.GetUnitId());
+			const auto* Source = Workspace->GetUnitSources().Find(Unit->GetUnitId());
 			if (!Source) continue;
 			if (Match) return;
 			Match = Source;
-			SourceUnit = Unit.GetUnitId();
+			SourceUnit = Unit->GetUnitId();
 		}
 		if (!Match) return;
 		// Property values have their own source tree, including native wrapper
@@ -1408,7 +1418,8 @@ namespace UE::UAI::Composition::HjsonImport
 
 		const FUeAgentStateEntry* MatchSemanticTargetEntry(
 			const TArray<const FUeAgentStateEntry*>& Entries,
-			const FSemanticUnit& Unit, Contract::FDiagnostic& OutError, bool bAllowMissing = false)
+			const FSemanticUnit& Unit, Contract::FDiagnostic& OutError,
+			bool bAllowMissing, int32 SemanticCandidatePoolCount)
 		{
 			const FString& TargetIdentityKey = Unit.GetTargetIdentityKey();
 			const FUeAgentStateEntry* Result = nullptr;
@@ -1436,7 +1447,7 @@ namespace UE::UAI::Composition::HjsonImport
 			{
 				auto Facts = MakeShared<FJsonObject>();
 				Facts->SetNumberField(TEXT("matching_target_count"), 0);
-				Facts->SetNumberField(TEXT("semantic_candidate_pool_count"), Entries.Num());
+				Facts->SetNumberField(TEXT("semantic_candidate_pool_count"), SemanticCandidatePoolCount);
 				OutError = TargetResolutionFailure(Unit, TEXT("target_identity_key"), false,
 					TEXT("No current state entry matches the semantic target identity"), Facts);
 				OutError.SemanticId = Unit.GetSemanticTypeRef();
@@ -1641,12 +1652,9 @@ namespace UE::UAI::Composition::HjsonImport
 			const FString& AuthoringTargetIdentityKey)
 		{
 			const FSemanticUnit* Result = nullptr;
-			for (const FSemanticUnit& Unit : Model->GetUnits())
+			for (const auto* Unit : FindIdentityUnits(Model, IdentityKey, AuthoringTargetIdentityKey))
 			{
-				if (Unit.GetUnitKind() != ESemanticUnitKind::PropertySet
-					|| (Unit.GetTargetIdentityKey() != IdentityKey
-						&& (AuthoringTargetIdentityKey.IsEmpty()
-							|| Unit.GetTargetIdentityKey() != AuthoringTargetIdentityKey)))
+				if (Unit->GetUnitKind() != ESemanticUnitKind::PropertySet)
 				{
 					continue;
 				}
@@ -1654,7 +1662,7 @@ namespace UE::UAI::Composition::HjsonImport
 				{
 					return nullptr;
 				}
-				Result = &Unit;
+				Result = Unit;
 			}
 			return Result;
 		}
@@ -2221,6 +2229,7 @@ namespace UE::UAI::Composition::HjsonImport
 		FSemanticWorkspaceImportError& OutError)
 	{
 		OutProjection = FSemanticWorkspaceChangeProjection();
+		const double PrepareStart = FPlatformTime::Seconds();
 		OutPrepared.Reset();
 		OutError.Reset();
 		FResolvedSemanticWorkspaceRef Workspace = SourceWorkspace;
@@ -2244,6 +2253,9 @@ namespace UE::UAI::Composition::HjsonImport
 		}
 
 		FPreparedAuthoringImportPtr Prepared;
+		const double DraftFinished = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=change_set units=%d changes=%d total_s=%.6f"),
+			Workspace->GetModel()->GetUnits().Num(), Draft->GetChanges().Num(), DraftFinished - PrepareStart);
 		if (!TryPrepareResolvedAuthoringImport(
 				Workspace, CurrentModel, CurrentSnapshot, Draft.GetValue(),
 				CallerContext, false, Workspace->GetSelectionFingerprint(),
@@ -2261,6 +2273,9 @@ namespace UE::UAI::Composition::HjsonImport
 		}
 
 		TSet<FString> ChangedUnitIds;
+		const double PlanningFinished = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=planning changes=%d total_s=%.6f"),
+			Prepared->GetChangeSetDraft().GetChanges().Num(), PlanningFinished - DraftFinished);
 		// Edited files select input; only prepared semantic and structural changes
 		// describe mutations. Equivalent numeric spellings must not reach consumers
 		// as property changes without a corresponding prepared descriptor.
@@ -2270,50 +2285,37 @@ namespace UE::UAI::Composition::HjsonImport
 			const FString AuthoringTargetIdentityKey =
 				Change.GetIdentity().GetSelector(
 					CanonicalAuthoringTargetIdentitySelector);
-			for (const FSemanticUnit& Unit : Workspace->GetModel()->GetUnits())
+			auto MatchingUnits = FindIdentityUnits(Workspace->GetModel(), IdentityKey, AuthoringTargetIdentityKey);
+			// Targetless keyed collections bind their document unit directly.
+			if (Change.GetIdentity().GetTargetKind() == TEXT("authoring_keyed_item_desired_state"))
+				if (const auto* Owner = Workspace->GetModel()->FindUnit(Change.GetIdentity().GetOwnerId()))
+					MatchingUnits.AddUnique(Owner);
+			MatchingUnits.Sort([](const FSemanticUnit& Left, const FSemanticUnit& Right) { return &Left < &Right; });
+			for (const FSemanticUnit* MatchingUnit : MatchingUnits)
 			{
-				// Targetless keyed collections carry their document unit as the
-				// prepared identity owner, rather than an asset target identity.
-				const bool bKeyedCollectionOwner =
-					Change.GetIdentity().GetTargetKind() == TEXT("authoring_keyed_item_desired_state")
-					&& Change.GetIdentity().GetOwnerId() == Unit.GetUnitId();
-				if (bKeyedCollectionOwner || Unit.GetTargetIdentityKey() == IdentityKey
-					|| (!AuthoringTargetIdentityKey.IsEmpty()
-						&& Unit.GetTargetIdentityKey() == AuthoringTargetIdentityKey))
+				const FSemanticUnit& Unit = *MatchingUnit;
+				ChangedUnitIds.Add(Unit.GetUnitId());
+				const FString PropertyPath = Change.GetIdentity().GetSelector(TEXT("property_path"));
+				if (!PropertyPath.IsEmpty() && Unit.GetUnitKind() == ESemanticUnitKind::PropertySet)
 				{
-					ChangedUnitIds.Add(Unit.GetUnitId());
-					const FString PropertyPath =
-						Change.GetIdentity().GetSelector(TEXT("property_path"));
-					if (!PropertyPath.IsEmpty()
-						&& Unit.GetUnitKind() == ESemanticUnitKind::PropertySet)
+					TSharedPtr<FJsonValue> JsonValue;
+					UE::UAI::Contract::FDiagnostic ValueError;
+					if (!Change.GetProposedAfter().IsValid()
+						|| !CanonicalJson::TryToJsonValue(*Change.GetProposedAfter(), JsonValue, ValueError)
+						|| !JsonValue.IsValid())
 					{
-						TSharedPtr<FJsonValue> JsonValue;
-						UE::UAI::Contract::FDiagnostic ValueError;
-						if (!Change.GetProposedAfter().IsValid()
-							|| !CanonicalJson::TryToJsonValue(
-								*Change.GetProposedAfter(), JsonValue, ValueError)
-							|| !JsonValue.IsValid())
-						{
-							OutError = ImportFailure(TEXT("hjson_import_property_value_invalid"), ValueError, TEXT("The property change requires a valid proposed value."));
-				OutError.SubjectId = Unit.GetUnitId()
-									;
-							return false;
-						}
-						TSharedRef<FJsonObject> Descriptor = MakeShared<FJsonObject>();
-						Descriptor->SetStringField(TEXT("property_path"), PropertyPath);
-						Descriptor->SetField(TEXT("value"), MoveTemp(JsonValue));
-						AttachSemanticPropertySource(Workspace, Unit.GetTargetIdentityKey(), *Descriptor,
-							Change.GetIdentity().GetSelector(TEXT("asset_path")));
-						if (!TryAppendPropertyTypeAssertions(
-								Unit, Workspace->GetModel(), Descriptor, OutError, Workspace))
-						{
-							return false;
-						}
-						if (!ProjectPropertyEditValue(Change, Unit, *Workspace->GetModel(), *Descriptor, OutError)) return false;
-						OutProjection.PropertyChangesByUnitId.Add(
-							Unit.GetUnitId(),
-							MakeShared<FJsonValueObject>(Descriptor));
+						OutError = ImportFailure(TEXT("hjson_import_property_value_invalid"), ValueError, TEXT("The property change requires a valid proposed value."));
+						OutError.SubjectId = Unit.GetUnitId();
+						return false;
 					}
+					TSharedRef<FJsonObject> Descriptor = MakeShared<FJsonObject>();
+					Descriptor->SetStringField(TEXT("property_path"), PropertyPath);
+					Descriptor->SetField(TEXT("value"), MoveTemp(JsonValue));
+					AttachSemanticPropertySource(Workspace, Unit.GetTargetIdentityKey(), *Descriptor,
+						Change.GetIdentity().GetSelector(TEXT("asset_path")));
+					if (!TryAppendPropertyTypeAssertions(Unit, Workspace->GetModel(), Descriptor, OutError, Workspace)) return false;
+					if (!ProjectPropertyEditValue(Change, Unit, *Workspace->GetModel(), *Descriptor, OutError)) return false;
+					OutProjection.PropertyChangesByUnitId.Add(Unit.GetUnitId(), MakeShared<FJsonValueObject>(Descriptor));
 				}
 			}
 		}
@@ -2343,6 +2345,8 @@ namespace UE::UAI::Composition::HjsonImport
 			return false;
 		}
 		OutPrepared = MoveTemp(Prepared);
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=change_projection units=%d total_s=%.6f"),
+			OutProjection.ChangedUnitIds.Num(), FPlatformTime::Seconds() - PlanningFinished);
 		return true;
 	}
 
@@ -2358,6 +2362,7 @@ namespace UE::UAI::Composition::HjsonImport
 		const FAuthoringModelPtr& CurrentModel,
 		TArray<FDocumentValueSourceBinding>* OutDocumentSourceBindings)
 	{
+		const double DraftStart = FPlatformTime::Seconds();
 		OutDraft.Reset();
 		OutError.Reset();
 		FResolvedSemanticWorkspaceRef Workspace = SourceWorkspace;
@@ -2398,10 +2403,34 @@ namespace UE::UAI::Composition::HjsonImport
 		}
 
 		TMap<FString, TArray<const FUeAgentStateEntry*>> EntriesBySemanticId;
+		TMap<FString, TMap<uint32, TArray<const FUeAgentStateEntry*>>> EntriesBySemanticTarget;
 		for (const FUeAgentStateEntry& Entry : CurrentSnapshot->GetEntries())
 		{
 			EntriesBySemanticId.FindOrAdd(Entry.GetIdentity().GetSemanticId()).Add(&Entry);
+			auto& Targets = EntriesBySemanticTarget.FindOrAdd(Entry.GetIdentity().GetSemanticId());
+			const uint32 IdentityHash = GetTypeHash(Entry.GetIdentity().GetCanonicalKey());
+			Targets.FindOrAdd(IdentityHash).Add(&Entry);
+			if (const auto* AuthoringIdentity = Entry.GetIdentity().GetSelectors().Find(CanonicalAuthoringTargetIdentitySelector))
+			{
+				const uint32 AuthoringHash = GetTypeHash(*AuthoringIdentity);
+				// An entry belongs to each distinct bucket once. The matcher still
+				// compares full identities, including any hash collisions.
+				if (AuthoringHash != IdentityHash) Targets.FindOrAdd(AuthoringHash).Add(&Entry);
+			}
 		}
+		int64 SemanticTargetLookups = 0;
+		int64 SemanticTargetCandidates = 0;
+		auto MatchTarget = [&](const FSemanticUnit& Unit, Contract::FDiagnostic& Error, bool bAllowMissing = false)
+		{
+			const auto* SemanticEntries = EntriesBySemanticId.Find(Unit.GetSemanticTypeRef());
+			const auto* TargetIndex = EntriesBySemanticTarget.Find(Unit.GetSemanticTypeRef());
+			const auto* Candidates = TargetIndex ? TargetIndex->Find(GetTypeHash(Unit.GetTargetIdentityKey())) : nullptr;
+			const TArray<const FUeAgentStateEntry*> EmptyCandidates;
+			++SemanticTargetLookups;
+			SemanticTargetCandidates += Candidates ? Candidates->Num() : 0;
+			return MatchSemanticTargetEntry(Candidates ? *Candidates : EmptyCandidates, Unit, Error,
+				bAllowMissing, SemanticEntries ? SemanticEntries->Num() : 0);
+		};
 
 		TArray<FChangeDraft> Changes;
 		const FAuthoringModelRef& Model = Workspace->GetModel();
@@ -2499,12 +2528,8 @@ namespace UE::UAI::Composition::HjsonImport
 					}
 					continue;
 				}
-				const TArray<const FUeAgentStateEntry*>* Candidates =
-					EntriesBySemanticId.Find(Unit.GetSemanticTypeRef());
 				Contract::FDiagnostic MatchError;
-				const FUeAgentStateEntry* Current = Candidates
-					? MatchSemanticTargetEntry(*Candidates, Unit, MatchError, true)
-					: nullptr;
+				const FUeAgentStateEntry* Current = MatchTarget(Unit, MatchError, true);
 				if (!MatchError.IsEmpty())
 				{
 					FWorkspaceError Located;
@@ -2653,10 +2678,7 @@ namespace UE::UAI::Composition::HjsonImport
 				}
 				continue;
 			}
-			const TArray<const FUeAgentStateEntry*>* Candidates = EntriesBySemanticId.Find(Unit.GetSemanticTypeRef());
-			const TArray<const FUeAgentStateEntry*> EmptyCandidates;
-			const FUeAgentStateEntry* Current = MatchSemanticTargetEntry(
-				Candidates ? *Candidates : EmptyCandidates, Unit, OutError);
+			const FUeAgentStateEntry* Current = MatchTarget(Unit, OutError);
 			if (!Current)
 			{
 				FWorkspaceError Located;
@@ -2794,6 +2816,8 @@ namespace UE::UAI::Composition::HjsonImport
 				CurrentSnapshot->GetProvenance().GetEvidenceId(),
 				TArray<FUeAgentCanonicalIdentity>());
 		}
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_draft units=%d changes=%d target_lookups=%lld target_candidates=%lld total_s=%.6f"),
+			Model->GetUnits().Num(), Changes.Num(), SemanticTargetLookups, SemanticTargetCandidates, FPlatformTime::Seconds() - DraftStart);
 		if (Changes.IsEmpty())
 		{
 			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_import_no_explicit_changes"), TEXT(
@@ -2889,12 +2913,17 @@ namespace UE::UAI::Composition::HjsonImport
 			return false;
 		}
 		TMap<FString, FUeAgentCanonicalValueRef> PropertyBaselines;
+		TMap<uint32, TArray<const FUeAgentStateEntry*>> EntriesByIdentityHash;
+		for (const auto& Entry : CurrentSnapshot->GetEntries())
+			EntriesByIdentityHash.FindOrAdd(GetTypeHash(Entry.GetIdentity().GetCanonicalKey())).Add(&Entry);
 		for (const auto& Change : ChangeSetDraft.GetChanges())
 		{
 			if (Change.GetIdentity().GetSelector(TEXT("property_path")).IsEmpty()) continue;
-			const auto* Entry = CurrentSnapshot->GetEntries().FindByPredicate([&](const auto& Item) {
-				return Item.GetIdentity().GetCanonicalKey() == Change.GetIdentity().GetCanonicalKey();
-			});
+			const FString& IdentityKey = Change.GetIdentity().GetCanonicalKey();
+			const FUeAgentStateEntry* Entry = nullptr;
+			if (const auto* Candidates = EntriesByIdentityHash.Find(GetTypeHash(IdentityKey)))
+				for (const auto* Candidate : *Candidates)
+					if (Candidate->GetIdentity().GetCanonicalKey() == IdentityKey) { Entry = Candidate; break; }
 			if (!Entry) continue;
 			FUeAgentCanonicalValuePtr Value;
 			FWorkspaceError ProjectionError;

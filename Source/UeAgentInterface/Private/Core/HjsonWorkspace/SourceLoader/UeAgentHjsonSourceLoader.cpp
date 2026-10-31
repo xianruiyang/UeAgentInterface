@@ -1,5 +1,6 @@
 #include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonDiagnostic.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonValidatedHeader.h"
 
 #include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
 #include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
@@ -9,6 +10,7 @@
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -26,6 +28,7 @@ namespace UE::UAI::HjsonWorkspace
 			TEXT("uai.content_graph.workspace/1");
 		const FString ContentGraphWorkspaceManifest =
 			TEXT(".uai/workspace.hjson");
+
 
 		struct FSourceFileStamp
 		{
@@ -604,6 +607,7 @@ namespace UE::UAI::HjsonWorkspace
 		bool TryParseManifest(
 			const FString& ManifestText,
 			const FString& ManifestPath,
+			const FString& ManifestContentHash,
 			const FString& ExpectedTargetIdentity,
 			FUeAgentResourceTracker& Resources,
 			FString& OutEntryFile,
@@ -616,6 +620,20 @@ namespace UE::UAI::HjsonWorkspace
 			OutBaseRevision.Reset();
 			OutFiles.Reset();
 			bOutSemanticWorkspace = false;
+			const double ParseStarted = FPlatformTime::Seconds();
+			FString ProvenSchema;
+			TMap<EUeAgentResourceDimension, int64> ProvenCharges;
+			if (TryReuseParsedHjsonRootString(ManifestContentHash, TEXT("workspace_schema"), ProvenSchema, ProvenCharges)
+				&& ProvenSchema.Equals(GetSemanticWorkspaceSchemaId(), ESearchCase::CaseSensitive))
+			{
+				FUeAgentResourceChargeError Error;
+				if (!Resources.TryChargeMany(ProvenCharges, TEXT("workspace_load.manifest"), Error))
+				{ OutError.SetFailure(Error, ManifestPath); return false; }
+				bOutSemanticWorkspace = true;
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=manifest_classification reused=true seconds=%.6f"), FPlatformTime::Seconds() - ParseStarted);
+				return true;
+			}
+			const auto UsageBefore = Resources.Snapshot();
 			FHjsonDocumentPtr Manifest;
 			if (!TryParseHjsonDocument(
 					ManifestText,
@@ -647,6 +665,23 @@ namespace UE::UAI::HjsonWorkspace
 			if (Schema == GetSemanticWorkspaceSchemaId())
 			{
 				bOutSemanticWorkspace = true;
+				{
+					TMap<EUeAgentResourceDimension, int64> ParseCharges;
+					const auto UsageAfter = Resources.Snapshot();
+					bool bExactCharges = true;
+					for (uint8 D = 0; D <= static_cast<uint8>(EUeAgentResourceDimension::EstimatedMemoryBytes); ++D)
+					{
+						const auto Dimension = static_cast<EUeAgentResourceDimension>(D);
+						const int64 Before = UsageBefore.Consumed(Dimension), After = UsageAfter.Consumed(Dimension);
+						if (After == MAX_int64 || After < Before) { bExactCharges = false; break; }
+						if (After > Before) ParseCharges.Add(Dimension, After - Before);
+					}
+					if (bExactCharges)
+					{
+						RememberParsedHjsonRootHeader(ManifestContentHash, *Manifest, ParseCharges);
+					}
+				}
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=manifest_classification reused=false seconds=%.6f"), FPlatformTime::Seconds() - ParseStarted);
 				return true;
 			}
 			FString TargetIdentity;
@@ -817,6 +852,7 @@ namespace UE::UAI::HjsonWorkspace
 			if (!TryParseManifest(
 					ManifestText,
 					ManifestPath,
+					Sha256(ManifestBytes),
 					ExpectedTargetIdentity,
 					Resources,
 					EntryFile,
@@ -1053,11 +1089,13 @@ namespace UE::UAI::HjsonWorkspace
 		FString InSourceFingerprint,
 		FString InSemanticFingerprint,
 		TArray<FContentGraphImportDocument> InDocuments,
-		const bool bInSemanticWorkspaceDirectory)
+		const bool bInSemanticWorkspaceDirectory,
+		FString InWorkspaceProfileId)
 		: Kind(InKind)
 		, SourceUnit(MoveTemp(InSourceUnit))
 		, TargetIdentity(MoveTemp(InTargetIdentity))
 		, BaseRevision(MoveTemp(InBaseRevision))
+		, WorkspaceProfileId(MoveTemp(InWorkspaceProfileId))
 		, EntryFile(MoveTemp(InEntryFile))
 		, SourceFingerprint(MoveTemp(InSourceFingerprint))
 		, SemanticFingerprint(MoveTemp(InSemanticFingerprint))
@@ -1312,9 +1350,11 @@ namespace UE::UAI::HjsonWorkspace
 		FResolvedContentGraphImportSourcePtr& OutResolvedSource,
 		FString& OutExpectedRevision,
 		FString& OutAuthorizationId,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		TArray<FString>* OutManagedSourcePaths)
 	{
 		OutResolvedSource.Reset();
+		if (OutManagedSourcePaths) OutManagedSourcePaths->Reset();
 		OutExpectedRevision.Reset();
 		OutAuthorizationId.Reset();
 		OutError.Reset();
@@ -1357,6 +1397,11 @@ namespace UE::UAI::HjsonWorkspace
 				SemanticWorkspace->GetModel()->GetBaseRevision();
 			WorkspaceFingerprint =
 				SemanticWorkspace->GetWorkspaceFingerprint();
+			if (OutManagedSourcePaths)
+			{
+				*OutManagedSourcePaths = SemanticWorkspace->GetManagedUnitPaths();
+				OutManagedSourcePaths->AddUnique(ContentGraphWorkspaceManifest);
+			}
 			OutResolvedSource = MakeShared<FResolvedContentGraphImportSource>(
 				EWorkspaceSourceKind::Directory,
 				WorkspaceRoot,
@@ -1366,7 +1411,7 @@ namespace UE::UAI::HjsonWorkspace
 				WorkspaceFingerprint,
 				SemanticWorkspace->GetModel()->GetSemanticFingerprint(),
 				TArray<FContentGraphImportDocument>(),
-				true);
+				true, SemanticWorkspace->GetModel()->GetProfileId());
 		}
 		else
 		{

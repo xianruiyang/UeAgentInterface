@@ -46,12 +46,14 @@ namespace UE::UAI::HjsonWorkspace
 			FString InSourceFingerprint,
 			FString InSemanticFingerprint,
 			TArray<FContentGraphImportDocument> InDocuments,
-			bool bInSemanticWorkspaceDirectory = false);
+			bool bInSemanticWorkspaceDirectory = false,
+			FString InWorkspaceProfileId = FString());
 
 		EWorkspaceSourceKind GetKind() const;
 		const FString& GetSourceUnit() const;
 		const FString& GetTargetIdentity() const;
 		const FString& GetBaseRevision() const;
+		const FString& GetWorkspaceProfileId() const { return WorkspaceProfileId; }
 		const FString& GetEntryFile() const;
 		const FString& GetSourceFingerprint() const;
 		const FString& GetSemanticFingerprint() const;
@@ -65,6 +67,7 @@ namespace UE::UAI::HjsonWorkspace
 		FString SourceUnit;
 		FString TargetIdentity;
 		FString BaseRevision;
+		FString WorkspaceProfileId;
 		FString EntryFile;
 		FString SourceFingerprint;
 		FString SemanticFingerprint;
@@ -95,7 +98,9 @@ namespace UE::UAI::HjsonWorkspace
 	 * own them through the hidden manifest, legacy directory workspaces retain
 	 * their manifest baseline, and complete inline/single-file documents carry
 	 * only the short internal "missing" create expectation. Existing targets
-	 * therefore still fail before mutation for non-directory sources.
+	 * therefore still fail before mutation for non-directory sources. When
+	 * requested, managed paths (including the manifest) come from that same
+	 * verified semantic parse for subsequent workspace refresh.
 	 */
 	UEAGENTINTERFACE_API bool TryRecoverContentGraphImportMachineContext(
 		const TSharedPtr<FJsonObject>& SourceObject,
@@ -104,7 +109,8 @@ namespace UE::UAI::HjsonWorkspace
 		FResolvedContentGraphImportSourcePtr& OutResolvedSource,
 		FString& OutExpectedRevision,
 		FString& OutAuthorizationId,
-		FWorkspaceError& OutError);
+		FWorkspaceError& OutError,
+		TArray<FString>* OutManagedSourcePaths = nullptr);
 
 	/**
 	 * Validates the internal kind=resolved envelope emitted by

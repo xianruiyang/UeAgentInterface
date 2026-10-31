@@ -2,7 +2,7 @@
 
 ## Scope
 
-The active `external-import-factory` contribution owns exactly eleven public routes: seven create imports (`FBX animation`, `FBX skeletal mesh`, `geometry cache`, `light profile`, `sound wave`, `sparse volume texture`, and `texture`) plus four matching asset reimports (`sound wave`, `sparse volume texture`, `static mesh`, and `texture`). Its public owner is `factory-external-import-owner`.
+The active `external-import-factory` contribution owns twelve public routes: eight create imports (`FBX animation`, `FBX skeletal mesh`, `FBX static mesh`, `geometry cache`, `light profile`, `sound wave`, `sparse volume texture`, and `texture`) plus four asset reimports (`sound wave`, `sparse volume texture`, `static mesh`, and `texture`). Its public owner is `factory-external-import-owner`.
 
 The model supplies a short project-relative source or `ProjectFileHandle`, plus
 `destination_ref` or `target_ref`, the FBX animation `skeleton_ref`, and
@@ -29,6 +29,8 @@ Business-state verification rejects factory objects that exist but are not usabl
 Supported common options are `replace_existing`, `import_materials`, `import_textures`, and `create_physics_asset`. Texture import additionally accepts `srgb`, `compression_settings`, `mip_gen_settings`, and `lod_group`; the resulting option values may appear in readable `readback`, without exposing their fingerprint. Skeletal FBX import additionally accepts `skeleton_ref`, `import_animations`, `import_morph_targets`, `update_skeleton_reference_pose`, `validate_after_import`, `expected_morph_targets[]`, `expected_material_slots[]`, and `expected_lod_count`; expected values are checked internally against the persisted mesh. Format-specific options are rejected on other routes. `replace_existing=false` is required for create and `true` for reimport. Unknown options fail before mutation.
 
 ## Public SDK and CLI
+
+`external.fbx.static_mesh.import` imports an FBX into one absent StaticMesh destination, combining source mesh nodes while preserving material slots, source transforms, normals, tangents and scene units. It shares the static-mesh LOD readback with reimport. `import_materials` and `import_textures` are supported; skeletal options including `create_physics_asset` are rejected. Author collision and material assignments through the resulting asset's public workspace. The SDK entry is `client.external.fbx_static_mesh_import(source, destination_ref, options=...)`.
 
 The final manifest projects all create imports into the default `external`
 namespace and all reimports into `asset`. Callers import only `uai`, use `uai.connect_project()` for the local project, and use methods such as

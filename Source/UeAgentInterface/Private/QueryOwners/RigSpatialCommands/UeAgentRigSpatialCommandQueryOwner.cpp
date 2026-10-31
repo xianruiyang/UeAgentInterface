@@ -10,6 +10,7 @@ namespace UE::UAI::QueryOwners::RigSpatialCommands
 			TEXT("animation.subject.morph_weights.update"),
 			TEXT("animation.subject.pose.update"),
 			TEXT("rig.control.bake.animation"),
+			TEXT("rig.control.bake.context"),
 			TEXT("rig.control.bake.controls"),
 			TEXT("rig.ik.definition.update"),
 			TEXT("rig.retarget.assets.generate"),

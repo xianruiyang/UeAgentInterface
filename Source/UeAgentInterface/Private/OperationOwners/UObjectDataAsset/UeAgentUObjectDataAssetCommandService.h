@@ -9,6 +9,8 @@
 
 class UObject;
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UE::UAI::OperationOwners::UObjectDataAsset
 {
 	enum class EUeAgentUObjectDataAssetRouteKind : uint8
@@ -45,6 +47,10 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 		TArray<FString> AuthorityScopes;
 		FString CorrelationId;
 		bool bCancellationRequested = false;
+		// Internal request-local preparation for post-import refresh; not a JSON parameter.
+		TSharedPtr<HjsonWorkspace::FPreparedWorkspaceExport> WorkspaceExportPreparation;
+		// Derived by source custody from the verified workspace, never a public import parameter.
+		FString WorkspaceProfileId;
 	};
 
 	struct UEAGENTINTERFACE_API FUeAgentUObjectDataAssetCommandResponse

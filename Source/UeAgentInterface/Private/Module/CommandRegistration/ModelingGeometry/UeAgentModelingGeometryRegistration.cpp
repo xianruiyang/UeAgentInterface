@@ -424,6 +424,8 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					TEXT("mode: exact_box_components for whole cells, exact_convex for precise solids, or none; omitted mode selects exact collision for the current geometry. profile_name defaults to BlockAll; enabled defaults to query_and_physics.")),
 				Field(TEXT("material_ref"), TEXT("string"), false,
 					TEXT("Optional exact MaterialInterface object path.")),
+				Field(TEXT("color"), TEXT("array"), false,
+					TEXT("Optional linear RGB [r,g,b], each in [0,1], for the built-in metric material. Stored per component.")),
 				Field(TEXT("keep_session"), TEXT("boolean"), false,
 					TEXT("Keep the clean session for further revision-fenced edits.")),
 			};

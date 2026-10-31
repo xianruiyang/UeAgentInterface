@@ -646,6 +646,11 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 						FAssetDurableError RollbackError;
 						bRolledBack = TryRollbackAssetDurability(Session.ToSharedRef(), Backend, FencingToken,
 							[&]() { return ConfirmRestoredState(RecoveryError); }, Resources, RollbackReceipt, RollbackError);
+						if (bRolledBack && RollbackReceipt.GetStatus() != EDurableStatus::RolledBack)
+						{
+							bRolledBack = false;
+							RollbackError = RollbackReceipt.GetFailureDiagnostic();
+						}
 						if (!bRolledBack) RecoveryError.Append(RollbackError);
 					}
 					if (!bRolledBack)

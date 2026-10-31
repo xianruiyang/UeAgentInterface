@@ -244,6 +244,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				FAssetDurableError Error;
 				if (!TryRollbackAssetDurability(Session.ToSharedRef(), Backend, Token, bMemoryConfirmed,
 					Resources, RollbackReceipt, Error)) OutError = MoveTemp(Error);
+				else if (RollbackReceipt.GetStatus() != EDurableStatus::RolledBack) OutError = RollbackReceipt.GetFailureDiagnostic();
 			}
 
 			FString JournalId() const

@@ -26,6 +26,7 @@
 #include "EngineUtils.h"
 #include "HAL/FileManager.h"
 #include "Materials/MaterialInterface.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingMetricMaterial.h"
 #include "PhysicsEngine/AggregateGeom.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "Misc/FileHelper.h"
@@ -1391,6 +1392,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			const FSession& Expected,
 			ADynamicMeshActor& Actor,
 			const FString& MaterialPath,
+			const TArray<float>& ExpectedPrimitiveData,
 			TSharedRef<FJsonObject>& OutReadback,
 			UE::UAI::Contract::FDiagnostic& OutError)
 		{
@@ -1530,6 +1532,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			const UMaterialInterface* const Material = Component->GetMaterial(0);
 			const FString ObservedMaterial = Material ? Material->GetPathName() : FString();
 			const bool bMaterialEquivalent = ObservedMaterial == MaterialPath;
+			const bool bPrimitiveDataEquivalent = Component->GetDefaultCustomPrimitiveData().Data == ExpectedPrimitiveData;
 			const bool bTransformEquivalent =
 				Actor.GetActorTransform().Equals(ActorTransform(Expected), 0.001);
 			const FString ExpectedFolder =
@@ -1553,6 +1556,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				TEXT("no_stale_owned_collision"), bNoStaleOwnedCollision);
 			OutReadback->SetBoolField(
 				TEXT("material_equivalent"), bMaterialEquivalent);
+			OutReadback->SetBoolField(TEXT("custom_primitive_data_equivalent"), bPrimitiveDataEquivalent);
 			OutReadback->SetBoolField(
 				TEXT("transform_equivalent"), bTransformEquivalent);
 			OutReadback->SetStringField(
@@ -1575,6 +1579,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				&& bMeshEquivalent
 				&& bCollisionEquivalent
 				&& bMaterialEquivalent
+				&& bPrimitiveDataEquivalent
 				&& bTransformEquivalent
 				&& bManagedIdentityEquivalent;
 			OutReadback->SetBoolField(TEXT("equivalent"), bEquivalent);
@@ -1689,6 +1694,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					}
 				}
 				if (!bMaterialEquivalent) AddFact(TEXT("/material_ref"), MakeShared<FJsonValueString>(ObservedMaterial), MakeShared<FJsonValueString>(MaterialPath), TEXT("The mesh component material differs from the intended material."));
+				if (!bPrimitiveDataEquivalent) AddFact(TEXT("/custom_primitive_data"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("Persisted per-object color or grid origin differs from the intended component defaults."));
 				if (!bTransformEquivalent) AddTransformDifferences(TEXT("/actor_transform"), Actor.GetActorTransform(), ActorTransform(Expected));
 				if (!bManagedIdentityEquivalent)
 				{
@@ -1937,6 +1943,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 					}
 					MaterialPath = Material->GetPathName();
 				}
+				else if (Session->bCreatedActor && !Session->bCommitted)
+				{
+					Material = UE::UAI::ModelingMetricMaterial::Load();
+					if (!Material)
+					{
+						Error = ModelingCondition(TEXT("modeling_metric_material_missing"), TEXT("Install the UAI plugin Content directory before creating metric-grid geometry."), TEXT("/metric_material_available"), false, true);
+						SetFailure(OutFailure, Error, TEXT("not_started"), true, false, {}); return false;
+					}
+					MaterialPath = Material->GetPathName();
+				}
+				TOptional<FLinearColor> MetricColor;
+				if (!UE::UAI::ModelingMetricMaterial::TryReadColor(Params, MetricColor)
+					|| (MetricColor.IsSet() && !UE::UAI::ModelingMetricMaterial::IsMetric(Material)))
+				{
+					Error = ModelingInputFailure(TEXT("modeling_color_invalid"), TEXT("color requires three linear RGB numbers in [0,1] and the built-in metric material."), Params, TEXT("color"), MakeShared<FJsonValueString>(TEXT("linear RGB [r,g,b] for the UAI metric material")));
+					SetFailure(OutFailure, Error, TEXT("not_started"), true, false, {}); return false;
+				}
 
 				FDynamicMesh3 NewMesh;
 				int32 FaceCount = 0;
@@ -1947,6 +1970,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				}
 				else FaceCount = BuildExposedFaceMesh(Session->Cells, Session->CellSize, Session->AnchorLocal, NewMesh);
 				const int32 NewVertexCount = NewMesh.VertexCount(), NewTriangleCount = NewMesh.TriangleCount();
+				const FBox MetricLocalBounds(NewMesh.GetBounds().Min, NewMesh.GetBounds().Max);
 				FKAggregateGeom NewSimpleCollision;
 				if (CollisionMode == TEXT("exact_convex")) GridSolid::BuildCollision(Session->SolidPieces, Session->AnchorLocal, NewSimpleCollision);
 				const FKAggregateGeom OldSimpleCollision = Component->GetSimpleCollisionShapes();
@@ -1966,6 +1990,11 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				Component->GetDynamicMesh()->ProcessMesh(
 					[&](const FDynamicMesh3& Mesh) { OldMesh = Mesh; });
 				UMaterialInterface* const OldMaterial = Component->GetMaterial(0);
+				const FCustomPrimitiveData OldPrimitiveData = Component->GetDefaultCustomPrimitiveData();
+				const auto RestoreMaterial = [&]() {
+					Component->SetMaterial(0, OldMaterial);
+					UE::UAI::ModelingMetricMaterial::RestoreDefaults(*Component, OldPrimitiveData);
+				};
 				const ECollisionEnabled::Type OldCollisionEnabled =
 					Component->GetCollisionEnabled();
 				const FTransform OldActorTransform = Actor->GetActorTransform();
@@ -2074,6 +2103,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				Component->Modify();
 				Component->SetMesh(MoveTemp(NewMesh));
 				Component->SetMaterial(0, Material);
+				if (NewVertexCount > 0) UE::UAI::ModelingMetricMaterial::Initialize(*Component, MetricLocalBounds, MetricColor);
 				Component->bUseAsyncCooking = false;
 				Component->bEnableComplexCollision = false;
 				Component->CollisionType = CTF_UseSimpleAsComplex;
@@ -2093,7 +2123,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 							FString::Printf(TEXT("/collision/convex_pieces/%d"), FailedPiece),
 							MakeShared<FJsonValueString>(Body ? TEXT("missing or different cooked convex") : TEXT("no BodySetup")),
 							MakeShared<FJsonValueString>(TEXT("cooked convex matching the solid piece")), Actor->GetPathName());
-						Component->SetMesh(MoveTemp(OldMesh)); Component->SetMaterial(0, OldMaterial);
+						Component->SetMesh(MoveTemp(OldMesh)); RestoreMaterial();
 						RestoreSimpleCollision(); Component->SetCollisionEnabled(OldCollisionEnabled);
 						DestroyComponents(NewCollisionComponents);
 						SetFailure(OutFailure, Error, TEXT("rolled_back"), true, true, {}); return false;
@@ -2113,7 +2143,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 							*Actor, StateComponent, Error))
 					{
 						Component->SetMesh(MoveTemp(OldMesh));
-						Component->SetMaterial(0, OldMaterial);
+						RestoreMaterial();
 					RestoreSimpleCollision();
 						Component->SetCollisionEnabled(OldCollisionEnabled);
 						Component->MarkRenderStateDirty();
@@ -2134,7 +2164,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 						Error))
 				{
 					Component->SetMesh(MoveTemp(OldMesh));
-					Component->SetMaterial(0, OldMaterial);
+					RestoreMaterial();
 					RestoreSimpleCollision();
 					Component->SetCollisionEnabled(OldCollisionEnabled);
 					Component->MarkRenderStateDirty();
@@ -2166,7 +2196,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 				{
 					const auto PersistError = Error;
 					Component->SetMesh(MoveTemp(OldMesh));
-					Component->SetMaterial(0, OldMaterial);
+					RestoreMaterial();
 					RestoreSimpleCollision();
 					Component->SetCollisionEnabled(OldCollisionEnabled);
 					Component->MarkRenderStateDirty();
@@ -2587,6 +2617,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 			{
 				OutPersistedReadback = MakeShared<FJsonObject>();
 				OutError.Reset();
+				const UDynamicMeshComponent* ExpectedComponent = DynamicMeshComponent(Intended.Actor.Get());
+				const TArray<float> ExpectedPrimitiveData = ExpectedComponent ? ExpectedComponent->GetDefaultCustomPrimitiveData().Data : TArray<float>();
 				if (!Session.DurableSession.IsValid()
 					|| !Session.DurableResources.IsValid())
 				{
@@ -2665,6 +2697,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 								Intended,
 								*PersistedDynamic,
 								MaterialPath,
+								ExpectedPrimitiveData,
 								OutPersistedReadback,
 								VerifyError))
 						{

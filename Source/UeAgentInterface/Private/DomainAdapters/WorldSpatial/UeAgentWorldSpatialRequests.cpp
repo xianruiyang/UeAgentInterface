@@ -254,6 +254,20 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			return true;
 		}
 
+		bool OptionalColdStartRenderSize(const TSharedPtr<FJsonObject>& Root,
+			TOptional<FIntPoint>& Out, FUeAgentWorldSpatialExecutionError& Error)
+		{
+			if (!Root->HasField(TEXT("cold_start_render_size"))) return true;
+			TSharedPtr<FJsonObject> Size;
+			if (!RequiredObject(Root, TEXT("cold_start_render_size"), Size, Error)) return false;
+			int32 Width = 0, Height = 0;
+			if (!Size->TryGetNumberField(TEXT("width"), Width) || !Size->TryGetNumberField(TEXT("height"), Height)
+				|| Width < 1 || Width > 4096 || Height < 1 || Height > 4096)
+				return InvalidField(Error, Root, TEXT("cold_start_render_size"), TEXT("integer width/height in 1..4096"), false);
+			Out = FIntPoint(Width, Height);
+			return true;
+		}
+
 		bool RequiredArray(
 			const TSharedPtr<FJsonObject>& Object,
 			const TCHAR* Field,
@@ -973,7 +987,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						{
 							TSharedPtr<FJsonObject> Value;
 							return RequiredObject(Root, TEXT("screen_point"), Value, Error)
-								&& ParseAt(Value, P.ScreenPoint, ParseSpatialValue, Error, TEXT("/screen_point"));
+								&& ParseAt(Value, P.ScreenPoint, ParseSpatialValue, Error, TEXT("/screen_point"))
+								&& OptionalColdStartRenderSize(Root, P.ColdStartRenderSize, Error);
 						}, Error);
 					}},
 				{TEXT("viewport.ray.trace"), TEXT("world_spatial.viewport_projection.trace.request.v1"), TEXT("viewport_projection"), TEXT("viewport_ray_trace"), false,
@@ -986,7 +1001,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							return RequiredObject(Root, TEXT("screen_point"), Point, Error)
 								&& ParseAt(Point, P.ScreenPoint, ParseSpatialValue, Error, TEXT("/screen_point"))
 								&& RequiredObject(Root, TEXT("trace_query"), Query, Error)
-								&& ParseAt(Query, P.TraceQuery, ParseTraceQuery, Error, TEXT("/trace_query"));
+								&& ParseAt(Query, P.TraceQuery, ParseTraceQuery, Error, TEXT("/trace_query"))
+								&& OptionalColdStartRenderSize(Root, P.ColdStartRenderSize, Error);
 						}, Error);
 					}},
 				{TEXT("viewport.actor.pick"), TEXT("world_spatial.viewport_projection.pick_actor.request.v1"), TEXT("viewport_projection"), TEXT("viewport_actor_pick"), false,

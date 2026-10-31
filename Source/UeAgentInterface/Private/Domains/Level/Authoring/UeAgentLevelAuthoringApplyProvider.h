@@ -16,11 +16,16 @@ namespace UeAgentAuthoringOperationApply
 
 namespace UeAgentLevelAuthoring
 {
+	// Resolves the same native placement selectors as Apply without instantiating an actor.
+	bool ResolvePlacementSelectors(const TSharedPtr<const FJsonObject>& Extension,
+		TMap<FString, FString>& OutSelectors, UE::UAI::Contract::FDiagnostic& OutError);
 	struct UEAGENTINTERFACE_API FWorkspaceApplyOptions
 	{
 		bool bDryRun = false;
 		bool bUseEditorTransaction = true;
 		bool bPersistentReadback = false;
+		// Internal custody from the verified semantic workspace, never a property payload.
+		FString AuthoringProfileId;
 		TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager> PackageStager;
 		TFunction<bool(UeAgentAuthoringOperationApply::FOperationFailure&)> FinalReadback;
 		TFunction<bool(UeAgentAuthoringOperationApply::FOperationFailure&)> RestoreEditorContext;

@@ -8,6 +8,7 @@
 #include "Templates/SharedPointer.h"
 
 class UWorld;
+namespace UE::Geometry { class FDynamicMesh3; }
 
 namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 {
@@ -18,6 +19,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 {
 	struct FCarrierState
 	{
+		struct FComponentObservation
+		{
+			FBox Bounds = FBox(EForceInit::ForceInit);
+			FString ShapeFingerprint;
+		};
+		// Populated only for complete-component edit verification.
+		TArray<FComponentObservation> Components;
 		FString TargetRef;
 		FString DurablePackageName;
 		TOptional<StateSemantic::FUeAgentStateRevision> TargetRevision;
@@ -69,7 +77,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			IUeAgentModelingGeometryEffectReferenceResolver& Resolver,
 		const FString& TargetRef,
 		FCarrierState& OutState,
-		UE::UAI::Contract::FDiagnostic& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		bool bObserveComponents = false,
+		UE::Geometry::FDynamicMesh3* OutMesh = nullptr);
 
 	TSharedPtr<FJsonObject> BuildDraftState(
 		const FCarrierState& State);

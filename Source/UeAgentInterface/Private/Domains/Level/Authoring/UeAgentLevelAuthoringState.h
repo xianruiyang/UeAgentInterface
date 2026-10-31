@@ -11,12 +11,20 @@
 class AActor;
 class AWorldDataLayers;
 class UActorComponent;
+class UClass;
 class UDataLayerInstance;
 class UWorld;
 class FJsonObject;
 
 namespace UeAgentLevelAuthoring
 {
+	inline constexpr TCHAR SceneEditingProfileId[] = TEXT("scene_editing");
+	/** Reflected Actor/Component properties in the optional scene-editing projection.
+	 * Spatial state and hierarchy keep their existing dedicated contracts. */
+	UEAGENTINTERFACE_API bool IsSceneEditingProperty(const FString& PropertyPath, bool bComponent);
+	UEAGENTINTERFACE_API bool IsSceneEditingProperty(const FString& PropertyPath, bool bComponent, const UClass* TargetClass);
+	/** Defer these names to the same policy after resolving the actual native class. */
+	UEAGENTINTERFACE_API bool RequiresSceneEditingClassCheck(const FString& PropertyPath, bool bComponent);
 	enum class EDataLayerTargetScope : uint8
 	{
 		Any,
@@ -106,11 +114,15 @@ namespace UeAgentLevelAuthoring
 	UEAGENTINTERFACE_API bool BuildActorExportReadRequests(
 		AActor& Actor,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		UE::UAI::Contract::FDiagnostic& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		bool bSceneEditing = false);
+	TSet<FName> ComponentStructuralProperties(const UActorComponent& Component);
+
 	UEAGENTINTERFACE_API bool BuildComponentExportReadRequests(
 		UActorComponent& Component,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		UE::UAI::Contract::FDiagnostic& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		bool bSceneEditing = false);
 
 	UEAGENTINTERFACE_API bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool RegisterNativeDefaultProvider(UE::UAI::Contract::FDiagnostic& OutError);

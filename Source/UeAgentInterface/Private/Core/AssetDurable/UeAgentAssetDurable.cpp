@@ -3,16 +3,14 @@
 #include "Core/AssetDurable/UeAgentPackageHeader.h"
 #include "Core/AssetDurable/UeAgentPackageSave.h"
 #include "Utilities/UeAgentFileOperationDiagnostic.h"
+#include "Utilities/UeAgentNativeOperationFeedback.h"
 
 #include "Core/Contract/UeAgentContract.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
-#include "HAL/PlatformTLS.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
-#include "Misc/OutputDevice.h"
-#include "Misc/OutputDeviceRedirector.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
@@ -41,32 +39,7 @@ namespace UE::UAI::AssetDurable
 
 	namespace
 	{
-		class FNativeOperationFeedback final : public FOutputDevice
-		{
-		public:
-			FNativeOperationFeedback() : ThreadId(FPlatformTLS::GetCurrentThreadId())
-			{ if (GLog) GLog->AddOutputDevice(this); }
-			~FNativeOperationFeedback() override
-			{ if (GLog) GLog->RemoveOutputDevice(this); }
-			bool CanBeUsedOnAnyThread() const override { return true; }
-			// GLog buffers devices unless this is true. Only the originating thread
-			// records messages, so concurrent calls from other threads are read-only.
-			bool CanBeUsedOnMultipleThreads() const override { return true; }
-			void Serialize(const TCHAR* Text, ELogVerbosity::Type Verbosity, const FName& Category) override
-			{
-				if (FPlatformTLS::GetCurrentThreadId() != ThreadId) return;
-				// UE native APIs may return only false; FMessageDialog also logs its
-				// unattended default result at ordinary verbosity. Keep that evidence
-				// as feedback, without interpreting it or overriding the native result.
-				if (Verbosity > ELogVerbosity::Warning
-					&& FCString::Strncmp(Text, TEXT("Message dialog closed,"), 22) != 0) return;
-				Messages.AddUnique(Category.IsNone() ? FString(Text) : Category.ToString() + TEXT(": ") + Text);
-			}
-			FString GetDetail() const { return FString::Join(Messages, TEXT("\n")); }
-		private:
-			uint32 ThreadId;
-			TArray<FString> Messages;
-		};
+		using NativeFeedback::FNativeOperationFeedback;
 
 		const TCHAR* JournalSchemaV1 =
 			TEXT("uai.c8d.asset_durable.journal.v1");
@@ -2075,9 +2048,21 @@ namespace UE::UAI::AssetDurable
 				}
 				ArtifactIds.Add(ArtifactId);
 				PreviousArtifactId = ArtifactId;
+				TArray<FString> AdditionalExtensions = ExistingTarget
+					? ExistingTarget->GetAdditionalPackageExtensions() : TArray<FString>();
+				if (Role.StartsWith(TEXT("package_sidecar:")))
+					AdditionalExtensions.AddUnique(Role.Mid(16));
+				const FAssetDurableTarget RestoredTarget(Identity, ArtifactKind, DurableLocation,
+					Intent, ERollbackGrade::DurableBackup, MoveTemp(AdditionalExtensions));
+				if (!RestoredTarget.IsValid())
+				{
+					OutError = JournalFailure(TEXT("The journal declares an unsupported native package sidecar."), ArtifactPath + TEXT(".role"));
+					OutError.PublicCause = MakeShared<FAssetDurableError>(RestoredTarget.GetValidationDiagnostic());
+					return false;
+				}
 				TargetsByKey.Add(
 					TargetKey,
-					ParsedTarget);
+					RestoredTarget);
 			}
 			if (Artifacts.IsEmpty())
 			{
@@ -2410,13 +2395,14 @@ namespace UE::UAI::AssetDurable
 		FString InPackageName,
 		const EPackageHeaderKind InHeaderKind,
 		const EAssetDurableIntent InIntent,
-		const ERollbackGrade InRollbackGrade)
+		const ERollbackGrade InRollbackGrade,
+		TArray<FString> InAdditionalPackageExtensions)
 		: FAssetDurableTarget(
 			MoveTemp(InIdentity),
 			EDurableArtifactKind::Package,
 			MoveTemp(InPackageName),
 			InIntent,
-			InRollbackGrade)
+			InRollbackGrade, MoveTemp(InAdditionalPackageExtensions))
 	{
 		PackageHeaderKind = InHeaderKind;
 	}
@@ -2426,7 +2412,8 @@ namespace UE::UAI::AssetDurable
 		const EDurableArtifactKind InArtifactKind,
 		FString InDurableLocation,
 		const EAssetDurableIntent InIntent,
-		const ERollbackGrade InRollbackGrade)
+		const ERollbackGrade InRollbackGrade,
+		TArray<FString> InAdditionalPackageExtensions)
 		: Identity(MoveTemp(InIdentity))
 		, ArtifactKind(InArtifactKind)
 		, DurableLocation(
@@ -2450,6 +2437,24 @@ namespace UE::UAI::AssetDurable
 			Error.PropertyPath = TEXT("durable_location");
 			ValidationDiagnostic = MakeShared<FAssetDurableError>(MoveTemp(Error));
 		}
+		for (FString Extension : InAdditionalPackageExtensions)
+		{
+			Extension.TrimStartAndEndInline();
+			Extension.ToLowerInline();
+			if (ArtifactKind != EDurableArtifactKind::Package || Intent != EAssetDurableIntent::Native
+				|| (Extension != TEXT(".uexp") && Extension != TEXT(".ubulk")
+					&& Extension != TEXT(".uptnl") && Extension != TEXT(".m.ubulk")))
+			{
+				FAssetDurableError Error = FAssetDurableError::Failure(TEXT("durable_native_sidecar_invalid"),
+					TEXT("Explicit package sidecars require native package intent and a supported UE package extension (.uexp, .ubulk, .uptnl or .m.ubulk)."), TEXT("durable"));
+				Error.PropertyPath = TEXT("additional_package_extensions");
+				Error.ActualValue = MakeShared<FJsonValueString>(Extension);
+				ValidationDiagnostic = MakeShared<FAssetDurableError>(MoveTemp(Error));
+				break;
+			}
+			AdditionalPackageExtensions.AddUnique(MoveTemp(Extension));
+		}
+		AdditionalPackageExtensions.Sort();
 	}
 
 	const FUeAgentCanonicalIdentity&
@@ -2478,6 +2483,11 @@ namespace UE::UAI::AssetDurable
 	EPackageHeaderKind FAssetDurableTarget::GetPackageHeaderKind() const
 	{
 		return PackageHeaderKind;
+	}
+
+	const TArray<FString>& FAssetDurableTarget::GetAdditionalPackageExtensions() const
+	{
+		return AdditionalPackageExtensions;
 	}
 
 	FString FAssetDurableTarget::GetDurableTargetKey() const
@@ -3133,18 +3143,30 @@ namespace UE::UAI::AssetDurable
 
 	FPackageAssetDurableBackend::FPackageAssetDurableBackend(
 		FString InAllowedContentRoot)
+		: FPackageAssetDurableBackend(MoveTemp(InAllowedContentRoot), {})
+	{
+	}
+
+	FPackageAssetDurableBackend::FPackageAssetDurableBackend(
+		FString InAllowedContentRoot, TArray<FString> InAdditionalContentRoots)
 		: AllowedContentRoot(
 			FullPath(
 				InAllowedContentRoot.TrimStartAndEnd().IsEmpty()
 					? FPaths::ProjectContentDir()
 					: InAllowedContentRoot))
 	{
+		for (const FString& Root : InAdditionalContentRoots)
+		{
+			if (!Root.TrimStartAndEnd().IsEmpty()) AdditionalContentRoots.AddUnique(FullPath(Root));
+		}
 	}
 
 	TArray<FString>
 	FPackageAssetDurableBackend::GetAllowedArtifactRoots() const
 	{
-		return {AllowedContentRoot};
+		TArray<FString> Roots = {AllowedContentRoot};
+		Roots.Append(AdditionalContentRoots);
+		return Roots;
 	}
 
 	bool FPackageAssetDurableBackend::SupportsAtomicity(
@@ -3227,6 +3249,12 @@ namespace UE::UAI::AssetDurable
 				PayloadPath,
 				Target.GetIntent(),
 				TEXT("package_payload"));
+			for (const FString& Extension : Target.GetAdditionalPackageExtensions())
+			{
+				const FString Role = TEXT("package_sidecar:") + Extension;
+				Artifacts.Emplace(DurableArtifactId(Target, Role), Target.GetIdentity(), PackageName,
+					FPaths::ChangeExtension(HeaderPath, Extension.Mid(1)), Target.GetIntent(), Role);
+			}
 		}
 		Artifacts.Sort(
 			[](const FDurableArtifact& Left,

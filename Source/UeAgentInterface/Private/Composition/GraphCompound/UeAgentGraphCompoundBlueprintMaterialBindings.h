@@ -85,6 +85,8 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		/** Empty selects Saved/UeAgentInterface/GraphCompoundDurable. */
 		FString DurableJournalRoot;
+		/** Domain-owned extra package roots; omitted by ordinary project-only consumers. */
+		TArray<FString> AdditionalDurableContentRoots;
 	};
 
 	/** Creates the complete exact query and operation owner set. */

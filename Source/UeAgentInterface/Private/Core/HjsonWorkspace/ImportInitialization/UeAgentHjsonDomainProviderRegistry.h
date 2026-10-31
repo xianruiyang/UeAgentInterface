@@ -15,6 +15,7 @@ class UClass;
 namespace UE::UAI::HjsonWorkspace
 {
 	class FAuthoringModel;
+	struct FPreparedWorkspaceExport;
 	class UEAGENTINTERFACE_API FImportInitializationDomainRequest final
 	{
 	public:
@@ -40,6 +41,16 @@ namespace UE::UAI::HjsonWorkspace
 		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 		const TOptional<FSourceProvenance>& GetSchemaSource() const;
 		const TOptional<FSourceProvenance>& GetRootTypeSource() const;
+		void SetWorkspaceExportPreparation(TSharedPtr<FPreparedWorkspaceExport> Preparation)
+		{
+			WorkspaceExportPreparation = MoveTemp(Preparation);
+		}
+		const TSharedPtr<FPreparedWorkspaceExport>& GetWorkspaceExportPreparation() const
+		{
+			return WorkspaceExportPreparation;
+		}
+		void SetWorkspaceProfileId(FString ProfileId) { WorkspaceProfileId = MoveTemp(ProfileId); }
+		const FString& GetWorkspaceProfileId() const { return WorkspaceProfileId; }
 
 	private:
 		FString CommandId;
@@ -52,6 +63,8 @@ namespace UE::UAI::HjsonWorkspace
 		TOptional<FSourceProvenance> SchemaSource;
 		TOptional<FSourceProvenance> RootTypeSource;
 		TSharedPtr<const Contract::FDiagnostic> ValidationDiagnostic;
+		TSharedPtr<FPreparedWorkspaceExport> WorkspaceExportPreparation;
+		FString WorkspaceProfileId;
 	};
 
 	class UEAGENTINTERFACE_API FImportInitializationDomainResponse final

@@ -598,11 +598,11 @@ namespace UeAgentMaterialAuthoring
 				ReadString(Request.Input->Target, TEXT("asset_path"), State->AssetPath);
 				State->AssetPath = NormalizePackagePath(State->AssetPath);
 				if (!FPackageName::IsValidLongPackageName(State->AssetPath)
-					|| (!State->AssetPath.Equals(TEXT("/Game")) && !State->AssetPath.StartsWith(TEXT("/Game/"))))
+					|| (!State->AssetPath.StartsWith(TEXT("/Game/")) && !State->AssetPath.StartsWith(TEXT("/UeAgentInterface/Materials/"))))
 				{
-					SetFailure(OutFailure, MutationFailure(TEXT("invalid_asset_path"), TEXT("Material graph asset_path must be a valid package under /Game."),
+					SetFailure(OutFailure, MutationFailure(TEXT("invalid_asset_path"), TEXT("Material graph asset_path must be a valid package under /Game or /UeAgentInterface/Materials."),
 						TEXT("asset_path"), Request.Input->Target->TryGetField(TEXT("asset_path")),
-						MakeShared<FJsonValueString>(TEXT("/Game/<folder>/<asset>")), Request.Input->Target.Get()));
+						MakeShared<FJsonValueString>(TEXT("/Game/<folder>/<asset> or /UeAgentInterface/Materials/<asset>")), Request.Input->Target.Get()));
 					return false;
 				}
 				State->Owner = LoadGraphOwner(State->AssetPath);

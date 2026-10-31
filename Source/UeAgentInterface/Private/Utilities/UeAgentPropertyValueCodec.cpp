@@ -2754,6 +2754,40 @@ FString EncodeEnumValueName(const UEnum* Enum, int64 Raw) {
   return Enum ? Enum->GetNameStringByValue(Raw) : FString();
 }
 
+bool TryEncodePathOnlyAssetReferences(FProperty* Property, const void* ValuePtr,
+    UObject* Owner, TSharedPtr<FJsonValue>& OutValue) {
+  OutValue.Reset();
+  TFunction<bool(const FProperty*)> IsPathShape = [&](const FProperty* Field) {
+    if (!Field || Field->HasAnyPropertyFlags(CPF_InstancedReference | CPF_ContainsInstancedReference)) return false;
+    if (const auto* Array = CastField<FArrayProperty>(Field)) return IsPathShape(Array->Inner);
+    const auto* Object = CastField<FObjectPropertyBase>(Field);
+    return Object && !UeAgentAuthoringReflection::IsOwnedObjectProperty(Object);
+  };
+  if (!ValuePtr || !IsPathShape(Property)) return false;
+  TFunction<bool(const FProperty*, const void*, bool)> HasPathValue =
+      [&](const FProperty* Field, const void* Data, bool bSingleElement) {
+    if (!bSingleElement && Field->ArrayDim > 1) {
+      for (int32 Index = 0; Index < Field->ArrayDim; ++Index)
+        if (!HasPathValue(Field, static_cast<const uint8*>(Data) + Index * Field->ElementSize, true)) return false;
+      return true;
+    }
+    if (const auto* Array = CastField<FArrayProperty>(Field)) {
+      FScriptArrayHelper Values(Array, Data);
+      for (int32 Index = 0; Index < Values.Num(); ++Index)
+        if (!HasPathValue(Array->Inner, Values.GetRawPtr(Index), false)) return false;
+      return true;
+    }
+    if (CastField<FSoftObjectProperty>(Field)) return true;
+    const auto* Object = CastField<FObjectPropertyBase>(Field);
+    if (!Object || UeAgentAuthoringReflection::IsExistingInlineObjectProperty(Object, Data, Owner)) return false;
+    const UObject* Referenced = Object->GetObjectPropertyValue(Data);
+    return !Referenced || Referenced->IsAsset();
+  };
+  if (!HasPathValue(Property, ValuePtr, false)) return false;
+  OutValue = Encode(Property, ValuePtr, Owner, FOptions{});
+  return OutValue.IsValid();
+}
+
 TSharedPtr<FJsonValue> EncodeReferencePath(const FString& Path) {
   const auto Object = MakeShared<FJsonObject>();
   if (Path.IsEmpty()) Object->SetField(TEXT("path"), MakeShared<FJsonValueNull>());

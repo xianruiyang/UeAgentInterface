@@ -167,7 +167,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					EUeAgentStatePlane::CompiledGenerated,
 					EUeAgentStatePlane::RenderedObservation,
 				},
-				TEXT(R"json({"type":"object","properties":{"sample_kind":{"type":"string","enum":["bounds","vertex"]},"index":{"type":"integer","minimum":0}},"required":["sample_kind"],"additionalProperties":false})json"),
+				TEXT(R"json({"type":"object","properties":{"sample_kind":{"type":"string","enum":["bounds","vertex","section"]},"index":{"type":"integer","minimum":0}},"required":["sample_kind"],"additionalProperties":false})json"),
 				OutError);
 		}
 

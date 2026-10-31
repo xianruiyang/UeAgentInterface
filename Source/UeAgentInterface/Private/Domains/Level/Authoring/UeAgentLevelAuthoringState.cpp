@@ -3,15 +3,20 @@
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 
 #include "Components/ActorComponent.h"
+#include "Components/LightComponentBase.h"
+#include "Components/LocalLightComponent.h"
 #include "Components/SceneComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringAuthorability.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringDescriptors.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringSpatial.h"
+#include "Domains/Level/Authoring/UeAgentLevelWorldTopology.h"
 #include "Domains/PCG/Authoring/UeAgentPcgComponentAuthoring.h"
 #include "Editor.h"
 #include "Engine/Engine.h"
+#include "Engine/Level.h"
+#include "Engine/PostProcessVolume.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
@@ -28,6 +33,7 @@
 #include "WorldPartition/DataLayer/DataLayerAsset.h"
 #include "WorldPartition/DataLayer/DataLayerInstance.h"
 #include "WorldPartition/DataLayer/WorldDataLayers.h"
+#include "WorldPartition/HLOD/HLODActor.h"
 
 namespace UeAgentLevelAuthoring {
 namespace {
@@ -119,11 +125,19 @@ bool AppendEditableProperties(
     const FString &TargetKind, const TMap<FString, FString> &BaseSelectors,
     const TSet<FName> &Excluded,
     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    UE::UAI::Contract::FDiagnostic& OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing = false) {
   UeAgentAuthoringState::FEditablePropertyReadOptions Options;
   Options.SemanticId = SemanticId;
+  const auto IdentityScope = MakeShared<FJsonObject>();
+  IdentityScope->SetStringField(TEXT("model"), ModelId);
+  IdentityScope->SetStringField(TEXT("target_kind"), TargetKind);
+  const auto SelectorScope = MakeShared<FJsonObject>();
+  for (const auto& Selector : BaseSelectors) SelectorScope->SetStringField(Selector.Key, Selector.Value);
+  IdentityScope->SetObjectField(TEXT("selectors"), SelectorScope);
+  Options.RequestIdentityScope = UeAgentAuthoringState::MakeStableCanonicalValueKey(MakeShared<FJsonValueObject>(IdentityScope));
   Options.ExcludedProperties = Excluded;
-  Options.IncludeProperty = [](const FProperty* Property, const void* Value, const UObject* Owner) {
+  Options.IncludeProperty = [bSceneEditing, bComponent = TargetKind == TEXT("level_component_property")](const FProperty* Property, const void* Value, const UObject* Owner) {
+    if (bSceneEditing && !IsSceneEditingProperty(Property->GetName(), bComponent, Owner ? Owner->GetClass() : nullptr)) return false;
     const auto* Actor = Cast<AActor>(Owner);
     const auto* ObjectProperty = CastField<FObjectPropertyBase>(Property);
     const auto* Component = Actor && ObjectProperty
@@ -180,6 +194,9 @@ TSharedRef<FJsonObject>
 BuildActorState(const AActor &Actor,
                 const TMap<FString, FString> *Context = nullptr) {
   TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+  Result->SetStringField(TEXT("level"), Context && Context->Contains(TEXT("actor_level_override"))
+      ? Context->FindRef(TEXT("actor_level_override"))
+      : Actor.GetLevel() ? Actor.GetLevel()->GetPackage()->GetName() : FString());
   const bool bOmitGeneratedLabel =
       Context && Context->FindRef(TEXT("actor_label_omit")) == TEXT("true");
   if (!bOmitGeneratedLabel) {
@@ -255,8 +272,10 @@ TSharedRef<FJsonObject>
 BuildComponentState(const UActorComponent &Component,
                     const TMap<FString, FString> *Context = nullptr) {
   TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-  if (const auto Pcg = UeAgentPcgComponentAuthoring::Read(Component))
-    Result->SetObjectField(TEXT("pcg"), Pcg);
+  if (!Context || Context->FindRef(TEXT("scene_editing")) != TEXT("true")) {
+    if (const auto Pcg = UeAgentPcgComponentAuthoring::Read(Component))
+      Result->SetObjectField(TEXT("pcg"), Pcg);
+  }
   const USceneComponent *Scene = Cast<USceneComponent>(&Component);
   if (!Scene)
     return Result;
@@ -346,7 +365,13 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
       OutValue.AvailabilityReason = TEXT("world_not_found");
       return UeAgentAuthoringState::EReadOutcome::Unavailable;
     }
-    OutValue.Value = MakeShared<FJsonValueObject>(BuildWorldTarget(*World));
+    TSharedPtr<FJsonObject> State;
+    if (Request.SemanticId == WorldStateSemanticId) {
+      if (const FString* Override = Request.Context.Find(TEXT("world_topology_override")))
+        FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(*Override), State);
+    }
+    OutValue.Value = MakeShared<FJsonValueObject>(State.IsValid() ? State.ToSharedRef()
+        : Request.SemanticId == WorldTargetSemanticId ? BuildWorldTarget(*World) : CaptureWorldTopology(*World));
     return UeAgentAuthoringState::EReadOutcome::Resolved;
   }
 
@@ -494,7 +519,7 @@ bool TryBindManagedActorOwnership(AActor &Actor, const FString &ManagedId,
       return false;
     }
   }
-  for (TActorIterator<AActor> It(World); It; ++It) {
+  for (TActorIterator<AActor> It(World, AActor::StaticClass(), EActorIteratorFlags::SkipPendingKill); It; ++It) {
     AActor *const Candidate = *It;
     if (!Candidate || Candidate == &Actor || Candidate->IsActorBeingDestroyed())
       continue;
@@ -577,7 +602,7 @@ bool TryFindManagedActorExact(UWorld &World, const FString &ManagedId,
   }
 
   TArray<AActor *> Matches;
-  for (TActorIterator<AActor> It(&World); It; ++It) {
+  for (TActorIterator<AActor> It(&World, AActor::StaticClass(), EActorIteratorFlags::SkipPendingKill); It; ++It) {
     AActor *const Candidate = *It;
     if (!Candidate || Candidate->IsActorBeingDestroyed())
       continue;
@@ -832,7 +857,7 @@ AActor *FindActorExact(UWorld &World,
   }
 
   AActor *Match = nullptr;
-  for (TActorIterator<AActor> It(&World); It; ++It) {
+  for (TActorIterator<AActor> It(&World, AActor::StaticClass(), EActorIteratorFlags::SkipPendingKill); It; ++It) {
     AActor *Candidate = *It;
     if (!Candidate)
       continue;
@@ -1003,6 +1028,8 @@ bool BuildWorldExportReadRequests(
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   if (!BuildWorldIdentity(World, Identity, OutError) ||
       !AddReadRequest(WorldTargetSemanticId, Identity, &World, false,
+                      OutRequests) ||
+      !AddReadRequest(WorldStateSemanticId, Identity, &World, false,
                       OutRequests)) return false;
   const AWorldSettings* Settings = World.GetWorldSettings();
   if (!Settings) {
@@ -1019,9 +1046,48 @@ bool BuildWorldExportReadRequests(
       OutError);
 }
 
+static FName SceneEditingRootProperty(const FString& PropertyPath) {
+  int32 End = PropertyPath.Len();
+  int32 Index;
+  if (PropertyPath.FindChar(TEXT('.'), Index)) End = FMath::Min(End, Index);
+  if (PropertyPath.FindChar(TEXT('['), Index)) End = FMath::Min(End, Index);
+  return FName(*PropertyPath.Left(End));
+}
+
+static UClass* SceneEditingPropertyClass(const FName Name, bool bComponent) {
+  if (bComponent && Name == TEXT("Intensity")) return ULightComponentBase::StaticClass();
+  if (bComponent && Name == TEXT("AttenuationRadius")) return ULocalLightComponent::StaticClass();
+  if (!bComponent && Name == TEXT("Settings")) return APostProcessVolume::StaticClass();
+  return nullptr;
+}
+
+bool RequiresSceneEditingClassCheck(const FString& PropertyPath, bool bComponent) {
+  return SceneEditingPropertyClass(SceneEditingRootProperty(PropertyPath), bComponent) != nullptr;
+}
+
+bool IsSceneEditingProperty(const FString& PropertyPath, bool bComponent) {
+  const FName Name = SceneEditingRootProperty(PropertyPath);
+  if (!bComponent) return Name == TEXT("bHidden");
+  static const TSet<FName> Properties = {
+      TEXT("StaticMesh"), TEXT("SkeletalMeshAsset"), TEXT("OverrideMaterials"),
+      TEXT("Mobility"), TEXT("bVisible"), TEXT("bHiddenInGame"), TEXT("CastShadow")};
+  return Properties.Contains(Name);
+}
+
+bool IsSceneEditingProperty(const FString& PropertyPath, bool bComponent, const UClass* TargetClass) {
+  if (IsSceneEditingProperty(PropertyPath, bComponent)) return true;
+  const FName Name = SceneEditingRootProperty(PropertyPath);
+  const UClass* RequiredClass = SceneEditingPropertyClass(Name, bComponent);
+  if (!RequiredClass || !TargetClass || !TargetClass->HasAnyClassFlags(CLASS_Native)
+      || TargetClass->ClassGeneratedBy || !TargetClass->GetPathName().StartsWith(TEXT("/Script/Engine."))
+      || !TargetClass->IsChildOf(RequiredClass)) return false;
+  const FProperty* Property = FindFProperty<FProperty>(TargetClass, Name);
+  return Property && Property->GetOwnerClass() == RequiredClass;
+}
+
 bool BuildActorExportReadRequests(
     AActor &Actor, TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    UE::UAI::Contract::FDiagnostic& OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing) {
   OutRequests.Reset();
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   const TMap<FString, FString> Selectors = ActorSelectors(Actor);
@@ -1037,13 +1103,23 @@ bool BuildActorExportReadRequests(
       &Actor, ActorPropertySemanticId, ActorPropertyIdentityModelId,
       TEXT("level_actor_property"), Selectors,
       {TEXT("ActorGuid"), TEXT("RootComponent"), TEXT("Tags")}, OutRequests,
-      OutError);
+      OutError, bSceneEditing);
+}
+
+TSet<FName> ComponentStructuralProperties(const UActorComponent& Component) {
+  TSet<FName> Excluded =
+      {TEXT("AttachParent"), TEXT("AttachSocketName"), TEXT("RelativeLocation"),
+       TEXT("RelativeRotation"), TEXT("RelativeScale3D"), TEXT("CreationMethod")};
+  if (Component.IsA<UPCGComponent>()) Excluded.Add(TEXT("GraphInstance"));
+  if (Component.GetOwner() && Component.GetOwner()->IsA<AWorldPartitionHLOD>())
+    Excluded.Add(TEXT("bVisible"));
+  return Excluded;
 }
 
 bool BuildComponentExportReadRequests(
     UActorComponent &Component,
     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    UE::UAI::Contract::FDiagnostic& OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing) {
   OutRequests.Reset();
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   const TMap<FString, FString> Selectors = ComponentSelectors(Component);
@@ -1055,15 +1131,13 @@ bool BuildComponentExportReadRequests(
                       OutRequests)) {
     return false;
   }
-  TSet<FName> Excluded =
-      {TEXT("AttachParent"), TEXT("AttachSocketName"), TEXT("RelativeLocation"),
-       TEXT("RelativeRotation"), TEXT("RelativeScale3D"),
-       TEXT("CreationMethod")};
-  if (Component.IsA<UPCGComponent>()) Excluded.Add(TEXT("GraphInstance"));
+  if (bSceneEditing) {
+    for (auto& Request : OutRequests) Request.Context.Add(TEXT("scene_editing"), TEXT("true"));
+  }
   return AppendEditableProperties(
       &Component, ComponentPropertySemanticId, ComponentPropertyIdentityModelId,
-      TEXT("level_component_property"), Selectors, Excluded,
-      OutRequests, OutError);
+      TEXT("level_component_property"), Selectors, ComponentStructuralProperties(Component),
+      OutRequests, OutError, bSceneEditing);
 }
 
 bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError) {

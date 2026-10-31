@@ -854,6 +854,91 @@
         "component": "spatial_sample"
       },
       "minItems": 1
+    },
+    "bake_context": {
+      "type": "object",
+      "properties": {
+        "sequence_ref": {
+          "component": "target_ref"
+        },
+        "binding_name": {
+          "component": "target_ref"
+        },
+        "controls_input": {
+          "type": "object",
+          "properties": {
+            "target_sequence_ref": {
+              "component": "target_ref"
+            },
+            "binding_ref": {
+              "component": "target_ref"
+            },
+            "rig_ref": {
+              "component": "target_ref"
+            },
+            "authored_range": {
+              "component": "temporal_range"
+            },
+            "sample_rate": {
+              "component": "rate"
+            },
+            "expected_revision": {
+              "component": "revision"
+            }
+          },
+          "required": [
+            "target_sequence_ref",
+            "binding_ref",
+            "rig_ref",
+            "authored_range",
+            "sample_rate",
+            "expected_revision"
+          ],
+          "additionalProperties": false
+        },
+        "animation_input": {
+          "type": "object",
+          "properties": {
+            "source_sequence_ref": {
+              "component": "target_ref"
+            },
+            "target_animation_ref": {
+              "component": "target_ref"
+            },
+            "binding_ref": {
+              "component": "target_ref"
+            },
+            "rig_ref": {
+              "component": "target_ref"
+            },
+            "authored_range": {
+              "component": "temporal_range"
+            },
+            "sample_rate": {
+              "component": "rate"
+            },
+            "expected_revision": {
+              "component": "revision"
+            }
+          },
+          "required": [
+            "source_sequence_ref",
+            "target_animation_ref",
+            "binding_ref",
+            "rig_ref",
+            "authored_range",
+            "sample_rate",
+            "expected_revision"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "sequence_ref",
+        "binding_name",
+        "controls_input"
+      ],
+      "additionalProperties": false
     }
   },
   "descriptors": [
@@ -984,6 +1069,48 @@
           "name": "verification",
           "required": true,
           "component": "verification"
+        }
+      ]
+    },
+    {
+      "capability_id": "rig.control.bake.context",
+      "descriptor_id": "uai.query.rig.control.bake.context",
+      "operation_kind": "query",
+      "provider_binding": "rig_simulation_spatial.control_rig.bake_context",
+      "query_kind": "state",
+      "state_planes": [
+        "authoring_memory",
+        "persisted"
+      ],
+      "required_facets": [],
+      "oracle_kind": "native_sequence_binding_and_revision",
+      "input_fields": [
+        {
+          "name": "sequence_ref",
+          "required": true,
+          "component": "target_ref"
+        },
+        {
+          "name": "binding_name",
+          "required": true,
+          "component": "target_ref"
+        },
+        {
+          "name": "rig_ref",
+          "required": true,
+          "component": "target_ref"
+        },
+        {
+          "name": "target_animation_ref",
+          "required": false,
+          "component": "target_ref"
+        }
+      ],
+      "result_fields": [
+        {
+          "name": "bake_context",
+          "required": true,
+          "component": "bake_context"
         }
       ]
     },
@@ -1964,6 +2091,26 @@
       "oracle_kind": "independent_skeleton_socket_and_parent_bone_readback",
       "requires_native_mutation": true,
       "reads_back_after_mutation": true
+    },
+    {
+      "capability_id": "rig.control.bake.context",
+      "descriptor_id": "uai.query.rig.control.bake.context",
+      "operation_kind": "query",
+      "c3_lane": "c3q",
+      "family_id": "rig_bake",
+      "binding_id": "rig_simulation_spatial.control_rig.bake_context",
+      "typed_operation_id": "rig_simulation_spatial.control_rig.bake_context",
+      "typed_port_id": "uai.rig_simulation_spatial.typed_port.v1",
+      "typed_request_id": "rig_simulation_spatial.control_rig.bake_context.request.v1",
+      "typed_result_id": "rig_simulation_spatial.control_rig.bake_context.result.v1",
+      "c6_change_kind": "",
+      "native_action_id": "rig_simulation_spatial.control_rig.bake_context.observe",
+      "readback_id": "rig_simulation_spatial.control_rig.bake_context.readback",
+      "readback_owner": "independent_rig_simulation_spatial_reader",
+      "settle_barrier": "none",
+      "oracle_kind": "native_sequence_binding_and_revision",
+      "requires_native_mutation": false,
+      "reads_back_after_mutation": false
     },
     {
       "capability_id": "rig.control.bake.animation",

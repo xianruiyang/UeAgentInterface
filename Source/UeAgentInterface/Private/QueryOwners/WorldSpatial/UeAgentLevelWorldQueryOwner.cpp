@@ -5,6 +5,7 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "DomainAdapters/WorldSpatial/UeAgentLevelWorldDomainMechanics.h"
 #include "Dom/JsonObject.h"
+#include "Domains/Level/Authoring/UeAgentLevelComponentCandidates.h"
 
 namespace UE::UAI::QueryOwners::WorldSpatial
 {
@@ -16,6 +17,22 @@ namespace UE::UAI::QueryOwners::WorldSpatial
 	{
 		return CommandId.StartsWith(TEXT("content_graph."))
 			&& CommandId != TEXT("content_graph.import_workspace");
+	}
+
+	bool TryExecuteComponentCandidateQuery(const FString& CanonicalParamsJson,
+		FString& OutPayloadJson, FWorkspaceError& OutError)
+	{
+		OutPayloadJson.Reset();
+		OutError.Reset();
+		TSharedPtr<FJsonObject> Params;
+		Contract::FDiagnostic Error;
+		if (!Json::TryParseObject(CanonicalParamsJson, Params, Error)
+			|| !UeAgentLevelAuthoring::QueryComponentCandidates(Params, OutPayloadJson, Error))
+		{
+			OutError.SetFailure(MoveTemp(Error));
+			return false;
+		}
+		return true;
 	}
 
 	bool TryExecuteActorCandidateQuery(

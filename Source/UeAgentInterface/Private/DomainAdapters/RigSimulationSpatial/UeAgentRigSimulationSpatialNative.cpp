@@ -1,5 +1,7 @@
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialNative.h"
 #include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
 #include "Animation/AnimData/IAnimationDataModel.h"
@@ -20,6 +22,7 @@
 #include "MovieScene.h"
 #include "MovieSceneBinding.h"
 #include "MovieSceneBindingProxy.h"
+#include "MovieSceneTimeHelpers.h"
 #include "Rigs/FKControlRig.h"
 #include "Sequencer/MovieSceneControlRigParameterSection.h"
 #include "SequencerTools.h"
@@ -158,6 +161,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		bool IsImplementedCapability(const FString& CapabilityId)
 		{
 			return CapabilityId == TEXT("rig.skeleton.preview_mesh.bind")
+				|| CapabilityId == TEXT("rig.control.bake.context")
 				|| CapabilityId == TEXT("rig.skeleton.socket.update")
 				|| CapabilityId == TEXT("rig.control.bake.animation")
 				|| CapabilityId == TEXT("rig.control.bake.controls");
@@ -404,7 +408,8 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			const FString& State,
 			const FUeAgentOperationContext& Context,
 			TSharedPtr<const FUeAgentCanonicalSnapshot>& OutSnapshot,
-			FUeAgentRigSimulationSpatialExecutionError& OutError)
+			FUeAgentRigSimulationSpatialExecutionError& OutError,
+			const TSharedPtr<FJsonObject>& BakeContext = nullptr)
 		{
 			FUeAgentCanonicalValuePtr RefValue;
 			FUeAgentCanonicalValuePtr CapabilityValue;
@@ -414,12 +419,18 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			if (!TryStringValue(PublicRef, Context, RefValue, OutError, TEXT("/public_ref"))
 				|| !TryStringValue(Contract.GetCapabilityId(), Context,
 					CapabilityValue, OutError, TEXT("/capability_id"))
-				|| !TryStringValue(State, Context, StateValue, OutError, TEXT("/observed_state"))
-				|| !FUeAgentCanonicalValue::TryObject({
-						{TEXT("public_ref"), RefValue.ToSharedRef()},
-						{TEXT("capability_id"), CapabilityValue.ToSharedRef()},
-						{TEXT("observed_state"), StateValue.ToSharedRef()}},
-					Context.GetResourceTracker(), ObjectValue, Error))
+				|| !TryStringValue(State, Context, StateValue, OutError, TEXT("/observed_state"))) return false;
+			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields = {
+				{TEXT("public_ref"), RefValue.ToSharedRef()},
+				{TEXT("capability_id"), CapabilityValue.ToSharedRef()},
+				{TEXT("observed_state"), StateValue.ToSharedRef()}};
+			if (BakeContext)
+			{
+				if (!CanonicalJson::TryFromJsonValue(MakeShared<FJsonValueObject>(BakeContext),
+					Context.GetResourceTracker(), ObjectValue, OutError)) return false;
+			}
+			else if (!FUeAgentCanonicalValue::TryObject(Fields,
+				Context.GetResourceTracker(), ObjectValue, Error))
 			{
 				if (OutError.IsValid()) return false;
 				NativeContext(Error, FString(), true);
@@ -435,7 +446,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				FUeAgentCanonicalIdentity(
 					TEXT("rig-simulation-spatial:") + Contract.GetCapabilityId(),
 					TEXT("rig_simulation_spatial_target"), PublicRef, PublicRef,
-					TEXT("result"), TEXT("native-observation-v1")),
+					BakeContext ? TEXT("bake_context") : TEXT("result"), TEXT("native-observation-v1")),
 				FUeAgentCanonicalType(Contract.GetTypedResultId(),
 					EUeAgentValueKind::Object, false, TEXT("object")),
 				ObjectValue.ToSharedRef(),
@@ -636,6 +647,83 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			return FString();
 		}
 
+		bool ReadBakeContext(const FRigControlBakeContextInput& Input,
+			IUeAgentRigSimulationSpatialNativeEnvironment& Environment,
+			TSharedPtr<FJsonObject>& OutContext, FString& OutState,
+			FUeAgentRigSimulationSpatialExecutionError& OutError)
+		{
+			const auto* Binding = Environment.FindRigBakeBinding(Input.BindingName);
+			ULevelSequence* Sequence = Cast<ULevelSequence>(Environment.ResolveExplicitObject(Input.SequenceRef));
+			UClass* RigClass = Cast<UClass>(Environment.ResolveExplicitObject(Input.RigRef));
+			UMovieScene* MovieScene = Sequence ? Sequence->GetMovieScene() : nullptr;
+			if (!Binding || Binding->Sequence.Get() != Sequence || !MovieScene)
+				return MissingNative(OutError, TEXT("rig_simulation_spatial_rig_bake_binding_unavailable"),
+					TEXT("The requested sequence has no resolved skeletal binding."), TEXT("/binding_name"), Input.BindingName);
+			if (!RigClass || !RigClass->IsChildOf(UControlRig::StaticClass()))
+				return MissingNative(OutError, TEXT("rig_simulation_spatial_rig_bake_binding_unavailable"),
+					TEXT("The rig reference must resolve to a Control Rig generated class."), TEXT("/rig_ref"), Input.RigRef);
+			const TRange<FFrameNumber> Range = MovieScene->GetPlaybackRange();
+			if (!Range.HasLowerBound() || !Range.HasUpperBound() || Range.IsEmpty())
+				return MissingNative(OutError, TEXT("rig_simulation_spatial_bake_range_unavailable"),
+					TEXT("The sequence requires a finite nonempty playback range for baking."), TEXT("/playback_range"), Input.SequenceRef);
+			const auto RateJson = [](const FFrameRate& Rate)
+			{
+				auto Json = MakeShared<FJsonObject>();
+				Json->SetStringField(TEXT("numerator"), ::LexToString(Rate.Numerator));
+				Json->SetStringField(TEXT("denominator"), ::LexToString(Rate.Denominator));
+				return Json;
+			};
+			const auto RevisionJson = [](const FRigSimulationSpatialRevision& Revision)
+			{
+				auto Json = MakeShared<FJsonObject>();
+				Json->SetStringField(TEXT("source_id"), Revision.SourceId);
+				Json->SetStringField(TEXT("generation"), Revision.Generation);
+				Json->SetStringField(TEXT("sequence"), ::LexToString(Revision.Sequence));
+				return Json;
+			};
+			auto AuthoredRange = MakeShared<FJsonObject>();
+			AuthoredRange->SetStringField(TEXT("clock_id"), Binding->NativeAuthoredClockId);
+			AuthoredRange->SetStringField(TEXT("lower_tick"), ::LexToString(UE::MovieScene::DiscreteInclusiveLower(Range).Value));
+			AuthoredRange->SetStringField(TEXT("upper_tick"), ::LexToString(UE::MovieScene::DiscreteExclusiveUpper(Range).Value));
+			AuthoredRange->SetObjectField(TEXT("rate"), RateJson(MovieScene->GetTickResolution()));
+			AuthoredRange->SetStringField(TEXT("state"), TEXT("authored"));
+			const auto CommonInput = [&]()
+			{
+				auto Json = MakeShared<FJsonObject>();
+				Json->SetStringField(TEXT("binding_ref"), Binding->BindingGuid.ToString());
+				Json->SetStringField(TEXT("rig_ref"), Input.RigRef);
+				Json->SetObjectField(TEXT("authored_range"), AuthoredRange);
+				Json->SetObjectField(TEXT("sample_rate"), RateJson(MovieScene->GetDisplayRate()));
+				return Json;
+			};
+			FRigSimulationSpatialRevision SequenceRevision;
+			if (!Environment.TryReadRevision(Input.SequenceRef, SequenceRevision, OutError)) return false;
+			auto ControlsInput = CommonInput();
+			ControlsInput->SetStringField(TEXT("target_sequence_ref"), Input.SequenceRef);
+			ControlsInput->SetObjectField(TEXT("expected_revision"), RevisionJson(SequenceRevision));
+			OutContext = MakeShared<FJsonObject>();
+			OutContext->SetStringField(TEXT("sequence_ref"), Input.SequenceRef);
+			OutContext->SetStringField(TEXT("binding_name"), Input.BindingName);
+			OutContext->SetObjectField(TEXT("controls_input"), ControlsInput);
+			OutState = FString::Printf(TEXT("sequence=%s|binding=%s|revision=%lld"),
+				*Input.SequenceRef, *Input.BindingName, SequenceRevision.Sequence);
+			if (!Input.TargetAnimationRef.IsEmpty())
+			{
+				if (!Cast<UAnimSequence>(Environment.ResolveExplicitObject(Input.TargetAnimationRef)))
+					return MissingNative(OutError, TEXT("rig_simulation_spatial_rig_bake_binding_unavailable"),
+						TEXT("The target animation must be an existing AnimSequence."), TEXT("/target_animation_ref"), Input.TargetAnimationRef);
+				FRigSimulationSpatialRevision AnimationRevision;
+				if (!Environment.TryReadRevision(Input.TargetAnimationRef, AnimationRevision, OutError)) return false;
+				auto AnimationInput = CommonInput();
+				AnimationInput->SetStringField(TEXT("source_sequence_ref"), Input.SequenceRef);
+				AnimationInput->SetStringField(TEXT("target_animation_ref"), Input.TargetAnimationRef);
+				AnimationInput->SetObjectField(TEXT("expected_revision"), RevisionJson(AnimationRevision));
+				OutContext->SetObjectField(TEXT("animation_input"), AnimationInput);
+				OutState += FString::Printf(TEXT("|animation=%s|revision=%lld"), *Input.TargetAnimationRef, AnimationRevision.Sequence);
+			}
+			return true;
+		}
+
 		class FReadback final : public IUeAgentRigSimulationSpatialReadbackPort
 		{
 		public:
@@ -675,9 +763,16 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 						MakeShared<FJsonValueString>(PublicRef.IsEmpty() ? TEXT("a nonempty logical reference") : PublicRef), PublicRef);
 				}
 				FDiagnostic Difference;
-				const FString State = ReadState(Contract, *Typed, *Environment, Difference, OutError);
+				TSharedPtr<FJsonObject> BakeContext;
+				FString State;
+				if (Contract.GetCapabilityId() == TEXT("rig.control.bake.context"))
+				{
+					if (!ReadBakeContext(Typed->GetPayload().Get<FRigControlBakeContextInput>(),
+						*Environment, BakeContext, State, OutError)) return false;
+				}
+				else State = ReadState(Contract, *Typed, *Environment, Difference, OutError);
 				if (State.IsEmpty() || !TrySnapshot(Contract, Phase, PublicRef,
-					State, Context, OutSnapshot, OutError)) return false;
+					State, Context, OutSnapshot, OutError, BakeContext)) return false;
 				OutReadback.Emplace(OutSnapshot.ToSharedRef(), MoveTemp(Difference));
 				return true;
 			}
@@ -1330,6 +1425,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		OutPorts.SupportedCapabilities = {
 			TEXT("rig.skeleton.preview_mesh.bind"),
 			TEXT("rig.skeleton.socket.update"),
+			TEXT("rig.control.bake.context"),
 			TEXT("rig.control.bake.animation"),
 			TEXT("rig.control.bake.controls"),
 		};

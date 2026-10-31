@@ -189,11 +189,13 @@ void SetFailure(FOperationFailure& OutFailure, const FString& FallbackCode,
 				EOperation InOperation,
 				UWidgetBlueprint* InExisting,
 				UWidgetBlueprint* InProposed,
+				TUniquePtr<UeAgentBlueprintAssetLifecycle::FScratchBlueprintPackages> InScratchPackages,
 				TUniquePtr<FPreparedUmgMutation> InMutation,
 				FMutationCounters InPreparedCounters,
 				const bool bInCompile,
 				const bool bInSave)
 				: PackagePath(MoveTemp(InPackagePath))
+				, ScratchPackages(MoveTemp(InScratchPackages))
 				, Operation(InOperation)
 				, Existing(InExisting)
 				, Proposed(InProposed)
@@ -221,9 +223,7 @@ void SetFailure(FOperationFailure& OutFailure, const FString& FallbackCode,
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Update)
 				{
-					UPackage* Package = CreatePackage(*FString::Printf(
-						TEXT("/Temp/UAI/UMG/Rollback_%s"),
-						*FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+					UPackage* Package = ScratchPackages->Create(TEXT("UMG_Rollback"));
 					Backup.Reset(Cast<UWidgetBlueprint>(
 						UeAgentBlueprintAssetLifecycle::DuplicateBlueprint(Existing.Get(), Package, NAME_None, true, &OutFailure.Diagnostic)));
 					if (!Backup.IsValid())
@@ -424,6 +424,7 @@ void SetFailure(FOperationFailure& OutFailure, const FString& FallbackCode,
 				// Keep frozen request values/identities, which rebind to the loaded owner.
 				// The mutation holds no strong native graph or property-storage pointers.
 				Existing.Reset();
+				ScratchPackages->Reset();
 				Proposed.Reset();
 				Backup.Reset();
 				Actual = nullptr;
@@ -551,6 +552,7 @@ void SetFailure(FOperationFailure& OutFailure, const FString& FallbackCode,
 			}
 
 			FString PackagePath;
+			TUniquePtr<UeAgentBlueprintAssetLifecycle::FScratchBlueprintPackages> ScratchPackages;
 			EOperation Operation = EOperation::Update;
 			TStrongObjectPtr<UWidgetBlueprint> Existing;
 			TStrongObjectPtr<UWidgetBlueprint> Proposed;
@@ -665,14 +667,19 @@ void SetFailure(FOperationFailure& OutFailure, const FString& FallbackCode,
 					}
 				}
 
+				UeAgentBlueprintAssetLifecycle::FScratchBlueprintPreflightTransaction ScratchTransaction;
+				UE::UAI::Contract::FDiagnostic Error;
+				if (Operation != EOperation::Remove && !ScratchTransaction.Begin(PackagePath, Error))
+				{
+					SetFailure(OutFailure, Error);
+					return false;
+				}
 				UWidgetBlueprint* Proposed = Existing;
 				UWidgetBlueprint* ValidationTarget = nullptr;
-				UE::UAI::Contract::FDiagnostic Error;
+				auto ScratchPackages = MakeUnique<UeAgentBlueprintAssetLifecycle::FScratchBlueprintPackages>();
 				if (Operation != EOperation::Remove)
 				{
-					UPackage* ScratchPackage = CreatePackage(*FString::Printf(
-						TEXT("/Temp/UAI/UMG/Proposed_%s"),
-						*FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+					UPackage* ScratchPackage = ScratchPackages->Create(TEXT("UMG_Proposed"));
 					if (Operation == EOperation::Create)
 					{
 						ValidationTarget = CreateFactorySeed(
@@ -722,6 +729,7 @@ void SetFailure(FOperationFailure& OutFailure, const FString& FallbackCode,
 					Operation,
 					Existing,
 					Proposed,
+					MoveTemp(ScratchPackages),
 					MoveTemp(Mutation),
 					MoveTemp(ExpectedCounters),
 					ReadBool(Request.Input->ProviderExtension, TEXT("compile"), true),

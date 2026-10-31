@@ -1067,8 +1067,10 @@ if (!Scene) return Fail(OutError, TimelineNativePresence(TEXT("timeline_animatio
 							FUeAgentCanonicalValuePtr KeysValue;
 							FUeAgentStateSemanticError KeysError;
 							if (!FUeAgentCanonicalValue::TryArray(KeyValues, Context.GetResourceTracker(), KeysValue, KeysError))
+							{
 								if (KeysError.Source.SourceFile.IsEmpty()) KeysError.SourceKind = TEXT("native_result");
 								return Fail(OutError, MoveTemp(KeysError));
+							}
 							SectionItems.Add({TEXT("key_count"), KeyCount.ToSharedRef()});
 							SectionItems.Add({TEXT("keys"), KeysValue.ToSharedRef()});
 						}
@@ -1081,8 +1083,10 @@ if (!Scene) return Fail(OutError, TimelineNativePresence(TEXT("timeline_animatio
 				FUeAgentCanonicalValuePtr SectionsValue;
 				FUeAgentStateSemanticError SectionsError;
 				if (!FUeAgentCanonicalValue::TryArray(Sections, Context.GetResourceTracker(), SectionsValue, SectionsError))
+				{
 					if (SectionsError.Source.SourceFile.IsEmpty()) SectionsError.SourceKind = TEXT("native_result");
 					return Fail(OutError, MoveTemp(SectionsError));
+				}
 				return TryCanonicalObject({
 					{TEXT("track_ref"), Ref.ToSharedRef()},
 					{TEXT("track_type"), Type.ToSharedRef()},

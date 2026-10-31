@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentMechanicsRequestContext.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentViewportFrameCapture.h"
 
 class FJsonObject;
 
@@ -15,7 +16,8 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 	 * UWorld or creates a second operation lifecycle.
 	 */
 	class UEAGENTINTERFACE_API FLevelViewportSequenceCapture final
-		: public TSharedFromThis<FLevelViewportSequenceCapture>
+		: public IViewportFrameCapture
+		, public TSharedFromThis<FLevelViewportSequenceCapture>
 	{
 	public:
 		static bool TryCreate(
@@ -23,14 +25,14 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			TSharedPtr<FLevelViewportSequenceCapture>& OutCapture,
 			UE::UAI::Contract::FDiagnostic& OutError);
 
-		~FLevelViewportSequenceCapture();
+		~FLevelViewportSequenceCapture() override;
 
 		bool Tick(
 			TSharedPtr<FJsonObject>& OutData,
 			bool& bOutComplete,
-			UE::UAI::Contract::FDiagnostic& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError) override;
 
-		void Cancel();
+		void Cancel() override;
 
 	private:
 		class FImpl;

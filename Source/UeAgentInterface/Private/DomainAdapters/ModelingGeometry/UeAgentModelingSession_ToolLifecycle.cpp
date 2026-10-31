@@ -7,6 +7,9 @@
 #include "Dom/JsonValue.h"
 
 #include "DomainAdapters/ModelingGeometry/UeAgentModelingMechanics.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingMetricMaterial.h"
+#include "Components/MeshComponent.h"
+#include "Materials/Material.h"
 
 #include "Module/UeAgentInterfaceLogger.h"
 
@@ -17,6 +20,43 @@
 
 namespace
 {
+	bool ApplyCreatedMetricMaterial(AActor* Actor, const TSharedPtr<FJsonObject>& Params, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		if (!Actor) return true;
+		TOptional<FLinearColor> Color;
+		if (!UE::UAI::ModelingMetricMaterial::TryReadColor(Params, Color))
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_color_invalid"), TEXT("color must be three linear RGB numbers in [0,1]."), TEXT("modeling"));
+			return false;
+		}
+		FString ExplicitMaterial;
+		if (Params.IsValid()) Params->TryGetStringField(TEXT("material_ref"), ExplicitMaterial);
+		TInlineComponentArray<UMeshComponent*> Components(Actor);
+		for (UMeshComponent* Component : Components)
+		{
+			UMaterialInterface* Current = Component->GetMaterial(0);
+			const bool bEngineDefault = !Current || Current == UMaterial::GetDefaultMaterial(MD_Surface)
+				|| Current->GetPathName() == TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial");
+			if (ExplicitMaterial.IsEmpty() && !bEngineDefault && !UE::UAI::ModelingMetricMaterial::IsMetric(Current))
+			{
+				if (!Color.IsSet()) continue;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_color_requires_metric_material"), TEXT("The tool selected a custom material; its color must be edited through that material's parameters."), TEXT("modeling"));
+				return false;
+			}
+			UMaterialInterface* Material = ExplicitMaterial.IsEmpty() ? UE::UAI::ModelingMetricMaterial::Load() : LoadObject<UMaterialInterface>(nullptr, *ExplicitMaterial);
+			if (!Material || (Color.IsSet() && !UE::UAI::ModelingMetricMaterial::IsMetric(Material)))
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_material_invalid"), TEXT("A loadable material is required; color applies only to the bundled metric material."), TEXT("modeling"));
+				return false;
+			}
+			Component->Modify();
+			Component->SetMaterial(0, Material);
+			UE::UAI::ModelingMetricMaterial::Initialize(*Component, Component->CalcBounds(FTransform::Identity).GetBox(), Color);
+		}
+		Actor->MarkPackageDirty();
+		return true;
+	}
+
 	bool HasAnyField(const TSharedPtr<FJsonObject>& Params, const TArray<const TCHAR*>& FieldNames, FString* OutFieldName = nullptr)
 	{
 		if (!Params.IsValid())
@@ -228,6 +268,8 @@ bool UE::UAI::DomainAdapters::ModelingGeometry::FModelingSession::StartTool(cons
 		TArray<AActor*> SelectionAfterAccept;
 		GetSelectedActors(SelectionAfterAccept);
 		AActor* AcceptedOutputActor = ResolveCreatedActorFromSelectionDelta(SelectionBeforeAccept, SelectionAfterAccept);
+		if (AcceptedOutputActor && !SelectionBeforeAccept.Contains(AcceptedOutputActor)
+			&& !ApplyCreatedMetricMaterial(AcceptedOutputActor, EffectiveParams, OutError)) return false;
 
 		if (PrimitivePlacement.bEnabled)
 		{
@@ -386,11 +428,17 @@ bool UE::UAI::DomainAdapters::ModelingGeometry::FModelingSession::AcceptTool(con
 		return false;
 	}
 
+	TArray<AActor*> BeforeAccept;
+	GetSelectedActors(BeforeAccept);
 	if (!FinishTool(Context, EToolShutdownType::Accept, OutError))
 	{
 		return false;
 	}
 
+	TArray<AActor*> AfterAccept;
+	GetSelectedActors(AfterAccept);
+	AActor* Created = ResolveCreatedActorFromSelectionDelta(BeforeAccept, AfterAccept);
+	if (Created && !BeforeAccept.Contains(Created) && !ApplyCreatedMetricMaterial(Created, Ctx.Params, OutError)) return false;
 	FillActiveToolData(Context, OutData);
 	OutData->SetBoolField(TEXT("accepted"), true);
 	FUeAgentInterfaceLogger::Log(TEXT("ModelingAcceptTool req=%s"), *Ctx.RequestId);

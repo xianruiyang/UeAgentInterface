@@ -98,9 +98,9 @@ namespace UeAgentLevelAuthoring
 		{
 			return Rejected(ActorErrorCode, TEXT("The actor belongs to a different world."));
 		}
-		if (!BoundWorld.PersistentLevel || Actor.GetLevel() != BoundWorld.PersistentLevel)
+		if (!Actor.GetLevel() || !BoundWorld.GetLevels().Contains(Actor.GetLevel()))
 		{
-			return Rejected(ActorErrorCode, TEXT("Only actors in the bound persistent level are supported."));
+			return Rejected(ActorErrorCode, TEXT("The actor's level is not loaded in the bound world."));
 		}
 		return Authorable();
 	}

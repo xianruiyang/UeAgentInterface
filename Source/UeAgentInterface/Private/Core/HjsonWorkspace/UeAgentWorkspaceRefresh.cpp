@@ -27,7 +27,7 @@ namespace UE::UAI::HjsonWorkspace
 
 	bool TryRefreshImportedWorkspace(
 		const FString& WorkspaceRoot, const TArray<FString>& ManagedSourcePaths,
-		TFunctionRef<bool(const FString&, FWorkspaceError&)> ExportCurrent,
+		TFunctionRef<bool(const FString&, FPreparedWorkspaceExport&, FWorkspaceError&)> ExportCurrent,
 		ContextResource::FUeAgentResourceTracker& Resources, FWorkspaceError& OutError,
 		TArray<Contract::FDiagnostic>& OutWarnings)
 	{
@@ -45,7 +45,8 @@ namespace UE::UAI::HjsonWorkspace
 			OutError.SetFailure(Error);
 			return false;
 		}
-		const bool bExported = ExportCurrent(Fresh, OutError);
+		FPreparedWorkspaceExport PreparedExport;
+		const bool bExported = ExportCurrent(Fresh, PreparedExport, OutError);
 		if (!bExported && !OutError.HasErrors())
 		{
 			auto Error = Contract::FDiagnostic::Failure(TEXT("workspace_refresh_export_failed"),
@@ -59,8 +60,11 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			ArtifactPublisher::FArtifactPublishReceipt Receipt;
 			ArtifactPublisher::FArtifactPublishError PublishError;
-			bPublished = ArtifactPublisher::TryRefreshPublishedWorkspace(
-				Fresh, Root, ManagedSourcePaths, Resources, Receipt, PublishError);
+			bPublished = PreparedExport.Plan.IsValid()
+				? ArtifactPublisher::TryRefreshPlannedWorkspace(PreparedExport.Plan.ToSharedRef(),
+					PreparedExport.PublisherOwnerId, Root, ManagedSourcePaths, Resources, Receipt, PublishError)
+				: ArtifactPublisher::TryRefreshPublishedWorkspace(
+					Fresh, Root, ManagedSourcePaths, Resources, Receipt, PublishError);
 			if (!bPublished)
 			{
 				OutError.SetFailure(PublishError);
@@ -87,5 +91,16 @@ namespace UE::UAI::HjsonWorkspace
 			UE_LOG(LogTemp, Warning, TEXT("UAI workspace refresh temporary cleanup failed: %s"), *Fresh);
 		}
 		return bPublished;
+	}
+
+	bool TryRefreshImportedWorkspace(
+		const FString& WorkspaceRoot, const TArray<FString>& ManagedSourcePaths,
+		TFunctionRef<bool(const FString&, FWorkspaceError&)> ExportCurrent,
+		ContextResource::FUeAgentResourceTracker& Resources, FWorkspaceError& OutError,
+		TArray<Contract::FDiagnostic>& OutWarnings)
+	{
+		return TryRefreshImportedWorkspace(WorkspaceRoot, ManagedSourcePaths,
+			[&](const FString& Destination, FPreparedWorkspaceExport&, FWorkspaceError& Error)
+			{ return ExportCurrent(Destination, Error); }, Resources, OutError, OutWarnings);
 	}
 }

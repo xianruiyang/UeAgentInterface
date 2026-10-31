@@ -44,7 +44,10 @@ dispatch identities, correlation values, and contract fingerprints are
 server-owned machine facts and are not model-facing inputs or outputs. Unknown
 public parameters are rejected. Omitted optional parameters remain omitted;
 explicit `null` remains explicit. JSON numbers keep their original lexeme
-through protocol parsing.
+through protocol parsing. Exact dispatch validates declared parameter names,
+required/nullable fields and wire types before invoking a handler, including
+nested and deferred calls. Integer fields require an exact signed 64-bit value;
+fractional or overflowing values are never silently narrowed.
 
 A `command_result` preserves request identities and contains `ok`,
 `payload`, and `error`, plus an optional `diagnostics` array of complete public

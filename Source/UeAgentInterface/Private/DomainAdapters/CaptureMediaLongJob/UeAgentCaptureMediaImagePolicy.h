@@ -1,12 +1,14 @@
 #pragma once
 
 #include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/Contract/UeAgentContractSchema.h"
 
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentMechanicsRequestContext.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaLongJobAdapter.h"
 
 class FJsonObject;
+class FJsonValue;
 
 namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 {
@@ -49,6 +51,13 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 
 	UEAGENTINTERFACE_API const FUeAgentCaptureMediaImagePolicyDescriptor*
 	FindCaptureMediaImagePolicy(const FString& PolicyId);
+
+	// Resolves an omitted image policy from the declared observation target only.
+	// Does not load assets, open editors, infer sequence intent, or retry another renderer.
+	UEAGENTINTERFACE_API bool TryResolveDefaultCaptureImagePolicy(
+		const FString& SubjectRef, const TSharedPtr<FJsonValue>& Parameters,
+		UE::UAI::Contract::FUeAgentContractSchemaCheckpoint Checkpoint,
+		FString& OutPolicyId, UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryNormalizeTransformCandidateParameters(
 		const TSharedPtr<FJsonObject>& Parameters,

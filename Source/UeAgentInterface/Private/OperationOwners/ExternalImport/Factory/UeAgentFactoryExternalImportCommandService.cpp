@@ -294,7 +294,8 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			const bool bFbx = Route.Kind
 					== EFactoryExternalImportKind::FbxAnimation
 				|| Route.Kind
-					== EFactoryExternalImportKind::FbxSkeletalMesh;
+					== EFactoryExternalImportKind::FbxSkeletalMesh
+				|| Route.Kind == EFactoryExternalImportKind::FbxStaticMesh;
 			auto RejectInapplicableOptions = [&](bool bApplicable, std::initializer_list<const TCHAR*> Fields, const TCHAR* SupportedImporter)
 			{
 				if (bApplicable) return false;
@@ -313,6 +314,8 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 				 TEXT("import_morph_targets"), TEXT("update_skeleton_reference_pose"), TEXT("skeleton_ref"),
 				 TEXT("expected_morph_targets"), TEXT("expected_material_slots"), TEXT("expected_lod_count")}, TEXT("an FBX importer"))) return false;
 			const bool bTexture = Route.Kind == EFactoryExternalImportKind::Texture;
+			if (RejectInapplicableOptions(Route.Kind != EFactoryExternalImportKind::FbxStaticMesh,
+				{TEXT("create_physics_asset")}, TEXT("an FBX skeletal or animation importer"))) return false;
 			if (RejectInapplicableOptions(bTexture,
 				{TEXT("srgb"), TEXT("compression_settings"), TEXT("mip_gen_settings"), TEXT("lod_group")}, TEXT("a texture importer"))) return false;
 			if (RejectInapplicableOptions(Route.Kind == EFactoryExternalImportKind::FbxSkeletalMesh,
@@ -728,6 +731,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 		const bool bRequiresReimport = Kind == EFactoryExternalImportKind::StaticMesh;
 		const bool bRequiresImport = Kind == EFactoryExternalImportKind::FbxAnimation
 			|| Kind == EFactoryExternalImportKind::FbxSkeletalMesh
+			|| Kind == EFactoryExternalImportKind::FbxStaticMesh
 			|| Kind == EFactoryExternalImportKind::GeometryCache
 			|| Kind == EFactoryExternalImportKind::LightProfile;
 		if ((bRequiresReimport && Operation != EFactoryExternalImportOperation::Reimport)
@@ -754,6 +758,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			{TEXT("asset.reimport_texture"), TEXT("reimport_texture"), EFactoryExternalImportOperation::Reimport, EFactoryExternalImportKind::Texture},
 			{TEXT("external.fbx.animation.import"), TEXT("fbx_animation_import"), EFactoryExternalImportOperation::Import, EFactoryExternalImportKind::FbxAnimation},
 			{TEXT("external.fbx.skeletal_mesh.import"), TEXT("fbx_skeletal_mesh_import"), EFactoryExternalImportOperation::Import, EFactoryExternalImportKind::FbxSkeletalMesh},
+			{TEXT("external.fbx.static_mesh.import"), TEXT("fbx_static_mesh_import"), EFactoryExternalImportOperation::Import, EFactoryExternalImportKind::FbxStaticMesh},
 			{TEXT("external.geometry_cache.import"), TEXT("geometry_cache_import"), EFactoryExternalImportOperation::Import, EFactoryExternalImportKind::GeometryCache},
 			{TEXT("external.light_profile.import"), TEXT("light_profile_import"), EFactoryExternalImportOperation::Import, EFactoryExternalImportKind::LightProfile},
 			{TEXT("external.sound_wave.import"), TEXT("sound_wave_import"), EFactoryExternalImportOperation::Import, EFactoryExternalImportKind::SoundWave},

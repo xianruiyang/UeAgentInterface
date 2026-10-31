@@ -206,7 +206,9 @@ namespace UeAgentLevelAuthoring
 		World->SetFlags(RF_Transient);
 		World->WorldType = EWorldType::Inactive;
 		World->InitializeNewWorld(UWorld::InitializationValues()
-			.InitializeScenes(false)
+			// Native editor property callbacks (including sky/lighting components)
+			// require a scene even in an inactive, non-simulating preview world.
+			.InitializeScenes(true)
 			.AllowAudioPlayback(false)
 			.RequiresHitProxies(false)
 			.CreatePhysicsScene(false)
@@ -217,6 +219,14 @@ namespace UeAgentLevelAuthoring
 			.SetTransactional(false)
 			.CreateFXSystem(false));
 		bWorldInitialized = true;
+		if (!World->Scene)
+		{
+			OutError = ScratchFailure(TEXT("level_scratch_world_scene_missing"),
+				TEXT("Scratch world initialization did not create the scene required by native editor property callbacks."),
+				TEXT("scene_present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			Cleanup();
+			return nullptr;
+		}
 		if (!World->PersistentLevel || World->PersistentLevel->OwningWorld != World)
 		{
 			OutError = ScratchFailure(TEXT("level_scratch_world_persistent_level_missing"),

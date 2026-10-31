@@ -1,7 +1,10 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 
 #include "CommandEdge/UeAgentCommandDispatch.h"
+#include "CommandEdge/UeAgentCommandParameterValidation.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonValue.h"
 
 namespace UE::UAI::CommandEdge
@@ -103,8 +106,10 @@ namespace UE::UAI::CommandEdge
 					? Object->TryGetField(TEXT("version"))
 					: nullptr;
 			int64 Parsed = 0;
+			FString Lexeme;
 			if (!Value.IsValid()
-				|| !Value->TryGetNumber(Parsed)
+				|| !StateSemantic::CanonicalJson::TryGetNumberLexeme(*Value, Lexeme)
+				|| !StateSemantic::TryParseInt64Number(Lexeme, Parsed)
 				|| Parsed < MIN_int32
 				|| Parsed > MAX_int32)
 			{
@@ -150,38 +155,19 @@ namespace UE::UAI::CommandEdge
 			const FUeAgentCommandParameter& Parameter,
 			const TSharedPtr<FJsonValue>& Value)
 		{
-			if (!Value.IsValid())
-			{
-				return false;
-			}
-			if (Value->Type == EJson::Null)
-			{
-				return Parameter.IsNullable();
-			}
-
+			const TCHAR* WireType = nullptr;
 			switch (Parameter.GetWireType())
 			{
-			case EUeAgentCommandWireType::Boolean:
-				return Value->Type == EJson::Boolean;
-			case EUeAgentCommandWireType::Integer:
-			{
-				int64 Parsed = 0;
-				return Value->Type == EJson::Number
-					&& Value->TryGetNumber(Parsed);
+			case EUeAgentCommandWireType::Boolean: WireType = TEXT("boolean"); break;
+			case EUeAgentCommandWireType::Integer: WireType = TEXT("integer"); break;
+			case EUeAgentCommandWireType::Number: WireType = TEXT("number"); break;
+			case EUeAgentCommandWireType::String: WireType = TEXT("string"); break;
+			case EUeAgentCommandWireType::Object: WireType = TEXT("object"); break;
+			case EUeAgentCommandWireType::Array: WireType = TEXT("array"); break;
+			case EUeAgentCommandWireType::Any: WireType = TEXT("any"); break;
+			default: return false;
 			}
-			case EUeAgentCommandWireType::Number:
-				return Value->Type == EJson::Number;
-			case EUeAgentCommandWireType::String:
-				return Value->Type == EJson::String;
-			case EUeAgentCommandWireType::Object:
-				return Value->Type == EJson::Object;
-			case EUeAgentCommandWireType::Array:
-				return Value->Type == EJson::Array;
-			case EUeAgentCommandWireType::Any:
-				return true;
-			default:
-				return false;
-			}
+			return IsCommandWireValue(WireType, Parameter.IsNullable(), Value);
 		}
 
 		FString ExpectedParameterType(const FUeAgentCommandParameter& Parameter)

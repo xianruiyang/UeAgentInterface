@@ -17,11 +17,13 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			EUeAgentCaptureMediaLongJobFamily InFamily,
 			FString InSubjectRef,
 			FString InPolicyId,
-			StateSemantic::FUeAgentCanonicalValueRef InParameters);
+			StateSemantic::FUeAgentCanonicalValueRef InParameters,
+			bool bInPolicyDefaulted = false);
 
 		EUeAgentCaptureMediaLongJobFamily GetFamily() const;
 		const FString& GetSubjectRef() const;
 		const FString& GetPolicyId() const;
+		bool WasPolicyDefaulted() const { return bPolicyDefaulted; }
 		const StateSemantic::FUeAgentCanonicalValueRef&
 			GetParameters() const;
 		bool IsValid() const;
@@ -32,6 +34,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		FString SubjectRef;
 		FString PolicyId;
 		StateSemantic::FUeAgentCanonicalValueRef Parameters;
+		bool bPolicyDefaulted = false;
 	};
 
 	class UEAGENTINTERFACE_API

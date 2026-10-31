@@ -3,13 +3,15 @@
 本目录维护插件使用的原生引擎补丁。当前基线为 UE 5.6.1 的源码；其他版本需要核对对应原生实现，不能按文件名直接套用。
 补丁必须编译进入实际启动的引擎。只修改源码或成功构建项目插件，不代表引擎修复生效。
 
-当前插件对 `property-editor-edit-condition-controls.patch` 和 `editor-candidate-catalog-context.patch`
-有编译/链接级依赖：分别提供 PropertyEditor 的编辑条件接口，以及 UMGEditor、AudioEditor、
-MetasoundEditor 的候选查询接口。这些补丁与相关模块二进制必须先于插件部署；仅修改头文件不能提供
+当前插件对 `property-editor-edit-condition-controls.patch`、`editor-candidate-catalog-context.patch`
+及 `pie-blueprint-compile-error-handler.patch` 有编译/链接级依赖：分别提供 PropertyEditor 的编辑条件接口，
+UMGEditor、AudioEditor、MetasoundEditor 的候选查询接口，以及 UnrealEd 的请求级 PIE 编译错误处理接口。
+这些补丁与相关模块二进制必须先于插件部署；仅修改头文件不能提供
 新增导出符号。其余补丁修复对应领域的原生行为，使用当前完整能力集时也应部署本目录的匹配补丁。
 
 | 补丁 | 原生职责与插件消费者 |
 | --- | --- |
+| [PIE 蓝图编译错误请求级取消](UE5.6/pie-blueprint-compile-error-handler.patch) | UnrealEd 在实际蓝图编译完成后、错误确认与 PIE world 创建前提供 `IPIEBlueprintCompileErrorHandler` modular-feature 扩展。UAI 两个 runtime-preview 消费者共用请求级策略，匹配独有瞬态 play settings，记录原生错误并默认取消；原生执行 EndPIE、navigation 和 CancelPIE 收尾。无匹配处理者保留原人工及 unattended 行为。该接口由本项目补丁维护，并非原版 UE API；新增导出符号要求先部署 UnrealEd，再构建 UAI。 |
 | [PCG 样条网格切线空间](UE5.6/pcg-spline-mesh-world-tangents.patch) | Spawn Spline Mesh 将局部切线按整个样条变换转换到世界空间，与端点一致；覆盖普通与 Landscape spline 的旋转、缩放。原始切线 getter、metadata 和其他消费者的局部语义不变。 |
 | [AssetTools 无人值守重定向修复](UE5.6/asset-tools-unattended-redirector-report.patch) | 无人值守脚本跳过最终模态报告，按调用方已选的 DeleteFixedUpRedirectors 执行删除；人工 Editor 操作保留原报告与选择。UAI 调用前完成 AssetRegistry 发现，原生引用修复和保存仍由 AssetTools 承担。 |
 | [Niagara 同步编译副本释放](UE5.6/niagara-request-compile-release.patch) | `UNiagaraScript::RequestCompile` 在请求作用域结束时由 duplicate-data owner 释放编译副本，覆盖 DDC 命中及普通返回；三个 Script 编译调用者共享它，插件不再全局扫描 RootSet 代为清理。System 的异步 owner 不变。 |
@@ -105,5 +107,20 @@ PropertyEditor 使用同一恢复流程，目标为 `Source/Editor/PropertyEdito
 MetaSound 插件模块 `MetasoundEditor`。前两者按上述引擎模块流程处理各自 Build.cs 和输出；后者从
 `Engine/Plugins/Runtime/Metasound/Metasound.uplugin` 使用 foreign-plugin 方式选择 `-Module MetasoundEditor`。
 三个模块都部署完成后再编译 UAI，不能用单独更新 Plugin DLL 代替这些引擎依赖。
+
+### UnrealEd 的 PIE 编译错误扩展
+
+`pie-blueprint-compile-error-handler.patch` 只修改 `Source/Editor/UnrealEd/Private/PlayLevel.cpp`
+并增加公开头 `Source/Editor/UnrealEd/Public/IPIEBlueprintCompileErrorHandler.h`。它不改变已有
+`FRequestPlaySessionParams` 布局或既有接口 vtable；扩展按请求对象匹配，不能用全局 unattended
+标志替代（原版该分支会忽略错误继续运行）。临时 `ULevelEditorPlaySettings.AutoRecompileBlueprints`
+消除 dirty Blueprint 编译询问，实际编译错误则通过补丁取消，两个阶段各保留原生 owner。
+
+按上述 Installed Build 可恢复流程，仅临时设置 `UnrealEd.Build.cs` 的 `bUsePrecompiled=false`，
+用 `-UsePrecompiled -ForceRulesCompile -NoUBTMakefiles -Module UnrealEd` 构建。备份 PlayLevel 源码、
+新头原先是否存在、UnrealEd DLL/PDB/Development 导入库、`UnrealEditor.modules`、规则程序集、
+Build.cs 和安装标记。失败恢复源码和输出；无论成功失败都在 finally 恢复构建配置，并读回确认。
+成功后执行普通项目 Development 构建。不要在编译错误回调里重入 PIE 生命周期；回调只复制诊断并
+返回取消决定，原生取消广播后 UAI 自身 owner 才收尾隐藏窗口、委托和 operation。
 
 本项目的构建收据与恢复备份按任务进入 `tmp/`，不作为补丁维护真源。当前实现与验证范围由正式计划记录；本说明不宣称其他引擎版本兼容，也不代表已经发布到 Pak。

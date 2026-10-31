@@ -1,8 +1,8 @@
 #include "Core/EditorCapture/UeAgentSlateWindowCapture.h"
 
 #include "Framework/Application/SlateApplication.h"
-#include "Framework/Docking/TabManager.h"
 #include "Dom/JsonValue.h"
+#include "Dom/JsonObject.h"
 #include "Slate/SceneViewport.h"
 #include "Widgets/SViewport.h"
 #include "Widgets/SWindow.h"
@@ -61,38 +61,91 @@ namespace UE::UAI::EditorCapture::SlateWindow
 	}
 
 	bool PrepareViewport(const TSharedPtr<FSceneViewport>& Viewport, UE::UAI::Contract::FDiagnostic& OutError,
-		const bool bRequireNativeSize, const bool bSkipIfReady)
+		const bool bRequireNativeSize)
 	{
-		const auto Widget = Viewport ? Viewport->GetViewportWidget().Pin() : nullptr;
-		const auto Window = Widget && FSlateApplication::IsInitialized()
-			? FSlateApplication::Get().FindWidgetWindow(Widget.ToSharedRef()) : nullptr;
-		auto HasExtent = [&]() { const auto Size = Viewport->GetSizeXY(); return Size.X > 0 && Size.Y > 0; };
-		// Level captures may revisit this viewport for each sample. Once ready,
-		// do not add window activation, Slate ticks or draws to the sampling cadence.
-		if (bSkipIfReady && Window && Window->IsVisible() && !Window->IsWindowMinimized()
-			&& (!bRequireNativeSize || HasExtent())) return true;
-		if (!Prepare(Window, OutError)) return false;
-		if (!bRequireNativeSize || HasExtent()) return true;
-
-		// A persisted floating toolkit window can be smaller than its toolbar,
-		// leaving every native viewport at zero height. Recover only this invalid
-		// layout using the user's main editor extent, without changing viewport
-		// fixed-size policy, authored capture dimensions, or saved layout data.
-		const auto RootWindow = FGlobalTabmanager::Get()->GetRootWindow();
-		if (RootWindow && RootWindow != Window)
+		if (!Viewport)
 		{
-			const FVector2D RootSize = RootWindow->GetClientSizeInScreen();
-			const FVector2D CurrentSize = Window->GetClientSizeInScreen();
-			if (RootSize.X > 0 && RootSize.Y > 0 && (RootSize.X > CurrentSize.X || RootSize.Y > CurrentSize.Y))
-			{
-				Window->Resize(FVector2D(FMath::Max(RootSize.X, CurrentSize.X), FMath::Max(RootSize.Y, CurrentSize.Y)));
-				if (!Prepare(Window, OutError)) return false;
-				if (HasExtent()) return true;
-			}
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("preview_viewport_unavailable"), TEXT("The existing editor viewport is unavailable for capture."), TEXT("editor_capture"));
+			OutError.SourceKind = TEXT("native_result");
+			return false;
 		}
-		OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("invalid_viewport_size"), TEXT("The native viewport still has a non-positive width or height after its capture window was prepared."), TEXT("editor_capture"));
-		OutError.CandidateName = Window->GetTitle().ToString(); OutError.SourceKind = TEXT("native_result"); OutError.PropertyPath = TEXT("viewport_size");
+		// Viewport drawing/readback uses the existing render target, not desktop
+		// presentation. A minimized host can retain a usable native extent. Never
+		// restore, show, activate or resize the user's window to take a screenshot.
+		const FIntPoint Size = Viewport->GetSizeXY();
+		if (!bRequireNativeSize || (Size.X > 0 && Size.Y > 0)) return true;
+		OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("invalid_viewport_size"), TEXT("The existing viewport has no drawable extent and this capture path has not initialized one; capture preserves its host window state."), TEXT("editor_capture"));
+		OutError.SourceKind = TEXT("native_result"); OutError.PropertyPath = TEXT("viewport_size");
 		OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("positive width and height")); OutError.ActualValue = MakeShared<FJsonValueString>(Viewport->GetSizeXY().ToString());
 		return false;
+	}
+
+	FScopedViewportExtent::~FScopedViewportExtent()
+	{
+		Restore();
+	}
+
+	bool FScopedViewportExtent::Prepare(const TSharedPtr<FSceneViewport>& InViewport,
+		const FIntPoint* ColdStartSize, const FString& ColdStartSource, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		Viewport = InViewport;
+		if (!Viewport) return PrepareViewport(Viewport, OutError);
+		ExtentBefore = Viewport->GetSizeXY();
+		bFixedBefore = Viewport->HasFixedSize();
+		if ((ExtentBefore.X > 0 && ExtentBefore.Y > 0) || !ColdStartSize)
+			return PrepareViewport(Viewport, OutError);
+		if (bFixedBefore || ColdStartSize->X <= 0 || ColdStartSize->Y <= 0)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("viewport_initialization_invalid"),
+				TEXT("Cold-start initialization requires a layout-driven viewport and a positive render extent."), TEXT("editor_capture"));
+			OutError.SourceKind = TEXT("native_result");
+			return false;
+		}
+		RequestedExtent = *ColdStartSize;
+		ExtentSource = ColdStartSource;
+		// This native API resizes this FSceneViewport's RHI resources, not its OS
+		// window. The temporary fixed flag prevents zero Slate allotment from
+		// replacing the requested render extent during capture.
+		bTemporaryFixed = true;
+		Viewport->SetFixedViewportSize(RequestedExtent.X, RequestedExtent.Y);
+		const FIntPoint Actual = Viewport->GetSizeXY();
+		if (Actual != RequestedExtent)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("viewport_initialization_failed"),
+				TEXT("The existing editor viewport did not create the requested cold-start render extent."), TEXT("editor_capture"));
+			OutError.SourceKind = TEXT("native_result"); OutError.PropertyPath = TEXT("cold_start_render_size");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(RequestedExtent.ToString());
+			OutError.ActualValue = MakeShared<FJsonValueString>(Actual.ToString());
+			return false;
+		}
+		bInitialized = true;
+		return true;
+	}
+
+	void FScopedViewportExtent::Restore()
+	{
+		if (bTemporaryFixed && Viewport)
+		{
+			// Keep the initialized resource; normal Slate layout may resize it on
+			// the next paint. No fixed-size policy or persisted layout survives.
+			Viewport->SetFixedViewportSize(0, 0);
+			bTemporaryFixed = false;
+		}
+	}
+
+	TSharedPtr<FJsonObject> FScopedViewportExtent::Describe() const
+	{
+		const auto Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("performed"), bInitialized);
+		if (bInitialized) Result->SetStringField(TEXT("reason"), TEXT("zero_native_extent"));
+		Result->SetStringField(TEXT("extent_source"), ExtentSource);
+		Result->SetNumberField(TEXT("native_width_before"), ExtentBefore.X);
+		Result->SetNumberField(TEXT("native_height_before"), ExtentBefore.Y);
+		const FIntPoint After = Viewport ? Viewport->GetSizeXY() : FIntPoint::ZeroValue;
+		Result->SetNumberField(TEXT("render_width"), After.X);
+		Result->SetNumberField(TEXT("render_height"), After.Y);
+		Result->SetBoolField(TEXT("fixed_size_before"), bFixedBefore);
+		Result->SetBoolField(TEXT("fixed_size_restored"), Viewport && Viewport->HasFixedSize() == bFixedBefore);
+		return Result;
 	}
 }

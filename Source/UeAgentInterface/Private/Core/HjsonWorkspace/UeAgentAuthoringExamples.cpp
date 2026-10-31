@@ -384,6 +384,11 @@ namespace UE::UAI::HjsonWorkspace
 			}
 		};
 		TMap<FString, FString> SharedRecipes;
+		// A definition and the resolver's document scope are immutable throughout
+		// this publication. Repeated fields of that type otherwise rebuild and
+		// serialize the very same recipe before SharedRecipes can deduplicate it.
+		TMap<const FJsonObject*, TMap<FString, FString>> ResolvedTypeRecipes;
+		int32 ReusedTypeRecipes = 0;
 		TSet<FString> UsedPaths;
 		FString CurrentDocument;
 		const auto Resolve = [&](const FString& Ref) -> FObject
@@ -432,7 +437,14 @@ namespace UE::UAI::HjsonWorkspace
 						if (!Editable) return true;
 						FString ExamplePath;
 						const FString TypeName = CanonicalText(Member(Value, TEXT("type")));
-						if (!Share(TypeName.IsEmpty() ? Ref : TypeName, BuildAuthoringTypeExamples(Definition.ToSharedRef(), Resolve), ExamplePath)) return false;
+						const FString RecipeName = TypeName.IsEmpty() ? Ref : TypeName;
+						const FString ScopeKey = FString::FromInt(CurrentDocument.Len()) + TEXT(":") + CurrentDocument + RecipeName;
+						auto& TypeRecipes = ResolvedTypeRecipes.FindOrAdd(Definition.Get());
+						if (const FString* Existing = TypeRecipes.Find(ScopeKey)) { ExamplePath = *Existing; ++ReusedTypeRecipes; }
+						else {
+							if (!Share(RecipeName, BuildAuthoringTypeExamples(Definition.ToSharedRef(), Resolve), ExamplePath)) return false;
+							TypeRecipes.Add(ScopeKey, ExamplePath);
+						}
 						FString EditFile = Document.Path, EditPointer = Path + TEXT("/value");
 						auto ValueToEdit = Member(Value, TEXT("value"));
 						FollowContent(ValueToEdit, EditFile, EditPointer);
@@ -519,6 +531,7 @@ namespace UE::UAI::HjsonWorkspace
 			FileIndex->SetStringField(Path, GuidePath);
 		}
 		Index->SetObjectField(TEXT("files"), FileIndex);
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=example_recipes reused=%d definitions=%d"), ReusedTypeRecipes, ResolvedTypeRecipes.Num());
 		return PublishObject(TEXT("examples/index.hjson"), Index);
 	}
 }

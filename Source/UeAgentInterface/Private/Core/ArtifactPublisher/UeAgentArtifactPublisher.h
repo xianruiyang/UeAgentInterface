@@ -143,4 +143,15 @@ namespace UE::UAI::ArtifactPublisher
 		FUeAgentResourceTracker& Resources,
 		FArtifactPublishReceipt& OutReceipt,
 		FArtifactPublishError& OutError);
+
+	/** Publish a fresh in-memory export into its source workspace using the same
+	 * preservation and transactional publication rules as published refresh. */
+	UEAGENTINTERFACE_API bool TryRefreshPlannedWorkspace(
+		FExportWorkspacePlanRef Plan,
+		const FString& PublisherOwnerId,
+		const FString& SourceWorkspace,
+		const TArray<FString>& ManagedSourcePaths,
+		FUeAgentResourceTracker& Resources,
+		FArtifactPublishReceipt& OutReceipt,
+		FArtifactPublishError& OutError);
 }

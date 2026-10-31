@@ -803,6 +803,7 @@ FString MakeEntryKey(const FString &SemanticId, const FString &CanonicalKey) {
 
 FStateEntry CloneStateEntry(const FStateEntry &Entry) {
   FStateEntry Clone = Entry;
+  Clone.Observation.Reset();
   Clone.Value = CloneJsonValue(Entry.Value);
   Clone.ValueDefinition = CloneJsonValue(Entry.ValueDefinition);
   Clone.ComparisonValueDefinition = CloneJsonValue(Entry.ComparisonValueDefinition);
@@ -1157,9 +1158,15 @@ TArray<FStateEntry> FStateSnapshot::CopyEntries() const {
 }
 
 void FStateSnapshot::ReleaseNativeValues() {
+  ReleaseNativeValuesIf([](const FStateEntry&) { return true; });
+}
+
+void FStateSnapshot::ReleaseNativeValuesIf(TFunctionRef<bool(const FStateEntry&)> ShouldRelease) {
   for (FStateEntry &Entry : Entries) {
-    Entry.NativeValue.Reset();
-    Entry.NativeReadLimits.Reset();
+    if (ShouldRelease(Entry)) {
+      Entry.NativeValue.Reset();
+      Entry.NativeReadLimits.Reset();
+    }
   }
 }
 
@@ -1177,6 +1184,57 @@ TSharedRef<FJsonObject> FStateSnapshot::ToJsonObject() const {
 
 bool FCaptureResult::IsCaptured() const {
   return Status == TEXT("captured") && Diagnostic.IsEmpty();
+}
+
+bool FStateSnapshot::TryOverlay(const FStateSnapshot& ActualEntries,
+    FStateSnapshot& OutSnapshot, FDiagnostic& OutError, const bool bReuseIdenticalObservations) const {
+  // An alias denotes an already owned result. Prevalidate every replacement
+  // before modifying it, preserving the same failure/no-output-change contract.
+  if (&OutSnapshot == this)
+    return OutSnapshot.TryOverlayInPlace(ActualEntries, OutError, bReuseIdenticalObservations);
+  FStateSnapshot Merged = *this;
+  if (!Merged.TryOverlayInPlace(ActualEntries, OutError, bReuseIdenticalObservations)) return false;
+  OutSnapshot = MoveTemp(Merged);
+  return true;
+}
+
+bool FStateSnapshot::TryOverlayInPlace(const FStateSnapshot& ActualEntries,
+    FDiagnostic& OutError, const bool bReuseIdenticalObservations) {
+  OutError.Reset();
+  TMap<FString, int32> Indices;
+  for (int32 Index = 0; Index < Entries.Num(); ++Index)
+    Indices.Add(MakeEntryKey(Entries[Index].SemanticId,
+        Entries[Index].TargetIdentity.CanonicalKey), Index);
+  TArray<int32> ReplacementIndices;
+  ReplacementIndices.Reserve(ActualEntries.Entries.Num());
+  for (const FStateEntry& Actual : ActualEntries.Entries) {
+    const int32* Index = Indices.Find(MakeEntryKey(Actual.SemanticId, Actual.TargetIdentity.CanonicalKey));
+    if (!Index) {
+      OutError = StateFailure(TEXT("state_overlay_identity_missing"),
+          TEXT("An independently captured entry is outside the complete baseline."), TEXT("target_identity"));
+      OutError.TargetPath = Actual.TargetIdentity.CanonicalKey;
+      return false;
+    }
+    ReplacementIndices.Add(*Index);
+  }
+  for (int32 ActualIndex = 0; ActualIndex < ActualEntries.Entries.Num(); ++ActualIndex) {
+    const FStateEntry& Actual = ActualEntries.Entries[ActualIndex];
+    FStateEntry& Previous = Entries[ReplacementIndices[ActualIndex]];
+    if (bReuseIdenticalObservations && Previous.Observation.IsValid()
+        && Previous.bAuthoringVisible == Actual.bAuthoringVisible
+        && Previous.Provenance == Actual.Provenance
+        && MakeStableCanonicalValueKey(MakeShared<FJsonValueObject>(Previous.ToJsonObject()))
+            == MakeStableCanonicalValueKey(MakeShared<FJsonValueObject>(Actual.ToJsonObject()))) {
+      // Keep the immutable canonical payload, but retain the latest native
+      // storage/read context for the next actual comparison.
+      Previous.NativeValue = Actual.NativeValue;
+      Previous.NativeReadLimits = Actual.NativeReadLimits;
+      Previous.NativeTargetIdentity = Actual.NativeTargetIdentity;
+    } else {
+      Previous = Actual;
+    }
+  }
+  return true;
 }
 
 TSharedRef<FJsonObject> FCaptureResult::ToJsonObject() const {
@@ -1329,7 +1387,33 @@ bool AppendEditableObjectPropertyReadRequests(
     return Left.GetName() < Right.GetName();
   });
 
+  // These templates contain identities only, never UObject/FProperty pointers
+  // or callbacks. The current property set above is still independently selected
+  // from real values, including inline/owned topology and codec support.
+  static thread_local TMap<FString, TMap<FString, FReadRequest>> Templates;
+  static thread_local int32 TemplateCount = 0;
+  TMap<FString, FReadRequest>* Reusable = nullptr;
+  if (!Options.RequestIdentityScope.IsEmpty() && !Properties.IsEmpty() && Properties.Num() <= 200000) {
+    const FString RootPath = RootObject->GetPathName();
+    const FString Semantic = NormalizeId(Options.SemanticId);
+    const FString Scope = FString::FromInt(RootPath.Len()) + TEXT(":") + RootPath
+        + FString::FromInt(Semantic.Len()) + TEXT(":") + Semantic + Options.RequestIdentityScope;
+    if (!Templates.Contains(Scope) && TemplateCount + Properties.Num() > 200000) {
+      Templates.Reset(); TemplateCount = 0;
+    }
+    Reusable = &Templates.FindOrAdd(Scope);
+  }
+
   for (FProperty *Property : Properties) {
+    const FString PropertyName = Property->GetName();
+    if (Reusable) if (const FReadRequest* Template = Reusable->Find(PropertyName)) {
+      FReadRequest Request = *Template;
+      Request.RootObject = RootObject;
+      Request.NotificationOwner = RootObject;
+      Request.Limits = EditableReadLimits(Options.Limits);
+      OutRequests.Add(MoveTemp(Request));
+      continue;
+    }
     FReadRequest Request;
     UeAgentAuthoringTargetLocator::FResolveResult TargetResult;
     if (!BuildPropertyReadRequest(RootObject, Property->GetName(),
@@ -1363,6 +1447,12 @@ bool AppendEditableObjectPropertyReadRequests(
         return false;
       }
       Request.SnapshotIdentityOverride = MoveTemp(SnapshotIdentity);
+    }
+    if (Reusable && TemplateCount < 200000) {
+      FReadRequest Template = Request;
+      Template.RootObject = nullptr; Template.NotificationOwner = nullptr;
+      Template.RootStruct = nullptr; Template.RootData = nullptr; Template.Limits = {};
+      Reusable->Add(PropertyName, MoveTemp(Template)); ++TemplateCount;
     }
     OutRequests.Add(MoveTemp(Request));
   }
@@ -1699,6 +1789,7 @@ bool CaptureSnapshot(
     }
     EntryKeys.Add(EntryKey);
     CapturedEntries.Add(CloneStateEntry(Entry));
+    CapturedEntries.Last().Observation = MakeShared<const uint8>(0);
   }
 
   CapturedEntries.Sort([](const FStateEntry &Left, const FStateEntry &Right) {

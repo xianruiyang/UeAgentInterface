@@ -137,6 +137,16 @@ viewport behavior. Graph view, camera, selection, view mode, realtime, Game View
 interaction changes are restored and independently queried in the public
 product test; they are never represented as persisted asset state.
 
+`viewport.ray.deproject` and `viewport.ray.trace` accept optional
+`input.cold_start_render_size={width,height}` (integer pixels, 1..4096). When the
+bound Editor viewport has zero extent, this explicitly defines the screen-pixel
+basis and temporarily initializes the same scene viewport used by offscreen
+capture. Positive existing dimensions take precedence. The query restores the
+fixed-size policy on every return path and never restores, activates or resizes
+the native window. Omission preserves the existing zero-extent diagnostic. Use
+the capture receipt's dimensions when tracing a previously captured image; this
+does not prove a collider is the visible surface when their geometry differs.
+
 The frozen historical identities map as follows:
 
 | Historical identity | Exact successor |

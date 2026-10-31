@@ -192,6 +192,12 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			Declaration.Initialization.ContractIds.Add(
 				TEXT("uai.init.world_hlod_layer.root/1"));
+			Declaration.Hjson.Routes.Add({
+				HjsonProvider->GetProviderId(), TEXT("content_graph.import_workspace"),
+				TEXT("uai.world_data_layer.edit/1"), TEXT("ue.world.data_layer.asset"),
+				TEXT("/Script/Engine.DataLayerAsset"), HjsonWorkspace::EInitializationNodeRole::RootTarget,
+				TEXT("uai.init.world_data_layer.root/1"), true});
+			Declaration.Initialization.ContractIds.Add(TEXT("uai.init.world_data_layer.root/1"));
 			Declaration.Operation.Support =
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			for (const FString& CommandId

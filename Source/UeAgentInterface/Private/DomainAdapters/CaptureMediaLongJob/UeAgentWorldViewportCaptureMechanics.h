@@ -8,6 +8,7 @@
 class AActor;
 class FLevelEditorViewportClient;
 class FJsonObject;
+class FSceneViewport;
 struct FHitResult;
 
 namespace UE::UAI::DomainAdapters::CaptureMediaLongJob::WorldViewportMechanics
@@ -18,6 +19,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob::WorldViewportMechanics
 	TSharedPtr<FJsonObject> MakeViewportClientJson(FLevelEditorViewportClient* ViewportClient, const FString& SelectionReason);
 	FLevelEditorViewportClient* GetPreferredLevelViewportClient();
 	FLevelEditorViewportClient* GetPreferredLevelViewportClient(FString* OutSelectionReason);
+	TSharedPtr<FSceneViewport> GetLevelSceneViewport(FLevelEditorViewportClient* ViewportClient);
 	bool PrepareLevelViewportForCapture(FLevelEditorViewportClient* ViewportClient, UE::UAI::Contract::FDiagnostic& OutError);
 	TSharedPtr<FJsonObject> MakeActorSummaryJson(AActor* Actor);
 	TSharedPtr<FJsonObject> MakeActorTransformJson(const FTransform& Transform);

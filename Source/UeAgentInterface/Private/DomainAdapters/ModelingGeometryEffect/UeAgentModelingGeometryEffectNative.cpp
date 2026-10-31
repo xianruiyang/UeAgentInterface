@@ -1,8 +1,11 @@
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectBoundarySemantics.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectBoolean.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingMetricMaterial.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Containers/BitArray.h"
 
 #include "Components/DynamicMeshComponent.h"
 #include "CleaningOps/HoleFillOp.h"
@@ -98,6 +101,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			bool bPackageWasDirty = false;
 			bool bMutationStarted = false;
 			FTransform Placement = FTransform::Identity;
+			TStrongObjectPtr<UMaterialInterface> PrimitiveMaterial;
+			TOptional<FLinearColor> PrimitiveColor;
 		};
 
 		TSharedPtr<FJsonValue> NativeNumberFact(const double Value)
@@ -1283,6 +1288,96 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		}
 
 
+		bool EditContainedComponents(FModelingGeometryAction& Action, FExecutionMutationError& OutError)
+		{
+			TArray<double> Minimum, Maximum, Translation;
+			if (!ReadNumberArray(Action.Parameters, TEXT("bounds_min_cm"), 3, Minimum, OutError)
+				|| !ReadNumberArray(Action.Parameters, TEXT("bounds_max_cm"), 3, Maximum, OutError)) return false;
+			for (int32 Axis = 0; Axis < 3; ++Axis)
+			{
+				if (Minimum[Axis] > Maximum[Axis])
+				{
+					OutError = NativeFact(TEXT("modeling_geometry_component_bounds_invalid"),
+						TEXT("Component bounds must be ordered in target-local centimeters."),
+						TEXT("/after/typed_parameters/bounds_min_cm"), NativeNumberArrayFact(Minimum),
+						NativeNumberArrayFact(Maximum), Action.TargetRef);
+					return false;
+				}
+			}
+			const bool bTranslate = Action.OperationKey == TEXT("translate_components");
+			if (bTranslate && !ReadNumberArray(Action.Parameters, TEXT("translation_cm"), 3, Translation, OutError)) return false;
+
+			// A selection contains complete edge-connected triangle components.
+			// Touching positions are not welded; a partly enclosed host wall is
+			// excluded, rather than clipped into a new surface by a Boolean.
+			FDynamicMesh3& Mesh = Action.WorkingMesh;
+			TBitArray<> Visited(false, Mesh.MaxTriangleID());
+			TArray<int32> SelectedTriangles;
+			for (const int32 Seed : Mesh.TriangleIndicesItr())
+			{
+				if (Visited[Seed]) continue;
+				TArray<int32> Component;
+				Component.Add(Seed);
+				Visited[Seed] = true;
+				bool bContained = true;
+				for (int32 Index = 0; Index < Component.Num(); ++Index)
+				{
+					const int32 TriangleId = Component[Index];
+					const FIndex3i Vertices = Mesh.GetTriangle(TriangleId);
+					for (int32 Corner = 0; Corner < 3; ++Corner)
+					{
+						const FVector3d Position = Mesh.GetVertex(Vertices[Corner]);
+						for (int32 Axis = 0; Axis < 3; ++Axis)
+							bContained &= Position[Axis] >= Minimum[Axis] && Position[Axis] <= Maximum[Axis];
+					}
+					const FIndex3i Neighbours = Mesh.GetTriNeighbourTris(TriangleId);
+					for (int32 Edge = 0; Edge < 3; ++Edge)
+					{
+						const int32 Neighbour = Neighbours[Edge];
+						if (Neighbour >= 0 && !Visited[Neighbour])
+						{
+							Visited[Neighbour] = true;
+							Component.Add(Neighbour);
+						}
+					}
+				}
+				if (bContained) SelectedTriangles.Append(Component);
+			}
+			if (SelectedTriangles.IsEmpty())
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_component_selection_empty"),
+					TEXT("No complete edge-connected triangle component is contained in these target-local bounds."),
+					TEXT("/after/typed_parameters/bounds_min_cm"), MakeShared<FJsonValueNumber>(0),
+					MakeShared<FJsonValueString>(TEXT("at least one fully contained component")), Action.TargetRef);
+				return false;
+			}
+			if (bTranslate)
+			{
+				TSet<int32> SelectedVertices;
+				for (const int32 TriangleId : SelectedTriangles)
+				{
+					const FIndex3i Vertices = Mesh.GetTriangle(TriangleId);
+					for (int32 Corner = 0; Corner < 3; ++Corner) SelectedVertices.Add(Vertices[Corner]);
+				}
+				const FVector3d Delta(Translation[0], Translation[1], Translation[2]);
+				for (const int32 VertexId : SelectedVertices) Mesh.SetVertex(VertexId, Mesh.GetVertex(VertexId) + Delta);
+			}
+			else
+			{
+				for (const int32 TriangleId : SelectedTriangles)
+				{
+					if (Mesh.RemoveTriangle(TriangleId, true, false) != UE::Geometry::EMeshResult::Ok)
+					{
+						OutError = NativeFact(TEXT("modeling_geometry_component_remove_failed"),
+							TEXT("Unreal could not remove a selected component triangle."), TEXT("/mesh/triangle_id"),
+							MakeShared<FJsonValueNumber>(TriangleId), MakeShared<FJsonValueString>(TEXT("removable triangle")), Action.TargetRef);
+						return false;
+					}
+				}
+			}
+			return true;
+		}
+
 		bool ApplyTopologyOperation(
 			FModelingGeometryAction& Action,
 			FExecutionMutationError& OutError)
@@ -1295,6 +1390,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("greater than zero")), Action.TargetRef);
 				return false;
 			}
+
+			if (Key == TEXT("remove_components") || Key == TEXT("translate_components"))
+				return EditContainedComponents(Action, OutError);
 
 			if (Key == TEXT("fill_holes"))
 			{
@@ -1488,6 +1586,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				return true;
 			}
 
+			if (Key == TEXT("boolean"))
+			{
+				FTransform OperandTransform;
+				FString Operation;
+				bool bSimplifyOutput = false;
+				if (!ReadTransform(FindField(Action.Parameters, TEXT("operand_to_target")),
+					TEXT("translation"), TEXT("rotation_quaternion_xyzw"), TEXT("scale"),
+					OperandTransform, OutError, TEXT("/after/typed_parameters/operand_to_target"))
+					|| !ReadString(Action.Parameters, TEXT("operation"), Operation, OutError)
+					|| !ReadBoolean(Action.Parameters, TEXT("simplify_output"), bSimplifyOutput, OutError)) return false;
+				FDynamicMesh3 Result;
+				if (!TryComputeModelingBoolean(Action.WorkingMesh, Action.OperandMesh,
+					OperandTransform, Operation, bSimplifyOutput, Result, OutError)) return false;
+				Action.WorkingMesh = MoveTemp(Result);
+				return true;
+			}
+
 			TStrongObjectPtr<UDynamicMesh> TargetMesh =
 				MakeTransientMesh(Action.WorkingMesh, Action.OperationKey, OutError);
 			if (!TargetMesh.IsValid())
@@ -1495,8 +1610,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				return false;
 			}
 
-			if (Key == TEXT("boolean")
-				|| Key == TEXT("mesh_cut")
+			if (Key == TEXT("mesh_cut")
 				|| Key == TEXT("trim"))
 			{
 				const FUeAgentCanonicalValuePtr OperandTransformValue =
@@ -1527,30 +1641,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						TargetTransformSpace;
 				EGeometryScriptBooleanOperation Operation =
 					EGeometryScriptBooleanOperation::Union;
-				if (Key == TEXT("boolean"))
-				{
-					FString RequestedOperation;
-					if (!ReadString(
-							Action.Parameters,
-							TEXT("operation"),
-							RequestedOperation,
-							OutError)
-						|| !ReadBoolean(
-							Action.Parameters,
-							TEXT("simplify_output"),
-							Options.bSimplifyOutput,
-							OutError))
-					{
-						return false;
-					}
-					Operation =
-						RequestedOperation == TEXT("intersection")
-							? EGeometryScriptBooleanOperation::Intersection
-							: RequestedOperation == TEXT("difference")
-								? EGeometryScriptBooleanOperation::Subtract
-								: EGeometryScriptBooleanOperation::Union;
-				}
-				else if (Key == TEXT("mesh_cut"))
+				if (Key == TEXT("mesh_cut"))
 				{
 					FString KeepSides;
 					if (!ReadString(
@@ -2820,6 +2911,28 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					Translation[2] * UnitScale),
 				FVector(Scale[0], Scale[1], Scale[2]));
 			OutAction.Carrier = ECarrierKind::PrimitiveOutput;
+			FString MaterialRef = UE::UAI::ModelingMetricMaterial::AssetPath();
+			if (FindField(OutAction.Parameters, TEXT("material_ref")).IsValid()
+				&& !ReadString(OutAction.Parameters, TEXT("material_ref"), MaterialRef, OutError)) return false;
+			OutAction.PrimitiveMaterial.Reset(LoadObject<UMaterialInterface>(nullptr, *MaterialRef));
+			if (!OutAction.PrimitiveMaterial.IsValid())
+			{
+				OutError = NativeFact(TEXT("modeling_material_not_found"), TEXT("The modeling material could not be loaded. Install the plugin Content directory with the plugin."),
+					TEXT("/after/typed_parameters/material_ref"), MakeShared<FJsonValueString>(MaterialRef), MakeShared<FJsonValueString>(TEXT("loadable MaterialInterface")), OutAction.TargetRef);
+				return false;
+			}
+			if (FindField(OutAction.Parameters, TEXT("color")).IsValid())
+			{
+				TArray<double> RGB;
+				if (!ReadNumberArray(OutAction.Parameters, TEXT("color"), 3, RGB, OutError)) return false;
+				if (!UE::UAI::ModelingMetricMaterial::IsMetric(OutAction.PrimitiveMaterial.Get()))
+				{
+					OutError = NativeFact(TEXT("modeling_color_requires_metric_material"), TEXT("color applies to the built-in metric material; edit a custom material through its own parameters."),
+						TEXT("/after/typed_parameters/material_ref"), MakeShared<FJsonValueString>(MaterialRef), MakeShared<FJsonValueString>(UE::UAI::ModelingMetricMaterial::AssetPath()), OutAction.TargetRef);
+					return false;
+				}
+				OutAction.PrimitiveColor = FLinearColor(RGB[0], RGB[1], RGB[2], 1.0f);
+			}
 			OutAction.CanonicalKey =
 				Change.GetIdentity().GetCanonicalKey();
 			return true;
@@ -3464,6 +3577,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					{
 						Mesh = Action.WorkingMesh;
 					});
+				Component->SetMaterial(0, Action.PrimitiveMaterial.Get());
+				UE::UAI::ModelingMetricMaterial::Initialize(*Component, FBox(Action.WorkingMesh.GetBounds().Min, Action.WorkingMesh.GetBounds().Max), Action.PrimitiveColor);
 				return true;
 			}
 

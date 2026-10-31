@@ -11,6 +11,13 @@ Layer structure/state, level GameMode, streaming relations and World Partition
 streaming are dormant compatibility identities. Their desired state belongs to
 World HJSON; incomplete profile/adapter coverage remains an explicit capability
 gap and does not justify exposing the old typed commands in ordinary discovery.
+In particular, Level HJSON does not yet cover a complete streaming-relation,
+cross-Level Actor migration and initial-state round trip. On applicable
+partitioned-World import paths, Data Layer support covers creation, initial
+state and membership addition. It is not unconditional coverage for ordinary
+updates to any existing Level, nor a complete existing-layer unload/restore
+workflow. Dormant exact handlers remain executable
+for compatibility; they do not establish current HJSON coverage.
 
 `world.actor.create` is also dormant and has no generated named SDK method. New persistent Actor creation uses
 `world.actor.candidates` followed by a Level Actor HJSON create through
@@ -118,6 +125,14 @@ observe it with `handle.status()` and unload/drain it with `handle.close()`.
 There is no domain loader registry or second loader
 ID source.
 
+`policy:world-context:data-layer-editor-state/v1` owns temporary loaded/visible flags
+for an existing DataLayerAsset instance in the current map. It uses native loader
+refresh and restores both previous flags on close without writing user loading
+preferences. Persistent initial state and Actor membership remain Level HJSON
+responsibilities; see [T26](t26_level_world_domain.md) and the CMD T59 parameter guide.
+`world.partition` optionally reports `include_actor_descriptors` without loading
+Actors; normal defaults and existing query fields remain unchanged.
+
 ## HLOD, navigation and partition jobs
 
 ```python
@@ -140,6 +155,15 @@ NullRHI. Navigation uses
 `policy:world-partition-resave:actors-run/v1`. Plan returns a durable report without executing; run uses one owned,
 unattended `UnrealEditor-Cmd` process and exposes its report and process return code through the
 common operation lifecycle.
+
+`policy:world-build:partition-convert/v1` invokes the native UE conversion commandlet
+through the same owned-process lifecycle. It requires a saved ordinary map and
+writes `<source>_WP` with `ConversionSuffix`, preserving source packages. The wrapper
+rejects existing output paths and custom conversion configuration; generated Data
+Layer/foliage assets stay in the destination's `_Assets` scope. It does not activate
+the result or offer atomic rollback after a failed/cancelled native run. Exact
+parameters and limits are in CMD T59. Blank WP creation and the existing streaming
+toggle are separate operations, neither proving ordinary-map conversion.
 
 ## Completion semantics
 

@@ -17,6 +17,19 @@ owner 维护的链路，不恢复旧 `uai_core` checker、命令 pack、任务�
 HJSON 的 schema、workspace、selector、operation 和 readback 语义由服务端 authoring
 owner 持有。Python/CLI、skill 文档和测试不得复制这些业务决定。
 
+目录 workspace 的机器基线由公共 composition 与 SemanticWorkspaceResolver 共同维护。
+`unit_inventory` 行保留原 inline `envelope` 读取，也可通过互斥的 `envelope_ref` 指向
+`.uai/baselines/` 中的 HJSON；文件根以稳定 unit identity 为 key，值为完整 captured envelope。
+目录 manifest 的 inventory 可保持 inline `unit_inventory`，或通过互斥的
+`unit_inventory_files` 引用 `.uai/inventory/` 下的文件；每个文件仍包含同一 `unit_inventory`
+行数组。公共 resolver 合并后统一校验完整身份、引用与基线，跨分片重复同样拒绝。
+embedded workspace 保留自包含的 inline 形式，不从外部解析 inventory 文件。
+导出按已有物理文档归属稳定分片；多个文档可共用机器文件，使局部属性变化只使对应分片
+失效，并控制文件数量。公开可编辑文件不变。
+引用必须是工作区内受管相对路径；文件内容、单位身份和完整基线继续参与解析、版本/源指纹、
+原子发布及独立读回。成功的内容证明可复用，mtime 不构成证明；引用文件缺失、非法或变化时
+不能沿用旧的解析或语义结果。该机器表示不由 Python/CLI 或 Agent 手工维护。
+
 ## Current Entry Points
 
 `scripts/ue/UpdateUaiCommandSurface.ps1` 是显式刷新命令 manifest 与 Python binding

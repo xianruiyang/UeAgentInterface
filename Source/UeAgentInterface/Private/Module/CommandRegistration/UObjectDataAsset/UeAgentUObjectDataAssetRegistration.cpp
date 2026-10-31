@@ -3,6 +3,7 @@
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
 #include "Dom/JsonValue.h"
+#include "HAL/PlatformTime.h"
 
 #include "CommandHandlers/UObjectDataAsset/UeAgentUObjectDataAssetCommandHandlers.h"
 #include "Core/Contract/UeAgentCommandJson.h"
@@ -80,6 +81,8 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 					Field(TEXT("source"), TEXT("object"), true,
 						TEXT("Use directory for export-edit-import. A complete inline or single_file document is create-only and carries an internal missing-target expectation. Revision and impact authorization remain machine-owned."),
 						HjsonWorkspace::GetContentGraphImportSourceSchemaJson()),
+					Field(TEXT("analysis_ref"), TEXT("string"), false,
+						TEXT("Optional scene analysis reference for a Level scene_editing directory. Apply only the analyzed HJSON and related live scene version; ordinary imports remain unchanged.")),
 				});
 			}
 			else if (Route.Kind == EUeAgentUObjectDataAssetRouteKind::Export)
@@ -290,6 +293,7 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 				{
 					return Inner->Execute(Request, OutResponse, OutError);
 				}
+				const double ImportStarted = FPlatformTime::Seconds();
 
 				TSharedPtr<FJsonObject> Params;
 				UE::UAI::Contract::FDiagnostic JsonError;
@@ -345,6 +349,7 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 				HjsonWorkspace::FResolvedContentGraphImportSourcePtr ResolvedSource;
 				FString ExpectedRevision;
 				FString AuthorizationId;
+				TArray<FString> ManagedSourcePaths;
 				HjsonWorkspace::FWorkspaceError WorkspaceError;
 				if (!HjsonWorkspace::TryRecoverContentGraphImportMachineContext(
 					*Source,
@@ -353,7 +358,8 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 					ResolvedSource,
 					ExpectedRevision,
 						AuthorizationId,
-						WorkspaceError))
+						WorkspaceError,
+						&ManagedSourcePaths))
 				{
 					OutResponse = {};
 					OutError = WorkspaceError.GetDiagnostic();
@@ -368,6 +374,7 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 					TEXT("source"),
 					ResolvedSource->MakeNormalizedSourceObject());
 				FUeAgentUObjectDataAssetCommandRequest InternalRequest = Request;
+				InternalRequest.WorkspaceProfileId = ResolvedSource->GetWorkspaceProfileId();
 				if (!CommandContract::Json::TryCanonicalize(
 						Params, InternalRequest.CanonicalParamsJson, JsonError))
 				{
@@ -375,28 +382,29 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 					OutError = MoveTemp(JsonError);
 					return false;
 				}
-				TArray<FString> ManagedSourcePaths;
-				if (ResolvedSource->IsSemanticWorkspaceDirectory()
-					&& !HjsonWorkspace::TryCollectSemanticWorkspaceManagedPaths(
-						ResolvedSource->GetSourceUnit(), Resources, ManagedSourcePaths, WorkspaceError))
-				{
-					OutError = WorkspaceError.GetDiagnostic();
-					return false;
-				}
+				// Recovery already resolved and verified this directory. Reuse its
+				// managed paths rather than parsing every authored unit a second time.
+				const double DomainStarted = FPlatformTime::Seconds();
 				if (!Inner->Execute(InternalRequest, OutResponse, OutError)) return false;
+				const double DomainFinished = FPlatformTime::Seconds();
 				if (!ResolvedSource->IsSemanticWorkspaceDirectory()) return true;
 
 				TArray<UE::UAI::Contract::FDiagnostic> RefreshWarnings;
+				double RefreshExportSeconds = 0.0;
+				const double RefreshStarted = FPlatformTime::Seconds();
 				const bool bRefreshed = HjsonWorkspace::TryRefreshImportedWorkspace(
 					ResolvedSource->GetSourceUnit(), ManagedSourcePaths,
-					[&](const FString& Destination, HjsonWorkspace::FWorkspaceError& RefreshError)
+					[&](const FString& Destination, HjsonWorkspace::FPreparedWorkspaceExport& PreparedExport,
+						HjsonWorkspace::FWorkspaceError& RefreshError)
 					{
 						const TSharedRef<FJsonObject> ExportParams = MakeShared<FJsonObject>();
 						ExportParams->SetStringField(TEXT("target"), Target);
 						ExportParams->SetStringField(TEXT("workspace_path"), Destination);
-						ExportParams->SetStringField(TEXT("profile_id"), TEXT("llm_authoring"));
+						ExportParams->SetStringField(TEXT("profile_id"), InternalRequest.WorkspaceProfileId.IsEmpty()
+							? TEXT("llm_authoring") : InternalRequest.WorkspaceProfileId);
 						FUeAgentUObjectDataAssetCommandRequest ExportRequest = Request;
 						ExportRequest.CommandId = TEXT("content_graph.export_workspace");
+						ExportRequest.WorkspaceExportPreparation = MakeShared<HjsonWorkspace::FPreparedWorkspaceExport>();
 						FUeAgentUObjectDataAssetCommandResponse ExportResponse;
 						FUeAgentUObjectDataAssetCommandError ExportError;
 						if (!CommandContract::Json::TryCanonicalize(
@@ -405,14 +413,22 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 							RefreshError.SetFailure(JsonError);
 							return false;
 						}
-						if (!Inner->Execute(ExportRequest, ExportResponse, ExportError))
+						const double ExportStarted = FPlatformTime::Seconds();
+						const bool bExported = Inner->Execute(ExportRequest, ExportResponse, ExportError);
+						RefreshExportSeconds += FPlatformTime::Seconds() - ExportStarted;
+						if (!bExported)
 						{
 							RefreshError.SetFailure(ExportError);
 							return false;
 						}
 						RefreshWarnings.Append(ExportResponse.Warnings);
+						PreparedExport = *ExportRequest.WorkspaceExportPreparation;
 						return true;
 					}, Resources, WorkspaceError, RefreshWarnings);
+				const double RefreshFinished = FPlatformTime::Seconds();
+				UE_LOG(LogTemp, Display, TEXT("UAI content_graph import timing target=%s prepare=%.3fs domain_import=%.3fs refresh_export=%.3fs refresh_other=%.3fs refreshed=%s"),
+					*Target, DomainStarted - ImportStarted, DomainFinished - DomainStarted, RefreshExportSeconds,
+					RefreshFinished - RefreshStarted - RefreshExportSeconds, bRefreshed ? TEXT("true") : TEXT("false"));
 				if (!bRefreshed)
 				{
 					OutError = HjsonWorkspace::MakeAppliedWorkspaceFailure(
@@ -438,6 +454,14 @@ namespace UE::UAI::Module::CommandRegistration::UObjectDataAsset
 					Refresh->SetArrayField(TEXT("warnings"), MoveTemp(Warnings));
 				}
 				Payload->SetObjectField(TEXT("workspace_refresh"), Refresh);
+				const auto Timing = MakeShared<FJsonObject>();
+				Timing->SetStringField(TEXT("scope"), TEXT("server_directory_import"));
+				Timing->SetNumberField(TEXT("source_prepare_seconds"), DomainStarted - ImportStarted);
+				Timing->SetNumberField(TEXT("domain_import_seconds"), DomainFinished - DomainStarted);
+				Timing->SetNumberField(TEXT("workspace_export_seconds"), RefreshExportSeconds);
+				Timing->SetNumberField(TEXT("workspace_refresh_other_seconds"), RefreshFinished - RefreshStarted - RefreshExportSeconds);
+				Timing->SetNumberField(TEXT("total_seconds"), RefreshFinished - ImportStarted);
+				Payload->SetObjectField(TEXT("execution_timing"), Timing);
 				if (!CommandContract::Json::TryCanonicalize(Payload, OutResponse.PayloadJson, JsonError))
 				{
 					WorkspaceError.SetFailure(JsonError);

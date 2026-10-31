@@ -2,6 +2,7 @@
 
 #include "UeAgentInterfaceModule.h"
 #include "OperationOwners/LongRunning/UeAgentLongRunningLifecycleOwner.h"
+#include "DomainAdapters/WorldRead/SceneAnalysis/UeAgentSceneAnalysis.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
 
@@ -9,6 +10,8 @@
 #include "Core/AssetPreview/UeAgentAssetPreviewState.h"
 #include "Core/AssetPreview/UeAgentAssetEditorLifetime.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringExport.h"
 #include "CommandRegistry/UeAgentActiveCommandManifest.h"
 #include "NetworkTransport/UeAgentHttpTransportAdapter.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -198,10 +201,15 @@ void FUeAgentInterfaceModule::StartupModule()
 	UE::UAI::AssetPreview::StartSequencerObservation();
 	UE::UAI::OperationOwners::LongRunning::InitializeProductionLongRunningLifecycle();
 	UE::UAI::AssetPreview::StartAssetEditorTracking();
+	UeAgentLevelAuthoring::StartLevelCaptureObservation();
 
 	EditorMapOpenedHandle = FEditorDelegates::OnMapOpened.AddRaw(
 		this,
 		&FUeAgentInterfaceModule::HandleEditorMapOpened);
+	StartPieScratchCleanupHandle = FEditorDelegates::StartPIE.AddLambda([](bool)
+	{
+		UeAgentBlueprintAssetLifecycle::CollectRetiredScratchBlueprints();
+	});
 
 	FUeAgentModelingToolCommands::Register();
 	FUeAgentInterfaceLogger::Log(TEXT("StartupModule: modeling tool commands registered"));
@@ -235,9 +243,13 @@ void FUeAgentInterfaceModule::ShutdownModule()
 {
 	FUeAgentInterfaceLogger::Log(TEXT("ShutdownModule begin"));
 	UE::UAI::OperationOwners::LongRunning::ShutdownProductionLongRunningLifecycle();
+	UE::UAI::SceneAnalysis::Shutdown();
 	UE::UAI::AssetPreview::ShutdownAssetEditorTracking();
+	UeAgentLevelAuthoring::StopLevelCaptureObservation();
 	UninstallStartMinimizedMainFrameHook();
 	UE::UAI::AssetPreview::StopSequencerObservation();
+	FEditorDelegates::StartPIE.Remove(StartPieScratchCleanupHandle);
+	StartPieScratchCleanupHandle.Reset();
 	if (EditorMapOpenedHandle.IsValid())
 	{
 		FEditorDelegates::OnMapOpened.Remove(EditorMapOpenedHandle);

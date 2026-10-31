@@ -4,6 +4,7 @@
 #include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectBoundarySemantics.h"
+#include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectBoolean.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectNormalObservation.h"
 #include "DynamicMesh/DynamicMesh3.h"
@@ -12,6 +13,8 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
 #include "MeshDescriptionToDynamicMesh.h"
+#include "DynamicMeshToMeshDescription.h"
+#include "StaticMeshAttributes.h"
 #include "Misc/SecureHash.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "Selections/MeshConnectedComponents.h"
@@ -38,6 +41,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			TEXT("normal_split_topology");
 		constexpr const TCHAR* NormalSplitTopologySchema =
 			TEXT("uai.modeling.normal_split_topology.v1");
+		constexpr const TCHAR* ExpectedComponentsField =
+			TEXT("__uai_expected_component_geometry_v1");
+		constexpr const TCHAR* ExpectedBooleanStateField = TEXT("__uai_expected_boolean_state_v1");
+
+		TSharedPtr<FJsonObject> BooleanGeometrySummary(const FCarrierState& State)
+		{
+			auto Summary = MakeShared<FJsonObject>();
+			Summary->SetNumberField(TEXT("triangle_count"), State.TriangleCount);
+			Summary->SetNumberField(TEXT("vertex_count"), State.VertexCount);
+			Summary->SetNumberField(TEXT("boundary_edge_count"), State.BoundaryEdgeCount);
+			Summary->SetNumberField(TEXT("component_count"), State.ConnectedComponentCount);
+			return Summary;
+		}
 
 		void SetIntegerArray(
 			const TSharedPtr<FJsonObject>& Object,
@@ -166,7 +182,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		bool ReadMeshState(
 			const FDynamicMesh3& Mesh,
 			FCarrierState& OutState,
-			FDiagnostic& OutError)
+			FDiagnostic& OutError,
+			const bool bObserveComponents)
 		{
 			OutState.VertexCount = Mesh.VertexCount();
 			OutState.EdgeCount = Mesh.EdgeCount();
@@ -210,6 +227,47 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			UE::Geometry::FMeshConnectedComponents Components(&Mesh);
 			Components.FindConnectedTriangles();
 			OutState.ConnectedComponentCount = Components.Num();
+			if (bObserveComponents)
+			{
+				for (int32 Index = 0; Index < Components.Num(); ++Index)
+				{
+					FCarrierState::FComponentObservation Observation;
+					const TArray<int32>& Triangles = Components[Index].Indices;
+					TSet<int32> Vertices;
+					for (const int32 TriangleId : Triangles)
+					{
+						const auto Triangle = Mesh.GetTriangle(TriangleId);
+						for (int32 Corner = 0; Corner < 3; ++Corner)
+						{
+							Vertices.Add(Triangle[Corner]);
+							Observation.Bounds += FVector(Mesh.GetVertex(Triangle[Corner]));
+						}
+					}
+					TArray<FString> TriangleKeys;
+					for (const int32 TriangleId : Triangles)
+					{
+						const auto Triangle = Mesh.GetTriangle(TriangleId);
+						FString Corners[3];
+						for (int32 Corner = 0; Corner < 3; ++Corner)
+						{
+							const FVector Position = FVector(Mesh.GetVertex(Triangle[Corner])) - Observation.Bounds.Min;
+							// Millimeter shape precision tolerates float MeshDescription round trips.
+							Corners[Corner] = FString::Printf(TEXT("%lld,%lld,%lld"),
+								FMath::RoundToInt64(Position.X * 10), FMath::RoundToInt64(Position.Y * 10), FMath::RoundToInt64(Position.Z * 10));
+						}
+						int32 First = 0;
+						for (int32 Corner = 1; Corner < 3; ++Corner) if (Corners[Corner] < Corners[First]) First = Corner;
+						const int32 Material = Mesh.HasAttributes() && Mesh.Attributes()->HasMaterialID()
+							? Mesh.Attributes()->GetMaterialID()->GetValue(TriangleId) : 0;
+						TriangleKeys.Add(FString::Printf(TEXT("%d:%s;%s;%s"), Material,
+							*Corners[First], *Corners[(First + 1) % 3], *Corners[(First + 2) % 3]));
+					}
+					TriangleKeys.Sort();
+					TriangleKeys.Add(FString::FromInt(Vertices.Num()));
+					Observation.ShapeFingerprint = BuildNormalSplitTopologyFingerprint(TriangleKeys);
+					OutState.Components.Add(MoveTemp(Observation));
+				}
+			}
 			if (Mesh.HasAttributes())
 			{
 				const UE::Geometry::FDynamicMeshAttributeSet* Attributes =
@@ -669,6 +727,40 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			return static_cast<int64>(BeforeTriangleCount) * EdgeSegments * EdgeSegments;
 		}
 
+		bool ComponentGeometryMatches(const TSharedPtr<FJsonObject>& Payload, const FCarrierState& Actual)
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Expected = nullptr;
+			if (!Payload->TryGetArrayField(ExpectedComponentsField, Expected) || !Expected
+				|| Expected->Num() != Actual.Components.Num()) return false;
+			TMultiMap<FString, int32> ByShape;
+			for (int32 Index = 0; Index < Actual.Components.Num(); ++Index)
+				ByShape.Add(Actual.Components[Index].ShapeFingerprint, Index);
+			for (const auto& Value : *Expected)
+			{
+				const TSharedPtr<FJsonObject>* Component = nullptr;
+				if (!Value.IsValid() || !Value->TryGetObject(Component) || !Component) return false;
+				FString Shape;
+				TArray<double> Minimum, Maximum;
+				FDiagnostic Error;
+				if (!(*Component)->TryGetStringField(TEXT("shape"), Shape)
+					|| !TryReadNumberArray(*Component, TEXT("min"), 3, Minimum, Error)
+					|| !TryReadNumberArray(*Component, TEXT("max"), 3, Maximum, Error)) return false;
+				TArray<int32> Candidates;
+				ByShape.MultiFind(Shape, Candidates);
+				int32 Match = INDEX_NONE;
+				for (const int32 Index : Candidates)
+				{
+					const FBox& Bounds = Actual.Components[Index].Bounds;
+					if (Bounds.Min.Equals(FVector(Minimum[0], Minimum[1], Minimum[2]), 0.01)
+						&& Bounds.Max.Equals(FVector(Maximum[0], Maximum[1], Maximum[2]), 0.01))
+					{ Match = Index; break; }
+				}
+				if (Match == INDEX_NONE) return false;
+				ByShape.RemoveSingle(Shape, Match);
+			}
+			return ByShape.IsEmpty();
+		}
+
 		bool SemanticMatches(
 			const FString& OperationKey,
 			const TSharedPtr<FJsonObject>& Payload,
@@ -680,6 +772,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				|| Before.CarrierKind != After.CarrierKind)
 			{
 				return false;
+			}
+			if (OperationKey == TEXT("remove_components") || OperationKey == TEXT("translate_components"))
+			{
+				return Before.MaterialSlotCount == After.MaterialSlotCount
+					&& ComponentGeometryMatches(Payload, After);
 			}
 			if (OperationKey == TEXT("add_material_slot"))
 			{
@@ -868,18 +965,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			}
 			if (OperationKey == TEXT("boolean"))
 			{
-				FString Operation = TEXT("union");
-				Payload->TryGetStringField(
-					TEXT("operation"),
-					Operation);
-				if (Operation == TEXT("union"))
-				{
-					return After.BoundaryEdgeCount == 0
-						&& After.Bounds.Max.X
-							>= Before.Bounds.Max.X + 20.0;
-				}
-				return StateChanged(Before, After)
-					&& After.BoundaryEdgeCount == 0;
+				return ComponentGeometryMatches(Payload, After);
 			}
 			if (OperationKey == TEXT("duplicate_faces"))
 			{
@@ -1182,7 +1268,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		IUeAgentModelingGeometryEffectReferenceResolver& Resolver,
 		const FString& TargetRef,
 		FCarrierState& OutState,
-		UE::UAI::Contract::FDiagnostic& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const bool bObserveComponents,
+		FDynamicMesh3* OutMesh)
 	{
 		OutState = FCarrierState();
 		OutError.Reset();
@@ -1270,7 +1358,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			DynamicMesh->ProcessMesh(
 				[&](const FDynamicMesh3& Mesh)
 				{
-					bRead = ReadMeshState(Mesh, OutState, OutError);
+					if (OutMesh) *OutMesh = Mesh;
+					bRead = ReadMeshState(Mesh, OutState, OutError, bObserveComponents);
 				});
 			if (!bRead)
 			{
@@ -1298,6 +1387,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			FDynamicMesh3 Mesh;
 			FMeshDescriptionToDynamicMesh Converter;
 			Converter.Convert(Description, Mesh);
+			if (OutMesh) *OutMesh = Mesh;
 			OutState.CarrierKind =
 				TEXT("static_mesh_asset");
 			OutState.MaterialSlotCount =
@@ -1316,7 +1406,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			ReadCollisionState(
 				StaticMesh->GetBodySetup(),
 				OutState);
-			if (!ReadMeshState(Mesh, OutState, OutError))
+			if (!ReadMeshState(Mesh, OutState, OutError, bObserveComponents))
 			{
 				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 				return false;
@@ -1405,6 +1495,95 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		Payload->SetStringField(
 			DurablePackageNameField,
 			State.DurablePackageName);
+		if (OperationKey == TEXT("boolean"))
+		{
+			FString OperandRef, Operation;
+			const TSharedPtr<FJsonObject>* Transform = nullptr;
+			bool bSimplifyOutput = false;
+			TArray<double> Translation, Rotation, Scale;
+			if (!ReadString(Payload, TEXT("operand_ref"), OperandRef, OutError, TEXT("operand_ref"))
+				|| !ReadString(Payload, TEXT("operation"), Operation, OutError, TEXT("operation"))) return false;
+			if (!Payload->TryGetObjectField(TEXT("operand_to_target"), Transform) || !Transform
+				|| !Payload->TryGetBoolField(TEXT("simplify_output"), bSimplifyOutput))
+			{
+				OutError = BaselineFailure(TEXT("boolean"), TEXT("operand transform and simplify_output"));
+				return false;
+			}
+			if (!TryReadNumberArray(*Transform, TEXT("translation"), 3, Translation, OutError)
+				|| !TryReadNumberArray(*Transform, TEXT("rotation_quaternion_xyzw"), 4, Rotation, OutError)
+				|| !TryReadNumberArray(*Transform, TEXT("scale"), 3, Scale, OutError)) return false;
+			FDynamicMesh3 TargetMesh, OperandMesh, ExpectedMesh;
+			FCarrierState TargetState, OperandState, ExpectedState;
+			if (!TryReadCarrier(World, Resolver, State.TargetRef, TargetState, OutError, false, &TargetMesh)
+				|| !TryReadCarrier(World, Resolver, OperandRef, OperandState, OutError, false, &OperandMesh)) return false;
+			const FTransform OperandToTarget(FQuat(Rotation[0], Rotation[1], Rotation[2], Rotation[3]),
+				FVector(Translation[0], Translation[1], Translation[2]), FVector(Scale[0], Scale[1], Scale[2]));
+			FExecutionMutationError NativeError;
+			if (!TryComputeModelingBoolean(TargetMesh, OperandMesh, OperandToTarget, Operation,
+				bSimplifyOutput, ExpectedMesh, NativeError)) { OutError = NativeError; return false; }
+			// Observe the same native source representation as CommitStaticMesh:
+			// MeshDescription also canonicalizes polygon/material attributes.
+			if (State.CarrierKind == TEXT("static_mesh_asset"))
+			{
+				FMeshDescription Description;
+				FStaticMeshAttributes Attributes(Description);
+				Attributes.Register();
+				FDynamicMeshToMeshDescription ToDescription;
+				ToDescription.Convert(&ExpectedMesh, Description);
+				FDynamicMesh3 SourceMesh;
+				FMeshDescriptionToDynamicMesh FromDescription;
+				FromDescription.Convert(&Description, SourceMesh);
+				ExpectedMesh = MoveTemp(SourceMesh);
+			}
+			if (!ReadMeshState(ExpectedMesh, ExpectedState, OutError, true)) return false;
+			TArray<TSharedPtr<FJsonValue>> Expected;
+			for (const auto& Component : ExpectedState.Components)
+			{
+				auto Item = MakeShared<FJsonObject>();
+				Item->SetStringField(TEXT("shape"), Component.ShapeFingerprint);
+				TArray<TSharedPtr<FJsonValue>> Minimum, Maximum;
+				for (int32 Axis = 0; Axis < 3; ++Axis)
+				{
+					Minimum.Add(MakeShared<FJsonValueNumber>(Component.Bounds.Min[Axis]));
+					Maximum.Add(MakeShared<FJsonValueNumber>(Component.Bounds.Max[Axis]));
+				}
+				Item->SetArrayField(TEXT("min"), Minimum);
+				Item->SetArrayField(TEXT("max"), Maximum);
+				Expected.Add(MakeShared<FJsonValueObject>(Item));
+			}
+			Payload->SetArrayField(ExpectedComponentsField, Expected);
+			Payload->SetObjectField(ExpectedBooleanStateField, BooleanGeometrySummary(ExpectedState));
+		}
+		if (OperationKey == TEXT("remove_components") || OperationKey == TEXT("translate_components"))
+		{
+			TArray<double> Minimum, Maximum, Translation;
+			if (!TryReadNumberArray(Payload, TEXT("bounds_min_cm"), 3, Minimum, OutError)
+				|| !TryReadNumberArray(Payload, TEXT("bounds_max_cm"), 3, Maximum, OutError)) return false;
+			const bool bTranslate = OperationKey == TEXT("translate_components");
+			if (bTranslate && !TryReadNumberArray(Payload, TEXT("translation_cm"), 3, Translation, OutError)) return false;
+			TArray<TSharedPtr<FJsonValue>> Expected;
+			for (const auto& Component : State.Components)
+			{
+				bool bContained = true;
+				for (int32 Axis = 0; Axis < 3; ++Axis)
+					bContained &= Component.Bounds.Min[Axis] >= Minimum[Axis] && Component.Bounds.Max[Axis] <= Maximum[Axis];
+				if (bContained && !bTranslate) continue;
+				FBox Bounds = Component.Bounds;
+				if (bContained) Bounds = Bounds.ShiftBy(FVector(Translation[0], Translation[1], Translation[2]));
+				auto Item = MakeShared<FJsonObject>();
+				Item->SetStringField(TEXT("shape"), Component.ShapeFingerprint);
+				TArray<TSharedPtr<FJsonValue>> MinValues, MaxValues;
+				for (int32 Axis = 0; Axis < 3; ++Axis)
+				{
+					MinValues.Add(MakeShared<FJsonValueNumber>(Bounds.Min[Axis]));
+					MaxValues.Add(MakeShared<FJsonValueNumber>(Bounds.Max[Axis]));
+				}
+				Item->SetArrayField(TEXT("min"), MinValues);
+				Item->SetArrayField(TEXT("max"), MaxValues);
+				Expected.Add(MakeShared<FJsonValueObject>(Item));
+			}
+			Payload->SetArrayField(ExpectedComponentsField, Expected);
+		}
 		if (OperationKey == TEXT("add_material_slot"))
 		{
 			FString MaterialRef;
@@ -1542,6 +1721,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			OperationKey,
 			Baseline,
 			true);
+		if (OperationKey == TEXT("boolean"))
+			State->SetObjectField(TEXT("geometry"), Payload->GetObjectField(ExpectedBooleanStateField));
 		if (OperationKey == TEXT("subdivide"))
 		{
 			State->SetNumberField(TEXT("triangle_count"),
@@ -1564,6 +1745,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				Payload,
 				Baseline,
 				Actual));
+		if (OperationKey == TEXT("boolean"))
+			State->SetObjectField(TEXT("geometry"), BooleanGeometrySummary(Actual));
 		if (OperationKey == TEXT("subdivide"))
 		{
 			State->SetNumberField(TEXT("triangle_count"), Actual.TriangleCount);

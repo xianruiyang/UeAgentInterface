@@ -431,13 +431,13 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson2[] = R"UAIWSD2(ration.
     },
     {
       "capability_id":"viewport.ray.deproject","descriptor_id":"uai.query.viewport.ray.deproject","operation_kind":"query","provider_binding":"world_spatial.viewport_projection.deproject","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"camera_projection_reconstruction",
-      "input_fields":[{"name":"screen_point","required":true,"component":"point_2d"}],
+      "input_fields":[{"name":"screen_point","required":true,"component":"point_2d"},{"name":"cold_start_render_size","required":false,"schema":{"type":"object","properties":{"width":{"type":"integer","minimum":1,"maximum":4096},"height":{"type":"integer","minimum":1,"maximum":4096}},"required":["width","height"],"additionalProperties":false}}],
       "result_fields":[{"name":"ray","required":true,"component":"ray_observation"}]
     },
     {
       "capability_id":"viewport.ray.trace","descriptor_id":"uai.query.viewport.ray.trace","opera)UAIWSD2";
 static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson3[] = R"UAIWSD3(tion_kind":"query","provider_binding":"world_spatial.viewport_projection.trace","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport","world"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"independent_world_trace",
-      "input_fields":[{"name":"screen_point","required":true,"component":"point_2d"},{"name":"trace_query","required":true,"component":"trace_query"}],
+      "input_fields":[{"name":"screen_point","required":true,"component":"point_2d"},{"name":"trace_query","required":true,"component":"trace_query"},{"name":"cold_start_render_size","required":false,"schema":{"type":"object","properties":{"width":{"type":"integer","minimum":1,"maximum":4096},"height":{"type":"integer","minimum":1,"maximum":4096}},"required":["width","height"],"additionalProperties":false}}],
       "result_fields":[{"name":"ray","required":true,"component":"ray_observation"},{"name":"hit","required":true,"component":"hit_observation"}]
     },
     {

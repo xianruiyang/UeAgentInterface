@@ -64,6 +64,56 @@ Existing-carrier commands accept `target_ref`; binary operations also accept
 `operand_ref` and its transform. Target and operand revisions are derived and
 frozen by the server owner and are neither public parameters nor result fields.
 
+Boolean verification derives the expected geometry from the captured target,
+operand, operand transform and options through the same isolated native Boolean
+kernel used by the edit. Independent persisted readback compares the complete
+component geometry multiset, including oriented triangles/material IDs and
+component bounds. It does not require a closed result, a change in bounds, or
+growth along an arbitrary axis. Geometry counts are projected on both sides of
+verification so a mismatch includes concrete differences. Existing component
+observation precision remains 0.1 cm for shape and 0.01 cm for bounds; the
+StaticMesh expectation uses MeshDescription float-position precision.
+
+## Bundled metric material
+
+New `mesh.primitive.*.create` outputs use
+`/UeAgentInterface/Materials/M_UAI_MetricGrid.M_UAI_MetricGrid` by default.
+All seven primitive identities accept optional `color: [r,g,b]` (linear RGB,
+each channel in `[0,1]`) and `material_ref`. The latter explicitly replaces
+the default; `color` with a different material is rejected rather than ignored.
+No new command is introduced. Existing-carrier geometry edits retain materials.
+
+The first `voxel_grid.apply()` of a newly created grid uses the same default.
+`apply(color=[...])` changes its per-object color, and `material_ref` retains its
+existing override meaning. Editing a previously authored grid preserves its
+material unless explicitly replaced. A subsequent grid revision retains the
+initial material origin, including after its bounds change.
+
+Modeling Mode `start_tool` with auto-accept, and `accept_tool`, apply this
+default to newly selected output mesh actors with no material or an engine
+default material. Explicit tool materials and existing selected actors are
+preserved. Their action input may supply `material_ref` and `color`; a custom
+material's color belongs to that material's own parameters. This does not alter
+the standalone UE Modeling UI or every third-party tool's own defaults.
+
+The grid uses object-local axes, physical world-centimeter spacing (10 cm
+minor / 100 cm major), and smooth triplanar projection. On first assignment,
+the actual mesh-local bounds minimum is captured once; later edits do not
+silently recenter the ruler. Curved surfaces provide projected scale references,
+not an arc-length ruler, and may show intersecting lines in projection blends.
+
+Component **Custom Primitive Data Defaults** persist RGB at indices 0..2,
+an initialized marker of 1 at index 3, and the fixed local origin in centimeters
+at indices 4..6. Public Level HJSON may edit these reflected component defaults
+after creation; preserve the marker/origin when changing color. Runtime-only
+custom data and transient MIDs are not the persistence mechanism. Voxel apply
+includes these defaults in its existing independent saved-package readback and
+restores them with the prior material on rollback.
+
+The master is a plugin-owned content asset. Keep the plugin's `Content/`
+directory when installing or distributing; a missing default produces a clear
+resource error instead of silently displaying an unrelated fallback material.
+
 ## Persisted Modeling artifact readback
 
 The production Modeling persisted-state oracle does not unload or reload the

@@ -11,6 +11,8 @@ namespace UE::UAI::OperationOwners::WorldCommands
 		const FString ProviderId = TEXT("world-hlod-domain-provider");
 		const FString RootType = TEXT("/Script/Engine.HLODLayer");
 		const FString RootContract = TEXT("uai.init.world_hlod_layer.root/1");
+		const FString DataLayerRootType = TEXT("/Script/Engine.DataLayerAsset");
+		const FString DataLayerRootContract = TEXT("uai.init.world_data_layer.root/1");
 		class FProvider final : public IImportInitializationDomainProvider
 		{
 		public:
@@ -18,21 +20,22 @@ namespace UE::UAI::OperationOwners::WorldCommands
 			bool Matches(const FImportInitializationDomainRequest& Request) const override
 			{
 				return Request.GetRole() == EInitializationNodeRole::RootTarget
-					&& Request.GetRootTypeIdentity() == RootType;
+					&& (Request.GetRootTypeIdentity() == RootType || Request.GetRootTypeIdentity() == DataLayerRootType);
 			}
 			bool TryResolveInitializationContract(const FImportInitializationDomainRequest& Request,
 				FString& OutId, FWorkspaceError& OutError) const override
 			{
 				OutId.Reset(); OutError.Reset();
 				if (!Matches(Request)) return false;
-				OutId = RootContract; return true;
+				OutId = Request.GetRootTypeIdentity() == DataLayerRootType ? DataLayerRootContract : RootContract; return true;
 			}
 			bool TryExecute(const FImportInitializationDomainRequest& Request,
 				const FString& ContractId, FImportInitializationDomainResponse& OutResponse,
 				FWorkspaceError& OutError) const override
 			{
 				OutResponse = {}; OutError.Reset();
-				if (!Matches(Request) || ContractId != RootContract)
+				const FString& ExpectedContract = Request.GetRootTypeIdentity() == DataLayerRootType ? DataLayerRootContract : RootContract;
+				if (!Matches(Request) || ContractId != ExpectedContract)
 				{
 					auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_contract_not_executable"),
 						TEXT("The initialization contract does not match the HLOD execution contract."), TEXT("domain_execute"));
@@ -62,7 +65,7 @@ namespace UE::UAI::OperationOwners::WorldCommands
 				FString Payload; bool bReadOnly = false;
 				if (!DomainAdapters::WorldCommands::TryExecuteHlodContentGraph(
 					Request.GetCommandId(), Request.GetTargetIdentity(),
-					Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError)) return false;
+					Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError, Request.GetRootTypeIdentity())) return false;
 				OutResponse = FImportInitializationDomainResponse(MoveTemp(Payload), bReadOnly);
 				if (!OutResponse.IsValid()) {
 					OutError.SetFailure(OutResponse.GetValidationDiagnostic(), Request.GetTargetIdentity());

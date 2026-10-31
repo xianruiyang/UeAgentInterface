@@ -181,11 +181,13 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		const EUeAgentCaptureMediaLongJobFamily InFamily,
 		FString InSubjectRef,
 		FString InPolicyId,
-		FUeAgentCanonicalValueRef InParameters)
+		FUeAgentCanonicalValueRef InParameters,
+		bool bInPolicyDefaulted)
 		: Family(InFamily)
 		, SubjectRef(MoveTemp(InSubjectRef))
 		, PolicyId(MoveTemp(InPolicyId))
 		, Parameters(MoveTemp(InParameters))
+		, bPolicyDefaulted(bInPolicyDefaulted)
 	{
 	}
 

@@ -1,6 +1,7 @@
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentViewportCapture.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/EditorCapture/UeAgentSlateWindowCapture.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaDiagnostics.h"
 #include "Core/EditorViewport/UeAgentViewportRealtimeState.h"
 
@@ -124,8 +125,11 @@ bool UE::UAI::DomainAdapters::CaptureMediaLongJob::FViewportCapture::TakeActiveV
 		OutError.InternalContext = SelectionReason;
 		return false;
 	}
-	if (!UE::UAI::DomainAdapters::CaptureMediaLongJob::WorldViewportMechanics::PrepareLevelViewportForCapture(LVC, OutError)) return false;
+	UE::UAI::EditorCapture::SlateWindow::FScopedViewportExtent ExtentScope;
+	if (!ExtentScope.Prepare(WorldViewportMechanics::GetLevelSceneViewport(LVC), nullptr, FString(), OutError)) return false;
 	if (!TakeViewportScreenshot(*LVC, WarmupFrames, OutPixels, OutSize, OutCaptureInfo, OutError)) return false;
+	ExtentScope.Restore();
+	OutCaptureInfo->SetObjectField(TEXT("viewport_initialization"), ExtentScope.Describe());
 	OutCaptureInfo->SetStringField(TEXT("render_path"), TEXT("level_viewport_backbuffer"));
 	OutCaptureInfo->SetObjectField(TEXT("viewport"), UE::UAI::DomainAdapters::CaptureMediaLongJob::WorldViewportMechanics::MakeViewportClientJson(LVC, SelectionReason));
 	return true;
@@ -144,6 +148,12 @@ bool UE::UAI::DomainAdapters::CaptureMediaLongJob::FViewportCapture::TakeViewpor
 	}
 
 	FViewport* Viewport = LVC->Viewport;
+	const auto ExposureBefore = LVC->ExposureSettings;
+	const bool bGameViewBefore = LVC->IsInGameView();
+	const bool bLightingBefore = LVC->EngineShowFlags.Lighting;
+	const bool bPostProcessingBefore = LVC->EngineShowFlags.PostProcessing;
+	const bool bEyeAdaptationBefore = LVC->EngineShowFlags.EyeAdaptation;
+	const bool bTonemapperBefore = LVC->EngineShowFlags.Tonemapper;
 	const auto RealtimeBefore = UE::UAI::EditorViewport::ReadRealtimeState(*LVC);
 	const bool bRealtimeBefore = LVC->IsRealtime();
 	const FText ScreenshotRealtimeOverrideSystem = NSLOCTEXT("UeAgentInterface", "ScreenshotRealtimeOverrideSystem", "UeAgentInterfaceScreenshot");
@@ -214,6 +224,25 @@ bool UE::UAI::DomainAdapters::CaptureMediaLongJob::FViewportCapture::TakeViewpor
 	const auto RealtimeAfter = UE::UAI::EditorViewport::ReadRealtimeState(*LVC);
 	OutCaptureInfo->SetBoolField(TEXT("realtime_state_restored"),
 		RealtimeAfter.bConfigured == RealtimeBefore.bConfigured && RealtimeAfter.bEffective == RealtimeBefore.bEffective);
+	// These are the editor display controls used for this draw, not the resolved
+	// scene post process or the renderer's temporal exposure history. Observe only.
+	const auto DisplayState = MakeShared<FJsonObject>();
+	DisplayState->SetBoolField(TEXT("game_view"), bGameViewBefore);
+	DisplayState->SetBoolField(TEXT("exposure_override_enabled"), ExposureBefore.bFixed);
+	if (ExposureBefore.bFixed) DisplayState->SetNumberField(TEXT("fixed_ev100"), ExposureBefore.FixedEV100);
+	DisplayState->SetBoolField(TEXT("lighting"), bLightingBefore);
+	DisplayState->SetBoolField(TEXT("post_processing"), bPostProcessingBefore);
+	DisplayState->SetBoolField(TEXT("eye_adaptation"), bEyeAdaptationBefore);
+	DisplayState->SetBoolField(TEXT("tonemapper"), bTonemapperBefore);
+	OutCaptureInfo->SetObjectField(TEXT("display_state"), DisplayState);
+	OutCaptureInfo->SetBoolField(TEXT("display_state_unchanged"),
+		LVC->IsInGameView() == bGameViewBefore
+		&& LVC->ExposureSettings.bFixed == ExposureBefore.bFixed
+		&& LVC->ExposureSettings.FixedEV100 == ExposureBefore.FixedEV100
+		&& LVC->EngineShowFlags.Lighting == bLightingBefore
+		&& LVC->EngineShowFlags.PostProcessing == bPostProcessingBefore
+		&& LVC->EngineShowFlags.EyeAdaptation == bEyeAdaptationBefore
+		&& LVC->EngineShowFlags.Tonemapper == bTonemapperBefore);
 	return true;
 }
 
@@ -226,14 +255,12 @@ bool UE::UAI::DomainAdapters::CaptureMediaLongJob::FViewportCapture::TakeViewpor
 	for (int32 FrameIndex = 0; FrameIndex < WarmupFrames; ++FrameIndex)
 	{
 		Viewport->Invalidate();
-		Viewport->Draw(/*bShouldPresent*/ true);
-		FlushRenderingCommands();
+		Viewport->Draw(/*bShouldPresent*/ false);
 		DrawsPerformed++;
 	}
 
 	Viewport->Invalidate();
-	Viewport->Draw(/*bShouldPresent*/ true);
-	FlushRenderingCommands();
+	Viewport->Draw(/*bShouldPresent*/ false);
 	DrawsPerformed++;
 
 	const FIntPoint Size = Viewport->GetSizeXY();
@@ -252,6 +279,8 @@ bool UE::UAI::DomainAdapters::CaptureMediaLongJob::FViewportCapture::TakeViewpor
 		return false;
 	}
 	Pixels.AddUninitialized(Size.X * Size.Y);
+	// ReadPixels enqueues the surface read after the draws and flushes the render
+	// command queue itself. Per-draw flushes only serialize CPU and GPU work.
 	if (!Viewport->ReadPixels(Pixels))
 	{
 		OutError = Native(TEXT("read_pixels_failed"), TEXT("The viewport could not read its backbuffer pixels."),
@@ -271,6 +300,8 @@ bool UE::UAI::DomainAdapters::CaptureMediaLongJob::FViewportCapture::TakeViewpor
 	OutCaptureInfo->SetNumberField(TEXT("native_height"), Size.Y);
 	OutCaptureInfo->SetNumberField(TEXT("warmup_frames_requested"), WarmupFrames);
 	OutCaptureInfo->SetNumberField(TEXT("draws_performed"), DrawsPerformed);
+	OutCaptureInfo->SetNumberField(TEXT("display_gamma"), Viewport->GetDisplayGamma());
+	OutCaptureInfo->SetBoolField(TEXT("scene_hdr_enabled"), Viewport->GetSceneHDREnabled());
 	return true;
 }
 

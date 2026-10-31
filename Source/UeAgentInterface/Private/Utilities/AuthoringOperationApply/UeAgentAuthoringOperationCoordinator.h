@@ -260,6 +260,18 @@ private:
   const FProviderRegistry &ProviderRegistry;
 };
 
+struct FPublishedPackageReadback {
+  FString PackageName;
+  FString FinalPath;
+  EPackageDurableIntent Intent = EPackageDurableIntent::Save;
+};
+
+struct FOperationReadback {
+  UeAgentApplyInputContract::EOperation Operation;
+  TArray<UeAgentAuthoringState::FReadRequest> Requests;
+  const UeAgentAuthoringState::FStateSnapshot* Expected = nullptr;
+};
+
 struct UEAGENTINTERFACE_API FBackendOptions {
   bool bUseEditorTransaction = true;
   FText TransactionDescription;
@@ -271,6 +283,14 @@ struct UEAGENTINTERFACE_API FBackendOptions {
   TSharedPtr<IDurablePackageStager> PackageStager;
   // Synchronous public-import readback, executed within the recoverable boundary.
   TFunction<bool(FOperationFailure &)> FinalReadback;
+  // An optional domain observer of the actual published files. Unset means
+  // this shape needs the existing unload/rebind path. Verify must run while
+  // its independently loaded objects are alive; it is the same comparison
+  // used by the ordinary transaction, not a second apply or transaction.
+  TFunction<TOptional<bool>(const TArray<FPublishedPackageReadback>&,
+      TArray<FOperationReadback>&,
+      TFunctionRef<bool(FOperationFailure&)>, FOperationFailure&)>
+      ObservePublishedReadback;
   // Settle shared native effects after every operation has compiled, before
   // refreshing the durable inventory, verifying or saving the workspace.
   TFunction<bool(FOperationFailure &)> FinalizeNativeUpdate;
@@ -344,6 +364,10 @@ private:
   CaptureRequests(const TArray<UeAgentAuthoringState::FReadRequest> &Requests,
                   UeAgentAuthoringState::FStateSnapshot &OutSnapshot,
                   FOperationFailure &OutFailure) const;
+  bool BuildReadbackRequests(TArray<FOperationReadback>& OutReadbacks,
+                            FOperationFailure& OutFailure);
+  bool VerifyReadbackRequests(const TArray<FOperationReadback>& Readbacks,
+                             FOperationFailure& OutFailure);
 
   FBackendOptions Options;
   TUniquePtr<FScopedTransaction> EditorTransaction;
@@ -352,6 +376,7 @@ private:
   TArray<FPreparedOperationMutation *> CapturedMutations;
   TArray<FPackageDirtySnapshot> PackageDirtySnapshots;
   TArray<FPackageDurablePlan> DurablePackagePlans;
+  TArray<FPublishedPackageReadback> PublishedReadbackPackages;
   bool bWorkspaceOpen = false;
   bool bAwaitingDurableFinalization = false;
   bool bNativeStateReleased = false;

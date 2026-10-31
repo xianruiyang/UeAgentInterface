@@ -166,6 +166,7 @@ fixture 只作为待审资产，不得形成第二套权威。
 - Reference CRUD：`contracts/reference_crud_route.md`
 - SimpleAuthoring typed CRUD：`contracts/simple_authoring_typed_crud.md`
 - Long-running / Session：`contracts/long_running_session_public_commands.md`
+- Fab 资源查询、下载与导入：`contracts/fab_command_contract.md`
 
 历史命令分册、生成式命令规格和覆盖债务报告已退出活动文档路径；不得用它们反推
 当前命令合同或实现状态。

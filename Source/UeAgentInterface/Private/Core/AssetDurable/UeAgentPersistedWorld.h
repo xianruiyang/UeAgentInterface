@@ -11,6 +11,15 @@ namespace UE::UAI::AssetDurable
 {
 	using FPersistedWorldLoadError = UE::UAI::Contract::FDiagnostic;
 
+	// A published package header from a durable owner's verified inventory.
+	// This neutral view lets both durable transaction owners use the same loader.
+	struct FPersistedWorldPackage
+	{
+		FString PackageName;
+		FString FinalPath;
+		bool bDeleted = false;
+	};
+
 	class UEAGENTINTERFACE_API FPersistedWorldReferenceMap final
 	{
 	public:
@@ -41,6 +50,11 @@ namespace UE::UAI::AssetDurable
 	 */
 	UEAGENTINTERFACE_API bool TryObservePersistedWorld(
 		const TArray<FDurableArtifact>& Artifacts,
+		FPersistedWorldObserver Observer,
+		FPersistedWorldLoadError& OutError);
+
+	UEAGENTINTERFACE_API bool TryObservePersistedWorld(
+		const TArray<FPersistedWorldPackage>& Packages,
 		FPersistedWorldObserver Observer,
 		FPersistedWorldLoadError& OutError);
 }

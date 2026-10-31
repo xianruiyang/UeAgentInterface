@@ -1,4 +1,5 @@
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
+#include "CommandEdge/UeAgentCommandParameterValidation.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
 #include "Dom/JsonValue.h"
@@ -130,6 +131,10 @@ namespace UE::UAI::CommandEdge
 		{
 			return Reject(TEXT("command_disabled"), TEXT("The requested command is disabled."));
 		}
+		UE::UAI::Contract::FDiagnostic ParameterError;
+		if (!TryValidateCommandParameters(*Contract, Request.GetParams(), ParameterError))
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(),
+				Request.GetCommandId(), Request.GetCommandBindingHash(), MoveTemp(ParameterError));
 		const TSharedRef<IUeAgentExactCommandHandler>* Handler =
 			Handlers.Find(Request.GetCommandId());
 		if (!Handler)

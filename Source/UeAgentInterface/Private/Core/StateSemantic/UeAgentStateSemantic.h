@@ -335,6 +335,9 @@ namespace UE::UAI::StateSemantic
 		bool IsValid() const;
 		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentCanonicalIdentity& Other) const;
+		// Rebind only the generation of an immutable, validated identity. The
+		// new generation uses the same normalization and diagnostic contract.
+		FUeAgentCanonicalIdentity WithGeneration(FString InGeneration) const;
 
 	private:
 		FString SemanticId;

@@ -28,7 +28,6 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 
 	namespace
 	{
-		const FString RootType = TEXT("/Script/Engine.HLODLayer");
 		FString PackageIdentity(const FString& Target)
 		{
 			return Target.Contains(TEXT("."))
@@ -43,7 +42,7 @@ namespace UE::UAI::DomainAdapters::WorldCommands
         }
 
 		const UeAgentReflectionAuthoring::FProfile* ResolveProfile(
-			const FString& Target, FWorkspaceError& OutError)
+			const FString& Target, const FString& RootType, FWorkspaceError& OutError)
 		{
 			UE::UAI::Contract::FDiagnostic Error;
 			if (!UeAgentReflectionAuthoring::RegisterAuthoring(Error))
@@ -52,7 +51,8 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 				return nullptr;
 			}
 			const auto* Profile =
-				UeAgentReflectionAuthoring::FindProfileByTypeId(TEXT("hlod_layer"));
+				UeAgentReflectionAuthoring::FindProfileByTypeId(
+					RootType == TEXT("/Script/Engine.DataLayerAsset") ? TEXT("data_layer") : TEXT("hlod_layer"));
 			if (!Profile)
 			{
 				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_reflection_profile_missing"),
@@ -66,7 +66,7 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 			return Profile;
 		}
 
-		bool Read(const FString& Target, FString& OutPayload,
+		bool Read(const FString& Target, const FString& RootType, FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
 			UObject* Object = nullptr;
@@ -79,10 +79,10 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 			return TryCanonicalizeObject(Snapshot, OutPayload, OutError);
 		}
 
-		bool ReadRevision(const FString& Target, FString& Payload,
+		bool ReadRevision(const FString& Target, const FString& RootType, FString& Payload,
 			FString& Revision, FWorkspaceError& Error)
 		{
-			if (!Read(Target, Payload, Error)) return false;
+			if (!Read(Target, RootType, Payload, Error)) return false;
 			UObject* Owner = nullptr;
 			FUeAgentContentGraphCapture Capture;
 			if (!TryCaptureObject(Target, RootType, Owner, Capture, Error)) return false;
@@ -91,7 +91,7 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 		}
 
 		bool Create(const UeAgentReflectionAuthoring::FProfile& Profile,
-			const FString& Target, const FResolvedDomainHjsonDocument& Document,
+			const FString& Target, const FString& RootType, const FResolvedDomainHjsonDocument& Document,
 			FString& Payload, FWorkspaceError& Error)
 		{
 			// The domain selects its root type; the existing Reflection input,
@@ -158,8 +158,8 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 					TEXT("world-hlod-domain-provider"), Target, ObjectPathFromPackageIdentity(Target),
 					nullptr, TEXT("world_hlod_create_readback_invalid"),
 					TEXT("world_hlod_compile_not_settled"),
-					[&Target](FString& ReadPayload, FString& Revision, FWorkspaceError& ReadFailure)
-					{ return ReadRevision(Target, ReadPayload, Revision, ReadFailure); },
+					[&Target, &RootType](FString& ReadPayload, FString& Revision, FWorkspaceError& ReadFailure)
+					{ return ReadRevision(Target, RootType, ReadPayload, Revision, ReadFailure); },
 					Payload, ReadError);
 				if (!bReadbackCompleted) {
 					Failure.Diagnostic = ReadError.GetDiagnostic();
@@ -188,7 +188,7 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 
 	bool TryExecuteHlodContentGraph(const FString& CommandId,
 		const FString& TargetIdentity, const FString& CanonicalParamsJson,
-		FString& OutPayloadJson, bool& bOutReadOnly, FWorkspaceError& OutError)
+		FString& OutPayloadJson, bool& bOutReadOnly, FWorkspaceError& OutError, const FString& RootType)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -221,7 +221,7 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 			return Fail(OutError, MoveTemp(Error), TargetIdentity);
 		}
 
-		const auto* Profile = ResolveProfile(Target, OutError);
+		const auto* Profile = ResolveProfile(Target, RootType, OutError);
 		if (!Profile) return false;
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
@@ -247,11 +247,11 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 			FResolvedDomainHjsonDocument Document;
 			if (!TryDecodeResolvedDocument(Target, CanonicalParamsJson,
 				FDomainHjsonDocumentContract(TEXT("world_hlod"),
-					TEXT("uai.world_hlod_layer.edit/1"), RootType),
+					RootType == TEXT("/Script/Engine.DataLayerAsset") ? TEXT("uai.world_data_layer.edit/1") : TEXT("uai.world_hlod_layer.edit/1"), RootType),
 				Document, OutError)) return false;
 			FScopedDomainHjsonDiagnosticSource DiagnosticSource(Document, OutError);
 			if (!Document.bSemanticWorkspaceDirectory)
-				return Create(*Profile, Target, Document, OutPayloadJson, OutError);
+				return Create(*Profile, Target, RootType, Document, OutPayloadJson, OutError);
 			if (!Document.SemanticWorkspace.IsValid())
 			{
 				auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_semantic_workspace_required"),
@@ -298,7 +298,7 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{
 			bOutReadOnly = true;
-			return Read(Target, OutPayloadJson, OutError);
+			return Read(Target, RootType, OutPayloadJson, OutError);
 		}
 		auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_command_not_supported"),
 			TEXT("The HLOD domain adapter only supports content_graph commands."), TEXT("domain_resolve"), CommandId);

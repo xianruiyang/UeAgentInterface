@@ -5,6 +5,7 @@
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaImagePolicy.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentAssetFolderThumbnailCapture.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "OperationOwners/CaptureMedia/UeAgentCaptureMediaOwner.h"
@@ -137,12 +138,13 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 			}
 			FUeAgentCommandDeclaration Result;
 			Result.CommandId = Route.CommandId;
-			Result.PythonNamespace = TEXT("capture");
+			const bool bFolderPreview = Route.CommandId == TEXT("asset.folder.preview");
+			Result.PythonNamespace = bFolderPreview ? TEXT("asset") : TEXT("capture");
 			Result.PythonFunction = Route.PythonFunction;
 			Result.ContractVersion = 1;
 			Result.PublicOwner = Owner;
 			Result.Availability = EUeAgentCommandAvailability::Enabled;
-			Result.SideEffect = EUeAgentCommandSideEffect::EditorState;
+			Result.SideEffect = bFolderPreview ? EUeAgentCommandSideEffect::ExternalState : EUeAgentCommandSideEffect::EditorState;
 			Result.StateLayers = {TEXT("server_operation_registry"),
 				TEXT("owned_capture_resources"), TEXT("terminal_operation_receipt")};
 			FString PolicyIdSchema;
@@ -158,18 +160,26 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact capture operation parameter."), Parameter.GetSchemaJson()};
+				if (bFolderPreview)
+				{
+					Field.Description = Parameter.GetName() == TEXT("folder")
+						? TEXT("UE content folder, for example /Game/RuinedCrypt.")
+						: TEXT("Optional recursive (default true), class_paths (full class paths; derived classes included), page_size (default 24, split into sheets of at most 24), generate_missing (default true; load/render only this page's missing assets), and after (previous next_after with unchanged folder/filters).");
+					if (Parameter.GetName() == TEXT("options"))
+						Field.SchemaJson = DomainAdapters::CaptureMediaLongJob::GetAssetFolderPreviewOptionsSchema();
+				}
 				if (Route.CommandId == TEXT("capture.image.execute")
 					&& Parameter.GetName() == TEXT("policy_id"))
 				{
 					Field.Description = TEXT(
-						"Select one exact image policy from this dynamic catalog.");
+						"Optional exact image policy. Omit for the active Level viewport or the asset's supported native preview; explicit policies take precedence. Null, empty and unknown values are errors, not defaults.");
 					Field.SchemaJson = PolicyIdSchema;
 				}
 				else if (Route.CommandId == TEXT("capture.image.execute")
 					&& Parameter.GetName() == TEXT("parameters"))
 				{
 					Field.Description = TEXT(
-						"Policy-specific parameters; select a search candidate variant and use its request_schema without guessing.");
+						"Policy-specific parameters. With omitted policy_id use viewport/v1 fields for viewport:active or asset-preview/v1 fields for an asset. Other observations require an explicit policy; select its variant request_schema.");
 				}
 				else if (Route.CommandId == TEXT("capture.image.execute")
 					&& Parameter.GetName() == TEXT("subject_ref"))
@@ -198,6 +208,17 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 			Result.Purpose.RelatedFlows = {TEXT("operation.status"), TEXT("operation.cancel"), TEXT("operation.release")};
 			Result.Purpose.Keywords = {TEXT("capture"), TEXT("image"), TEXT("media"), TEXT("render")};
 			Result.Purpose.Synonyms = {TEXT("capture job")};
+			if (bFolderPreview)
+			{
+				Result.Purpose.Summary = TEXT("Browse a content folder as named native-thumbnail contact sheets, without opening asset editors or loading every asset.");
+				Result.Purpose.Target = TEXT("A UE content folder and an optional recursive, class-filtered page.");
+				Result.Purpose.ParameterGuidance = TEXT("Pass folder; options defaults to recursive=true and page_size=24. Reuse asset_catalog.next_after as options.after with the same filters.");
+				Result.Purpose.ResultGuidance = TEXT("Finish the returned operation and materialize its image artifacts. The capture receipt's asset_catalog maps each full name, object_path and class_path to sheet_index/tile_index; missing thumbnails remain explicit rows.");
+				Result.Purpose.SideEffectGuidance = TEXT("Reads registry and native thumbnail caches, creates offscreen contact-sheet artifacts, and does not open asset editors or change the world.");
+				Result.Purpose.MinimumExample = TEXT("client.asset.folder_preview(folder='/Game/RuinedCrypt', options={'class_paths': ['/Script/Engine.StaticMesh']})");
+				Result.Purpose.Keywords = {TEXT("asset"), TEXT("folder"), TEXT("thumbnail"), TEXT("preview"), TEXT("contact sheet"), TEXT("batch"), TEXT("browse"), TEXT("资产"), TEXT("文件夹"), TEXT("缩略图")};
+				Result.Purpose.Synonyms = {TEXT("folder asset previews"), TEXT("batch asset thumbnails"), TEXT("learn imported asset pack")};
+			}
 			if (Route.CommandId == TEXT("capture.image.execute"))
 			{
 				if (!TryAppendImageDiscoveryVariants(Result, OutError))

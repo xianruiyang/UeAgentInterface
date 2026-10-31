@@ -18,6 +18,7 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 	namespace
 	{
 		const FString ActorCandidateCommandId = TEXT("world.actor.candidates");
+		const FString ComponentCandidateCommandId = TEXT("world.component.candidates");
 		const FString ActorCandidateOwner = TEXT("level-world-domain-owner");
 
 		FUeAgentCommandResult CandidateFailure(const FUeAgentCommandRequest& Request,
@@ -28,12 +29,13 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
             return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
         }
 
-		class FActorCandidateHandler final : public IUeAgentExactCommandHandler
+		class FLevelCandidateHandler final : public IUeAgentExactCommandHandler
 		{
 		public:
+			explicit FLevelCandidateHandler(bool bInComponents) : bComponents(bInComponents) {}
 			virtual const FString& GetCommandId() const override
 			{
-				return ActorCandidateCommandId;
+				return bComponents ? ComponentCandidateCommandId : ActorCandidateCommandId;
 			}
 
 			virtual const FString& GetPublicOwner() const override
@@ -62,8 +64,10 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 
 				FString PayloadJson;
 				FWorkspaceError Error;
-				if (!QueryOwners::WorldSpatial::TryExecuteActorCandidateQuery(
-						Request.GetParamsJson(), PayloadJson, Error))
+				const bool bSuccess = bComponents
+					? QueryOwners::WorldSpatial::TryExecuteComponentCandidateQuery(Request.GetParamsJson(), PayloadJson, Error)
+					: QueryOwners::WorldSpatial::TryExecuteActorCandidateQuery(Request.GetParamsJson(), PayloadJson, Error);
+				if (!bSuccess)
 				{
 					auto Diagnostic = Error.GetDiagnostic();
 					if (Error.GetCode().IsEmpty())
@@ -83,6 +87,8 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 				return FUeAgentCommandResult::Success(
 					Request, MoveTemp(PayloadJson));
 			}
+		private:
+			bool bComponents;
 		};
 	}
 
@@ -96,7 +102,7 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 		if (!DomainAdapters::WorldSpatial::TryExecuteContentGraph(
 				Request.GetCommandId(), Request.GetTargetIdentity(),
 				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
-				Request.GetRequestId()))
+				Request.GetRequestId(), Request.GetWorkspaceExportPreparation().Get(), Request.GetWorkspaceProfileId()))
 		{
 			return false;
 		}
@@ -124,7 +130,8 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
-		OutHandlers.Add(MakeShared<FActorCandidateHandler>());
+		OutHandlers.Add(MakeShared<FLevelCandidateHandler>(false));
+		OutHandlers.Add(MakeShared<FLevelCandidateHandler>(true));
 		return true;
 	}
 }

@@ -101,19 +101,23 @@ namespace UE::UAI::AssetDurable
 			FString InPackageName,
 			EPackageHeaderKind InHeaderKind,
 			EAssetDurableIntent InIntent,
-			ERollbackGrade InRollbackGrade);
+			ERollbackGrade InRollbackGrade,
+			TArray<FString> InAdditionalPackageExtensions = {});
 		FAssetDurableTarget(
 			FUeAgentCanonicalIdentity InIdentity,
 			EDurableArtifactKind InArtifactKind,
 			FString InDurableLocation,
 			EAssetDurableIntent InIntent,
-			ERollbackGrade InRollbackGrade);
+			ERollbackGrade InRollbackGrade,
+			TArray<FString> InAdditionalPackageExtensions = {});
 
 		const FUeAgentCanonicalIdentity& GetIdentity() const;
 		EDurableArtifactKind GetArtifactKind() const;
 		const FString& GetDurableLocation() const;
 		const FString& GetPackageName() const;
 		EPackageHeaderKind GetPackageHeaderKind() const;
+		/** Explicit native package sidecars, included in the same backup/journal/restore inventory. */
+		const TArray<FString>& GetAdditionalPackageExtensions() const;
 		FString GetDurableTargetKey() const;
 		EAssetDurableIntent GetIntent() const;
 		ERollbackGrade GetRollbackGrade() const;
@@ -126,6 +130,7 @@ namespace UE::UAI::AssetDurable
 			EDurableArtifactKind::Package;
 		FString DurableLocation;
 		FString PackageName;
+		TArray<FString> AdditionalPackageExtensions;
 		EPackageHeaderKind PackageHeaderKind =
 			EPackageHeaderKind::EvidenceRequired;
 		EAssetDurableIntent Intent = EAssetDurableIntent::Save;
@@ -441,6 +446,7 @@ namespace UE::UAI::AssetDurable
 	public:
 		explicit FPackageAssetDurableBackend(
 			FString InAllowedContentRoot = FString());
+		FPackageAssetDurableBackend(FString InAllowedContentRoot, TArray<FString> InAdditionalContentRoots);
 
 		virtual TArray<FString> GetAllowedArtifactRoots() const override;
 		virtual bool SupportsAtomicity(
@@ -475,6 +481,7 @@ namespace UE::UAI::AssetDurable
 
 	private:
 		FString AllowedContentRoot;
+		TArray<FString> AdditionalContentRoots;
 	};
 
 	class UEAGENTINTERFACE_API
@@ -607,6 +614,9 @@ namespace UE::UAI::AssetDurable
 		FDurableReceipt& OutReceipt,
 		FAssetDurableError& OutError);
 
+	/** True means a receipt was recorded, including StateUnknown. A consumer
+	 * reporting restoration must additionally require OutReceipt.GetStatus() == RolledBack
+	 * and preserve GetFailureDiagnostic() for any unconfirmed recovery. */
 	UEAGENTINTERFACE_API bool TryRollbackAssetDurability(
 		const FAssetDurableSessionRef& Session,
 		IAssetDurableBackend& Backend,

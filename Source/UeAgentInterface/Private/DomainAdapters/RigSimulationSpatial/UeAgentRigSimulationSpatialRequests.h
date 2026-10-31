@@ -213,6 +213,13 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FRigSimulationSpatialTransform3d SocketTransform;
 		FRigSimulationSpatialRevision ExpectedRevision;
 	};
+	struct FRigControlBakeContextInput
+	{
+		FString SequenceRef;
+		FString BindingName;
+		FString RigRef;
+		FString TargetAnimationRef;
+	};
 	struct FRigControlBakeAnimationInput
 	{
 		FString SourceSequenceRef;
@@ -326,6 +333,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 	using FUeAgentRigSimulationSpatialRequestPayload = TVariant<
 		FRigSkeletonPreviewMeshBindInput,
 		FRigSkeletonSocketUpdateInput,
+		FRigControlBakeContextInput,
 		FRigControlBakeAnimationInput,
 		FRigControlBakeControlsInput,
 		FRigIkDefinitionUpdateInput,

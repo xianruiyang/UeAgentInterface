@@ -204,10 +204,14 @@ private:
 
 struct UEAGENTINTERFACE_API FUeAgentStructuredHjsonWriteOptions
 {
+	using FStableLeafProjection = bool (*)(const UE::UAI::StateSemantic::FUeAgentCanonicalValue&,
+		TFunctionRef<bool(int64)>, TSharedPtr<FJsonValue>&, UE::UAI::Contract::FDiagnostic&);
 	TMap<FString, TArray<FString>> PreferredKeyOrderByJsonPointer;
 	/** Optional semantic leaf representation; unset means literal HJSON kinds. */
 	TFunction<bool(const UE::UAI::StateSemantic::FUeAgentCanonicalValue&,
 		TFunctionRef<bool(int64)>, TSharedPtr<FJsonValue>&, UE::UAI::Contract::FDiagnostic&)> CanonicalLeafProjection;
+	/** Stateless projection owner. Dynamic callbacks above keep the uncached path. */
+	FStableLeafProjection StableCanonicalLeafProjection = nullptr;
 };
 
 class UEAGENTINTERFACE_API FUeAgentStructuredHjsonFormatter

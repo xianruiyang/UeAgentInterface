@@ -9,6 +9,8 @@
 #include "OperationOwners/LongRunning/UeAgentLongRunningLifecycleOwner.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Async/Async.h"
+#include "DomainAdapters/WorldRead/SceneAnalysis/UeAgentSceneAnalysis.h"
 
 namespace UE::UAI::ServiceComposition::Query
 {
@@ -70,6 +72,28 @@ namespace UE::UAI::ServiceComposition::Query
 					AuthorityScopes,
 					Request->GetCorrelationId());
 				FString Target;
+				if (SceneAnalysis::IsAnalysisCommand(Request->GetCommandId()))
+				{
+					TSharedPtr<IUeAgentOperationApplicationPort> LifecyclePort;
+					TSharedPtr<Composition::LongRunningSession::FUeAgentLongRunningSessionRuntime> Runtime;
+					Contract::FDiagnostic RuntimeError;
+					if (!OperationOwners::LongRunning::TryGetProductionLongRunningLifecyclePort(LifecyclePort, Runtime, RuntimeError))
+						return Reply(Ingress, FUeAgentCommandResult::ProtocolError(Request->GetCorrelationId(), Request->GetRequestId(), Request->GetCommandId(), Request->GetCommandBindingHash(), RuntimeError));
+					return Reply(Ingress, Runtime->AcceptDeferredCommand(Request.GetValue(), Caller,
+						[Dispatch = Dispatch, Request = Request.GetValue(), Caller](TFunction<bool()> IsCancelled, TFunction<void(FUeAgentCommandResult)> Complete)
+						{
+							AsyncTask(ENamedThreads::GameThread, [Dispatch, Request, Caller, IsCancelled = MoveTemp(IsCancelled), Complete = MoveTemp(Complete)]() mutable
+							{
+								const auto Prepared = Dispatch->Submit(Request, Caller, MakeShared<FNeverCancelled>());
+								if (!SceneAnalysis::HasPending(Request.GetRequestId())) { Complete(Prepared); return; }
+								SceneAnalysis::DeferPending(Request.GetRequestId(), MoveTemp(IsCancelled),
+									[Dispatch, Request, Caller, Complete = MoveTemp(Complete)]() mutable
+									{
+										Complete(Dispatch->Submit(Request, Caller, MakeShared<FNeverCancelled>()));
+									});
+							});
+						}));
+				}
 				if (CommandRegistry::UsesDeferredPreviewExecution(Request->GetCommandId()) && Request->GetParams()
 					&& Request->GetParams()->TryGetStringField(TEXT("target"), Target) && !Target.IsEmpty())
 				{

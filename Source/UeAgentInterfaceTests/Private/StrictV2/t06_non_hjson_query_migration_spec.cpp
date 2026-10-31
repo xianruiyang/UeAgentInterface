@@ -528,7 +528,7 @@ bool FUeAgentStrictV2T06ExactDispatchTest::RunTest(
 	const TArray<FSpatialResultContract> SpatialResultContracts = {
 		{TEXT("world.overlap"), {TEXT("count"), TEXT("targets")}, 1},
 		{TEXT("world.capsule_sweep"), {TEXT("hit_count"), TEXT("hits")}, 1},
-		{TEXT("world.capsule_path"), {TEXT("blocked_segments")}, 1},
+		{TEXT("world.capsule_path"), {TEXT("blocked_segments"), TEXT("first_blocking_hit")}, 1},
 		{TEXT("world.nearby_shapes"), {TEXT("count"), TEXT("shapes")}, 1},
 		{TEXT("world.mesh_closest_vertex"), {TEXT("vertex_index"), TEXT("position")}, 2},
 		{TEXT("world.mesh_vertex_position"), {TEXT("vertex_index"), TEXT("position")}, 2},

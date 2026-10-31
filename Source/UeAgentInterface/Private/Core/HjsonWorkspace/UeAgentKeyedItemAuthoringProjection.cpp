@@ -932,9 +932,9 @@ namespace UE::UAI::HjsonWorkspace
 	{
 		static const TArray<FKeyedItemProjectionContract> Contracts = [] {
 		TArray<FKeyedItemProjectionContract> Items{
-			{TEXT("actors"), {{TEXT("label"), TEXT("type"), TEXT("folder_path"), TEXT("transform")}}, false,
+			{TEXT("actors"), {{TEXT("label"), TEXT("type"), TEXT("folder_path"), TEXT("transform"), TEXT("level")}}, false,
 				{{TEXT("label"), TEXT("name"), TEXT("actor_class")}, TEXT("Actor")}},
-			{TEXT("components"), {{TEXT("name"), TEXT("class"), TEXT("parent")}}, false,
+			{TEXT("components"), {{TEXT("name"), TEXT("class"), TEXT("parent"), TEXT("attachment"), TEXT("pcg")}}, false,
 				{{TEXT("name"), TEXT("component_name"), TEXT("component_class")}, TEXT("Component")}},
 			{TEXT("rows"), {{TEXT("properties")}}, true, {}, {}, {}, {}, true, TEXT("row_schema"), true, {TEXT("table_curve_mode")}},
 			{TEXT("entries"), {{TEXT("source"), TEXT("metadata")}}, true, {}, {}, {}, {}, true, {}, false,

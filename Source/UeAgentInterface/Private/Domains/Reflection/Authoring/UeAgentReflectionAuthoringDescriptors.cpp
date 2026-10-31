@@ -235,6 +235,8 @@ const TArray<FProfile> Profiles = {
     PhysicsAssetProfile(),
     Profile(TEXT("hlod_layer"), TEXT("HLOD Layer"),
             TEXT("/Script/Engine.HLODLayer")),
+    Profile(TEXT("data_layer"), TEXT("Data Layer"),
+            TEXT("/Script/Engine.DataLayerAsset")),
     StaticMeshProfile(),
     SkeletalMeshProfile(),
     Profile(TEXT("behavior_tree"), TEXT("Behavior Tree"),

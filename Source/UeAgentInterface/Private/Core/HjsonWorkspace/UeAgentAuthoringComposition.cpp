@@ -1,4 +1,5 @@
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentWorkspaceRefresh.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
@@ -16,12 +17,14 @@
 #include "Utilities/UeAgentPropertyValueCodec.h"
 
 #include "Containers/StringConv.h"
+#include "CoreGlobals.h"
 #include "Core/ArtifactPublisher/UeAgentArtifactPublisher.h"
 #include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
 #include "Core/HjsonWorkspace/UeAgentKeyedItemAuthoringProjection.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -1111,10 +1114,26 @@ namespace UE::UAI::HjsonWorkspace
 			const FString& RootField,
 			const FKeyedItemNamingPolicy& NamingPolicy,
 			FUeAgentResourceTracker& Resources,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			const bool bItemsOwnedByParent = false)
 		{
 			FKeyedItemProjectionContract Contract;
 			TryGetKeyedItemProjectionContract(RootField, Contract);
+			// These passes only change root Values, never Drafts membership or owner
+			// identities. Retain source order while limiting each root/item to its
+			// actual children instead of rescanning every reflected property.
+			TMap<FString, TArray<const FUnitDraft*>> ItemsByOwner;
+			TMap<FString, TArray<const FUnitDraft*>> PropertiesByOwner;
+			for (const FUnitDraft& Draft : Drafts)
+			{
+				if (Draft.UnitKind == ESemanticUnitKind::ItemState
+					&& (Draft.SemanticTypeRef.EndsWith(ItemSemanticSuffix)
+						|| Draft.SemanticTypeRef.Contains(ItemSemanticSuffix + TEXT("#"))))
+					ItemsByOwner.FindOrAdd(Draft.OwnerRef).Add(&Draft);
+				if (Contract.bMergeChildPropertyValues && Draft.UnitKind == ESemanticUnitKind::PropertySet
+					&& !Draft.SemanticTypeRef.EndsWith(TEXT(".property")))
+					PropertiesByOwner.FindOrAdd(Draft.OwnerRef).Add(&Draft);
+			}
 			for (FUnitDraft& RootDraft : Drafts)
 			{
 				FUnitDraft* Root = &RootDraft;
@@ -1124,16 +1143,8 @@ namespace UE::UAI::HjsonWorkspace
 					&& !Root->SemanticTypeRef.EndsWith(Contract.AggregatedParentSemanticSuffix))
 					continue;
 				TArray<const FUnitDraft*> Items;
-				for (const FUnitDraft& Draft : Drafts)
-				{
-					if (Draft.OwnerRef == Root->UnitId
-						&& Draft.UnitKind == ESemanticUnitKind::ItemState
-						&& (Draft.SemanticTypeRef.EndsWith(ItemSemanticSuffix)
-							|| Draft.SemanticTypeRef.Contains(ItemSemanticSuffix + TEXT("#"))))
-					{
-						Items.Add(&Draft);
-					}
-				}
+				if (const auto* Owned = ItemsByOwner.Find(bItemsOwnedByParent ? Root->OwnerRef : Root->UnitId))
+					Items = *Owned;
 				Items.Sort([](const FUnitDraft& Left, const FUnitDraft& Right)
 				{
 					return Left.UnitId < Right.UnitId;
@@ -1145,24 +1156,20 @@ namespace UE::UAI::HjsonWorkspace
 				TMap<FString, FString> NamesByItem;
 				for (const FUnitDraft* Item : Items)
 				{
-					auto ReadItemOrChildString = [&Drafts, &Contract, Item](const TCHAR* Field)
+					auto ReadItemOrChildString = [&PropertiesByOwner, Item](const TCHAR* Field)
 					{
 						FString Value = ReadDraftString(*Item, Field);
 						if (!Value.IsEmpty())
 						{
 							return Value;
 						}
-						for (const FUnitDraft& Child : Drafts)
+						if (const auto* Children = PropertiesByOwner.Find(Item->UnitId))
+						for (const FUnitDraft* Child : *Children)
 						{
-							if (Contract.bMergeChildPropertyValues && Child.OwnerRef == Item->UnitId
-								&& Child.UnitKind == ESemanticUnitKind::PropertySet
-								&& !Child.SemanticTypeRef.EndsWith(TEXT(".property")))
+							Value = ReadDraftString(*Child, Field);
+							if (!Value.IsEmpty())
 							{
-								Value = ReadDraftString(Child, Field);
-								if (!Value.IsEmpty())
-								{
-									return Value;
-								}
+								return Value;
 							}
 						}
 						return FString();
@@ -1201,16 +1208,19 @@ namespace UE::UAI::HjsonWorkspace
 						}
 						Fields.Emplace(Field.Key, Field.Value);
 					}
-					for (const FUnitDraft& Child : Drafts)
+					if (bItemsOwnedByParent)
 					{
-						if (Contract.bMergeChildPropertyValues && Child.OwnerRef == Item->UnitId
-							&& Child.UnitKind == ESemanticUnitKind::PropertySet
-							&& !Child.SemanticTypeRef.EndsWith(TEXT(".property")))
+						// The component's machine selectors stay captured; its public
+						// type is context, while new rows use the native candidate name.
+						if (const auto* Class = Item->Values.Find(TEXT("component_class")))
+							Fields.Emplace(TEXT("class"), *Class);
+					}
+					if (const auto* Children = PropertiesByOwner.Find(Item->UnitId))
+					for (const FUnitDraft* Child : *Children)
+					{
+						for (const auto& Field : Child->Values)
 						{
-							for (const auto& Field : Child.Values)
-							{
-								Fields.Emplace(Field.Key, Field.Value);
-							}
+							Fields.Emplace(Field.Key, Field.Value);
 						}
 					}
 					FUeAgentCanonicalValuePtr Operation;
@@ -3606,13 +3616,30 @@ namespace UE::UAI::HjsonWorkspace
 		return TEXT("ue.generic.object");
 	}
 
+	using FCaptureCharges = TMap<EUeAgentResourceDimension, int64>;
+	template <typename UsageType>
+	static FCaptureCharges CaptureChargesBetween(const UsageType& Before, const UsageType& After)
+	{
+		FCaptureCharges Charges;
+		for (uint8 D = 0; D <= static_cast<uint8>(EUeAgentResourceDimension::EstimatedMemoryBytes); ++D) {
+			const auto Dimension = static_cast<EUeAgentResourceDimension>(D);
+			const int64 Delta = After.Consumed(Dimension) - Before.Consumed(Dimension);
+			if (Delta > 0) Charges.Add(Dimension, Delta);
+		}
+		return Charges;
+	}
+	static FString CaptureEntryKey(const FString& Semantic, const FString& Identity)
+	{ return FString::FromInt(Semantic.Len()) + TEXT(":") + Semantic + Identity; }
+
 	static bool TryComposeEntryViews(
 		const FCompositionInput& Request,
 		FUeAgentResourceTracker& Resources,
 		FAuthoringModelPtr& OutModel,
 		FWorkspaceError& OutError,
-		TMap<FString, FDocumentValueBinding>* DocumentBindings = nullptr)
+		TMap<FString, FDocumentValueBinding>* DocumentBindings = nullptr,
+		FCaptureCharges* OutPreparationCharges = nullptr)
 	{
+		const auto PreparationBefore = Resources.Snapshot();
 		OutModel.Reset();
 		OutError.Reset();
 		FTargetCompositionContract CompositionContract;
@@ -5274,6 +5301,25 @@ namespace UE::UAI::HjsonWorkspace
 			AddDraft(MoveTemp(Dependencies));
 		}
 
+		if (Request.TargetKind == TEXT("ue.level.asset"))
+		{
+			const int32 Count = Drafts.Num();
+			for (int32 Index = 0; Index < Count; ++Index)
+			{
+				const FUnitDraft& Actor = Drafts[Index];
+				if (Actor.UnitKind != ESemanticUnitKind::ItemState
+					|| !Actor.SemanticTypeRef.EndsWith(TEXT(".actor.target"))) continue;
+				FUnitDraft Components;
+				Components.UnitId = StableId(TEXT("structure"), Actor.UnitId + TEXT("|level_components"));
+				Components.UnitKind = ESemanticUnitKind::StructureState;
+				Components.OwnerRef = Actor.UnitId;
+				Components.SemanticTypeRef = TEXT("uai.authoring.surface.level_components");
+				Components.Role = TEXT("level_components");
+				Components.SourceProvenance = Actor.SourceProvenance;
+				AddDraft(MoveTemp(Components));
+			}
+		}
+
 		for (const FUnitDraft& Child : Drafts)
 		{
 			if (Child.OwnerRef.IsEmpty())
@@ -5463,6 +5509,10 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return false;
 		}
+		if (Request.TargetKind == TEXT("ue.level.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("level_components"),
+				TEXT(".component.target"), TEXT("components"), ComponentItems.NamingPolicy,
+				Resources, OutError, true)) return false;
 
 		if (Request.TargetKind == TEXT("ue.blueprint.asset")
 			&& !TryAddKeyedItemDesiredStateProjection(
@@ -5539,6 +5589,7 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(Draft.TargetIdentityKey),
 				MoveTemp(Draft.CategoryPath));
 		}
+		if (OutPreparationCharges) *OutPreparationCharges = CaptureChargesBetween(PreparationBefore, Resources.Snapshot());
 		return TryCompileAuthoringModel(
 			CompositionSchema,
 			1,
@@ -5551,18 +5602,52 @@ namespace UE::UAI::HjsonWorkspace
 			OutError);
 	}
 
-	bool TryComposeAuthoringModel(
+	struct FObservedCanonicalValue
+	{
+		FUeAgentCanonicalValuePtr Value;
+		TMap<EUeAgentResourceDimension, int64> Charges;
+	};
+	struct FCanonicalEntryObservation
+	{
+		TSharedPtr<const uint8> Observation;
+		FObservedCanonicalValue Value;
+		FUeAgentCanonicalValuePtr Descriptor;
+		FCaptureCharges DescriptorCharges;
+		FString RevisionValueKey;
+		bool bAuthoringVisible = true;
+		int32 CanonicalIndex = INDEX_NONE;
+	};
+	struct FCompletedCanonicalCapture
+	{
+		FString TargetKind;
+		FString ProfileId;
+		FUeAgentCanonicalSnapshotPtr Snapshot;
+		FAuthoringModelPtr Model;
+		TMap<FString, FCanonicalEntryObservation> Entries;
+		FCaptureCharges Charges;
+		FCaptureCharges CompositionPreparationCharges;
+		TMap<FString, FCaptureCharges> ProjectedValueCharges;
+	};
+	static thread_local TSharedPtr<const FCompletedCanonicalCapture> PreviousCanonicalCapture;
+
+	static bool TryComposeAuthoringModelFromCapture(
 		const FCompositionRequest& Request,
 		FUeAgentResourceTracker& Resources,
 		FAuthoringModelPtr& OutModel,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		const TMap<const FJsonValue*, FObservedCanonicalValue>* ObservedValues,
+		FCaptureCharges* OutPreparationCharges = nullptr,
+		TMap<FString, FCaptureCharges>* OutProjectedValueCharges = nullptr)
 	{
+		const double ComposeStarted = FPlatformTime::Seconds();
+		const auto ViewsBefore = Resources.Snapshot();
 		FCompositionInput Input;
 		Input.TargetKind = Request.TargetKind;
 		Input.ProfileId = Request.ProfileId;
 		Input.BaseRevision = Request.BaseRevision;
 		Input.SourceProvenance = Request.SourceProvenance;
 		Input.Entries.Reserve(Request.Entries.Num());
+		int32 ReusedCanonicalValues = 0;
 		for (const UeAgentAuthoringState::FStateEntry& Entry
 			: Request.Entries)
 		{
@@ -5583,9 +5668,20 @@ namespace UE::UAI::HjsonWorkspace
 			View.CategoryPath = Entry.CategoryPath;
 			View.Provenance = Entry.Provenance;
 			TSharedPtr<FJsonValue> ProjectedValue;
+			const auto ValueBefore = Resources.Snapshot();
 			View.bAuthoringVisible &= UeAgentPropertyValueCodec::ProjectAuthoringValue(
 				View.Type, Entry.Value, Entry.ValueDefinition, ProjectedValue, View.ValueDefinition);
-			if (ProjectedValue.IsValid()
+			const auto* Observed = ObservedValues && ProjectedValue.Get() == Entry.Value.Get()
+				? ObservedValues->Find(Entry.Value.Get()) : nullptr;
+			if (Observed)
+			{
+				FUeAgentResourceChargeError ResourceError;
+				if (!Resources.TryChargeMany(Observed->Charges, TEXT("composition:captured_value"), ResourceError))
+				{ OutError.SetFailure(ResourceError); return false; }
+				View.Value = Observed->Value;
+				++ReusedCanonicalValues;
+			}
+			else if (ProjectedValue.IsValid()
 				&& !TryCanonicalizeJson(
 					ProjectedValue,
 					Resources,
@@ -5594,13 +5690,32 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return false;
 			}
+			if (!Observed && OutProjectedValueCharges)
+				OutProjectedValueCharges->Add(CaptureEntryKey(Entry.SemanticId, Entry.TargetIdentity.CanonicalKey),
+					CaptureChargesBetween(ValueBefore, Resources.Snapshot()));
 			Input.Entries.Add(MoveTemp(View));
 		}
-		return TryComposeEntryViews(
+		const double ViewsFinished = FPlatformTime::Seconds();
+		const auto ViewCharges = CaptureChargesBetween(ViewsBefore, Resources.Snapshot());
+		const bool bComposed = TryComposeEntryViews(
 			Input,
 			Resources,
 			OutModel,
-			OutError);
+			OutError, nullptr, OutPreparationCharges);
+		if (bComposed && OutPreparationCharges)
+			for (const auto& Charge : ViewCharges) OutPreparationCharges->FindOrAdd(Charge.Key) += Charge.Value;
+		const double ComposeFinished = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=model_compose kind=%s entries=%d reused_canonical_values=%d entry_views_s=%.6f compose_views_s=%.6f total_s=%.6f success=%s"),
+			*Request.TargetKind, Request.Entries.Num(), ReusedCanonicalValues, ViewsFinished - ComposeStarted,
+			ComposeFinished - ViewsFinished, ComposeFinished - ComposeStarted,
+			bComposed ? TEXT("true") : TEXT("false"));
+		return bComposed;
+	}
+
+	bool TryComposeAuthoringModel(const FCompositionRequest& Request, FUeAgentResourceTracker& Resources,
+		FAuthoringModelPtr& OutModel, FWorkspaceError& OutError)
+	{
+		return TryComposeAuthoringModelFromCapture(Request, Resources, OutModel, OutError, nullptr);
 	}
 
 	bool TryComposeCanonicalAuthoringModel(
@@ -5861,7 +5976,11 @@ namespace UE::UAI::HjsonWorkspace
 			if (Edited->GetValues().Num() != Before->GetValues().Num())
 			{ return RejectEdit(TEXT("composition_document_structure_edit_unsupported"), FString::Printf(TEXT("The document unit must retain its %d value fields; %d were supplied."), Before->GetValues().Num(), Edited->GetValues().Num())); }
 			TSet<FString> ChangedFields;
-			if (!TryCollectChangedUnitValueFields(Before, *Edited, Resources, ChangedFields, OutError, &EditedModel.Get())) return false;
+			// Keyed documents depend on definitions for nested native properties.
+			// Those types do not describe the readable collection itself. Detect
+			// authored changes here; its keyed contract resolves them below.
+			if (!TryCollectChangedUnitValueFields(Before, *Edited, Resources, ChangedFields, OutError,
+				KeyedContract ? nullptr : &EditedModel.Get())) return false;
 			for (const FString& Field : ChangedFields)
 			{
 				if (!Edited->GetValues().Contains(Field))
@@ -5993,15 +6112,116 @@ namespace UE::UAI::HjsonWorkspace
 		return true;
 	}
 
+	static bool SameCaptureDescriptor(const FUeAgentCanonicalValuePtr& A, const FUeAgentCanonicalValuePtr& B)
+	{
+		if (A == B) return true;
+		if (!A || !B) return false;
+		TSharedPtr<FJsonValue> Left, Right; Contract::FDiagnostic Error;
+		return StateSemantic::CanonicalJson::TryToJsonValue(*A, Left, Error)
+			&& StateSemantic::CanonicalJson::TryToJsonValue(*B, Right, Error)
+			&& StateSemantic::CanonicalJson::AreJsonValuesEquivalent(Left, Right);
+	}
+
+	// The common capture owns proof and reuse. This first dependency closure is
+	// deliberately the existing Level *.property route: its numeric values are
+	// excluded from keyed Actor/Component child-property merging. Other shapes
+	// retain the full composer, including strings/references and metadata edits.
+	static TOptional<bool> TryComposeValueOnlyCapture(const FCompositionRequest& Request,
+		const TArray<FUeAgentStateEntry>& CurrentEntries, const FCompletedCanonicalCapture& Previous,
+		FCompletedCanonicalCapture& Next, FUeAgentResourceTracker& Resources,
+		FAuthoringModelPtr& OutModel, FWorkspaceError& OutError)
+	{
+		if (Request.TargetKind != TEXT("ue.level.asset") || Previous.Entries.Num() != Request.Entries.Num()) return {};
+		const double Started = FPlatformTime::Seconds();
+		TMap<FString, TMap<FString, FUeAgentCanonicalValueRef>> ChangedValues;
+		FCaptureCharges PreparationCharges = Previous.CompositionPreparationCharges;
+		TMap<FString, FCaptureCharges> ProjectedCharges = Previous.ProjectedValueCharges;
+		for (int32 I = 0; I < Request.Entries.Num(); ++I) {
+			const auto& Source = Request.Entries[I];
+			const FString Key = CaptureEntryKey(Source.SemanticId, Source.TargetIdentity.CanonicalKey);
+			const auto* Old = Previous.Entries.Find(Key);
+			if (!Old || Old->CanonicalIndex == INDEX_NONE) return {};
+			if (Source.Observation && Old->Observation == Source.Observation) continue;
+			if (!Source.bAvailable || !Source.bAuthoringVisible || !Source.SemanticId.EndsWith(TEXT(".property"))
+				|| Old->bAuthoringVisible != Source.bAuthoringVisible) return {};
+			const auto& Before = Previous.Snapshot->GetEntries()[Old->CanonicalIndex];
+			const auto& Current = CurrentEntries[I];
+			if (!(Before.GetDetails() == Current.GetDetails())
+				|| Before.GetType().GetTypeId() != Current.GetType().GetTypeId()
+				|| Before.GetType().GetContainerKind() != Current.GetType().GetContainerKind()
+				|| Before.GetDefault().GetProvenance() != Current.GetDefault().GetProvenance()
+				|| !SameCaptureDescriptor(Before.GetAuthoringDescriptor(), Current.GetAuthoringDescriptor())
+				|| !HaveOnlyNumericOrBooleanValueChanges(Before.GetValue().Get(), Current.GetValue().Get())) return {};
+			const auto& BeforeSelectors = Before.GetIdentity().GetSelectors();
+			const auto& CurrentSelectors = Current.GetIdentity().GetSelectors();
+			if (BeforeSelectors.Num() != CurrentSelectors.Num()) return {};
+			for (const auto& Pair : CurrentSelectors) {
+				const FString* Value = BeforeSelectors.Find(Pair.Key);
+				if (!Value || !Value->Equals(Pair.Value, ESearchCase::CaseSensitive)) return {};
+			}
+			const FString UnitId = StableId(TEXT("property"), Request.TargetKind + TEXT("|")
+				+ Source.SemanticId + TEXT("|") + Source.TargetIdentity.CanonicalKey);
+			const auto* Unit = Previous.Model->FindUnit(UnitId);
+			if (!Unit || Unit->GetUnitKind() != ESemanticUnitKind::PropertySet
+				|| Unit->GetSemanticTypeRef() != Source.SemanticId) return {};
+			TSharedPtr<FJsonValue> Projected, Definition;
+			if (!UeAgentPropertyValueCodec::ProjectAuthoringValue(Source.Type.ToJsonObject(),
+				Source.Value, Source.ValueDefinition, Projected, Definition)) return {};
+			auto ValueResources = MakeSemanticWorkspaceResourceTracker();
+			const auto ValueBefore = ValueResources.Snapshot();
+			FUeAgentCanonicalValuePtr Value;
+			if (Projected == Source.Value) {
+				const auto& Proof = Next.Entries.FindChecked(Key).Value;
+				FUeAgentResourceChargeError ResourceError;
+				if (!ValueResources.TryChargeMany(Proof.Charges, TEXT("composition:captured_value"), ResourceError))
+				{ OutError.SetFailure(ResourceError); return false; }
+				Value = Proof.Value;
+			} else if (!TryCanonicalizeJson(Projected, ValueResources, Value, OutError)) return false;
+			const auto NewCharges = CaptureChargesBetween(ValueBefore, ValueResources.Snapshot());
+			const auto* OldProjection = Previous.ProjectedValueCharges.Find(Key);
+			const auto& OldCharges = OldProjection ? *OldProjection : Old->Value.Charges;
+			for (const auto& Charge : OldCharges) {
+				int64& Total = PreparationCharges.FindOrAdd(Charge.Key);
+				if (Total < Charge.Value) return {};
+				Total -= Charge.Value;
+			}
+			for (const auto& Charge : NewCharges) PreparationCharges.FindOrAdd(Charge.Key) += Charge.Value;
+			if (Projected == Source.Value) ProjectedCharges.Remove(Key); else ProjectedCharges.Add(Key, NewCharges);
+			TMap<FString, FUeAgentCanonicalValueRef> Values;
+			if (!TryBuildValues(Value, {}, ValueResources, Values, OutError)) return false;
+			ChangedValues.Add(UnitId, MoveTemp(Values));
+		}
+		FUeAgentResourceChargeError ResourceError;
+		if (!Resources.TryChargeMany(PreparationCharges, TEXT("composition:unchanged_relationships"), ResourceError))
+		{ OutError.SetFailure(ResourceError); return false; }
+		TArray<FSemanticUnit> Units = Previous.Model->GetUnits();
+		for (auto& Unit : Units)
+			if (auto* Values = ChangedValues.Find(Unit.GetUnitId())) Unit = Unit.WithValues(MoveTemp(*Values));
+		const bool bCompiled = TryCompileAuthoringModel(Previous.Model->GetContractId(), Previous.Model->GetContractVersion(),
+			Request.ProfileId, Request.BaseRevision, MoveTemp(Units), Previous.Model->GetTargetUnitIds(), Resources, OutModel, OutError);
+		if (bCompiled) {
+			Next.CompositionPreparationCharges = MoveTemp(PreparationCharges);
+			Next.ProjectedValueCharges = MoveTemp(ProjectedCharges);
+		}
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=model_value_delta kind=%s total_units=%d changed_properties=%d total_s=%.6f success=%s"),
+			*Request.TargetKind, Previous.Model->GetUnits().Num(), ChangedValues.Num(),
+			FPlatformTime::Seconds() - Started, bCompiled ? TEXT("true") : TEXT("false"));
+		return bCompiled;
+	}
+
 	bool TryBuildCanonicalAuthoringCapture(const FString& TargetKind, const FString& ProfileId,
 		const UeAgentAuthoringState::FStateSnapshot& Snapshot, FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalSnapshotPtr& OutSnapshot, FAuthoringModelPtr& OutModel,
 		FWorkspaceError& OutError)
 	{
+		const double CaptureStarted = FPlatformTime::Seconds();
+		const auto CaptureUsageBefore = Resources.Snapshot();
 		OutSnapshot.Reset();
 		OutModel.Reset();
 		OutError.Reset();
-		TArray<UeAgentAuthoringState::FStateEntry> SourceEntries = Snapshot.CopyEntries();
+		// Preview appends to this separate array; projection reads existing JSON
+		// and constructs changed subtrees. Keep the snapshot's payloads read-only.
+		TArray<UeAgentAuthoringState::FStateEntry> SourceEntries = Snapshot.GetEntries();
 		UE::UAI::Contract::FDiagnostic PreviewError;
 		if (!AssetPreview::AppendState(TargetKind, SourceEntries, PreviewError))
 		{
@@ -6014,26 +6234,83 @@ namespace UE::UAI::HjsonWorkspace
 			return false;
 		}
 
+		const double SourcePrepared = FPlatformTime::Seconds();
+		const FString EffectiveProfile = ProfileId.IsEmpty() ? TEXT("llm_authoring") : ProfileId;
+		const auto Previous = PreviousCanonicalCapture;
+		const bool bSameCapture = Previous && Previous->TargetKind == TargetKind
+			&& Previous->ProfileId == EffectiveProfile && Previous->Entries.Num() == SourceEntries.Num();
+		auto Next = MakeShared<FCompletedCanonicalCapture>();
+		Next->TargetKind = TargetKind; Next->ProfileId = EffectiveProfile;
+		bool bAllUnchanged = bSameCapture;
+		int32 ReusedEntries = 0;
 		FString RevisionMaterial = TargetKind;
 		for (const UeAgentAuthoringState::FStateEntry& Entry : SourceEntries)
 		{
+			const FString Key = CaptureEntryKey(Entry.SemanticId, Entry.TargetIdentity.CanonicalKey);
+			const auto* Old = bSameCapture ? Previous->Entries.Find(Key) : nullptr;
+			const bool bSameObservation = Old && Entry.Observation && Old->Observation == Entry.Observation;
+			bAllUnchanged &= bSameObservation;
+			FCanonicalEntryObservation Proof;
+			Proof.Observation = Entry.Observation;
+			Proof.bAuthoringVisible = Entry.bAuthoringVisible;
+			Proof.RevisionValueKey = bSameObservation ? Old->RevisionValueKey
+				: UeAgentAuthoringState::MakeStableCanonicalValueKey(Entry.Value);
 			RevisionMaterial +=
 				TEXT("|") + Entry.SemanticId
 				+ TEXT("|") + Entry.TargetIdentity.CanonicalKey
 				+ TEXT("|")
-				+ UeAgentAuthoringState::MakeStableCanonicalValueKey(
-					Entry.Value);
+				+ Proof.RevisionValueKey;
+			Next->Entries.Add(Key, MoveTemp(Proof));
 		}
 		const FString BaseRevision = TEXT("capture:") + Sha256Text(RevisionMaterial).Right(24);
 		const FUeAgentStateRevision Revision(TEXT("authoring.capture"), BaseRevision, 0);
 		const FString SnapshotId = TEXT("authoring.capture:") +
 								   Sha256Text(TargetKind + TEXT("|") + BaseRevision).Right(24);
 		const FString EvidenceId = TEXT("independent-readback:") + SnapshotId;
+		const double RevisionFinished = FPlatformTime::Seconds();
+		if (bAllUnchanged && Previous->Model->GetBaseRevision() == BaseRevision)
+		{
+			FUeAgentResourceChargeError ResourceError;
+			if (!Resources.TryChargeMany(Previous->Charges, TEXT("composition:actual_unchanged_capture"), ResourceError))
+			{ OutError.SetFailure(ResourceError); return false; }
+			OutSnapshot = Previous->Snapshot; OutModel = Previous->Model;
+			UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=canonical_capture kind=%s entries=%d reused_entries=%d source_prepare_s=%.6f revision_s=%.6f canonical_s=0 compose_s=0 total_s=%.6f success=true"),
+				*TargetKind, SourceEntries.Num(), SourceEntries.Num(), SourcePrepared - CaptureStarted,
+				RevisionFinished - SourcePrepared, FPlatformTime::Seconds() - CaptureStarted);
+			return true;
+		}
 
 		TArray<FUeAgentStateEntry> CanonicalEntries;
 		CanonicalEntries.Reserve(SourceEntries.Num());
+		TMap<const FJsonValue*, FObservedCanonicalValue> ObservedValues;
 		for (const UeAgentAuthoringState::FStateEntry& Entry : SourceEntries)
 		{
+			const FString Key = CaptureEntryKey(Entry.SemanticId, Entry.TargetIdentity.CanonicalKey);
+			auto& Proof = Next->Entries.FindChecked(Key);
+			const auto* Old = bSameCapture ? Previous->Entries.Find(Key) : nullptr;
+			const bool bSameObservation = Old && Entry.Observation && Old->Observation == Entry.Observation;
+			if (bSameObservation && Old->CanonicalIndex != INDEX_NONE)
+			{
+				// Reuse the already validated type/details/descriptor and captured
+				// value. Capture generation is part of canonical identity, so both
+				// identity and its post-create default source must still be rebound.
+				const auto& Before = Previous->Snapshot->GetEntries()[Old->CanonicalIndex];
+				FUeAgentResourceChargeError ResourceError;
+				if (!Resources.TryChargeMany(Old->Value.Charges, TEXT("composition:actual_unchanged_value"), ResourceError)
+					|| !Resources.TryChargeMany(Old->DescriptorCharges, TEXT("composition:actual_unchanged_descriptor"), ResourceError))
+				{ OutError.SetFailure(ResourceError); return false; }
+				FUeAgentCanonicalIdentity Identity = Before.GetIdentity().WithGeneration(BaseRevision);
+				FUeAgentDefaultValue Default(EUeAgentDefaultSourceKind::PostCreateReadback,
+					Identity.GetCanonicalKey(), Before.GetDefault().GetProvenance(), Before.GetValue());
+				FUeAgentStateEntry Captured(MoveTemp(Identity), Before.GetType(), Before.GetValue(),
+					MoveTemp(Default), Before.GetDetails(), Revision, EUeAgentAuthoredPresence::Present,
+					EUeAgentOverrideState::None, Before.GetAuthoringDescriptor());
+				if (!Captured.IsValid()) { OutError.SetFailure(Captured.GetValidationDiagnostic(), Entry.TargetIdentity.CanonicalKey); return false; }
+				Proof.Value = Old->Value; Proof.Descriptor = Old->Descriptor; Proof.DescriptorCharges = Old->DescriptorCharges;
+				if (SourceEntries.Num() <= 200000) ObservedValues.Add(Entry.Value.Get(), Proof.Value);
+				CanonicalEntries.Add(MoveTemp(Captured)); ++ReusedEntries;
+				continue;
+			}
 			FUeAgentCanonicalValuePtr Value;
 			const auto ForwardCaptureFailure = [&](Contract::FDiagnostic Failure)
 			{
@@ -6043,7 +6320,14 @@ namespace UE::UAI::HjsonWorkspace
 				OutError.SetFailure(MoveTemp(Failure), Entry.TargetIdentity.CanonicalKey);
 				return false;
 			};
-			if (!Entry.Value.IsValid() ||
+			const auto ValueUsageBefore = Resources.Snapshot();
+			if (bSameObservation) {
+				FUeAgentResourceChargeError ResourceError;
+				if (!Resources.TryChargeMany(Old->Value.Charges, TEXT("composition:actual_unchanged_value"), ResourceError))
+				{ OutError.SetFailure(ResourceError); return false; }
+				Value = Old->Value.Value; ++ReusedEntries;
+			}
+			else if (!Entry.Value.IsValid() ||
 				!TryCanonicalizeJson(Entry.Value, Resources, Value, OutError) || !Value.IsValid())
 			{
 				if (OutError.GetCode().IsEmpty())
@@ -6052,6 +6336,9 @@ namespace UE::UAI::HjsonWorkspace
 				}
 				return false;
 			}
+			Proof.Value.Value = Value;
+			Proof.Value.Charges = CaptureChargesBetween(ValueUsageBefore, Resources.Snapshot());
+			if (SourceEntries.Num() <= 200000) ObservedValues.Add(Entry.Value.Get(), Proof.Value);
 			const FString TypeId =
 				!Entry.Type.EnumPath.IsEmpty()			 ? Entry.Type.EnumPath
 				: !Entry.Type.StructPath.IsEmpty()		 ? Entry.Type.StructPath
@@ -6114,7 +6401,15 @@ namespace UE::UAI::HjsonWorkspace
 			if (Entry.CandidatesHeader) Metadata->SetField(TEXT("candidates_header"), Entry.CandidatesHeader);
 			if (Entry.Candidates) Metadata->SetField(TEXT("candidates"), Entry.Candidates);
 			FUeAgentCanonicalValuePtr AuthoringDescriptor;
-			if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Metadata), Resources, AuthoringDescriptor, OutError)) return false;
+			const auto DescriptorBefore = Resources.Snapshot();
+			if (bSameObservation) {
+				FUeAgentResourceChargeError ResourceError;
+				if (!Resources.TryChargeMany(Old->DescriptorCharges, TEXT("composition:actual_unchanged_descriptor"), ResourceError))
+				{ OutError.SetFailure(ResourceError); return false; }
+				AuthoringDescriptor = Old->Descriptor;
+			} else if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Metadata), Resources, AuthoringDescriptor, OutError)) return false;
+			Proof.Descriptor = AuthoringDescriptor;
+			Proof.DescriptorCharges = CaptureChargesBetween(DescriptorBefore, Resources.Snapshot());
 			FUeAgentStateEntry CanonicalEntry(MoveTemp(Identity), MoveTemp(Type),
 				Value.ToSharedRef(), MoveTemp(Default), MoveTemp(Details), Revision,
 				EUeAgentAuthoredPresence::Present, EUeAgentOverrideState::None, MoveTemp(AuthoringDescriptor));
@@ -6125,6 +6420,7 @@ namespace UE::UAI::HjsonWorkspace
 			CanonicalEntries.Add(MoveTemp(CanonicalEntry));
 		}
 
+		const double EntriesFinished = FPlatformTime::Seconds();
 		FUeAgentStateSemanticError SemanticError;
 		if (!FUeAgentCanonicalSnapshot::TryCreate(
 			SnapshotId,
@@ -6148,13 +6444,14 @@ namespace UE::UAI::HjsonWorkspace
 			return false;
 		}
 
+		const double CanonicalFinished = FPlatformTime::Seconds();
 		FCompositionRequest Request;
 		Request.TargetKind = TargetKind;
 		Request.ProfileId = ProfileId.IsEmpty()
 			? TEXT("llm_authoring") : ProfileId;
 		Request.BaseRevision = BaseRevision;
 		Request.SourceProvenance = TEXT("authoring_state.capture");
-		Request.Entries = SourceEntries;
+		Request.Entries = MoveTemp(SourceEntries);
 		UE::UAI::Contract::FDiagnostic ContractError;
 		if (!RegisterGraphTreeTargetCompositionContracts(ContractError)
 			|| !RegisterOtherTargetCompositionContracts(ContractError))
@@ -6162,11 +6459,37 @@ namespace UE::UAI::HjsonWorkspace
 			OutError.SetFailure(ContractError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("target_composition_contract_registration_failed"), TEXT("Target composition contract registration failed without returning a diagnostic.")) : ContractError, FString());
 			return false;
 		}
-		return TryComposeAuthoringModel(
+		const double CompositionPrepared = FPlatformTime::Seconds();
+		const TOptional<bool> IncrementalComposition = bSameCapture
+			? TryComposeValueOnlyCapture(Request, CanonicalEntries, *Previous, *Next, Resources, OutModel, OutError)
+			: TOptional<bool>();
+		const bool bComposed = IncrementalComposition.IsSet() ? IncrementalComposition.GetValue() : TryComposeAuthoringModelFromCapture(
 			Request,
 			Resources,
 			OutModel,
-			OutError);
+			OutError, &ObservedValues, &Next->CompositionPreparationCharges, &Next->ProjectedValueCharges);
+		const double CompositionFinished = FPlatformTime::Seconds();
+		if (bComposed && Request.Entries.Num() <= 200000)
+		{
+			Next->Snapshot = OutSnapshot; Next->Model = OutModel;
+			Next->Charges = CaptureChargesBetween(CaptureUsageBefore, Resources.Snapshot());
+			const auto& Captured = OutSnapshot->GetEntries();
+			for (int32 Index = 0; Index < Captured.Num(); ++Index) {
+				const auto& Identity = Captured[Index].GetIdentity();
+				if (auto* Proof = Next->Entries.Find(CaptureEntryKey(Identity.GetSemanticId(),
+					Identity.GetSelector(CanonicalAuthoringTargetIdentitySelector)))) Proof->CanonicalIndex = Index;
+			}
+			PreviousCanonicalCapture = MoveTemp(Next);
+		}
+		const double CaptureFinished = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=canonical_capture kind=%s entries=%d reused_entries=%d source_prepare_s=%.6f revision_s=%.6f canonical_s=%.6f entry_s=%.6f snapshot_s=%.6f compose_s=%.6f compose_prepare_s=%.6f compose_model_s=%.6f compose_finalize_s=%.6f total_s=%.6f success=%s"),
+			*TargetKind, Request.Entries.Num(), ReusedEntries, SourcePrepared - CaptureStarted,
+			RevisionFinished - SourcePrepared, CanonicalFinished - RevisionFinished,
+			EntriesFinished - RevisionFinished, CanonicalFinished - EntriesFinished,
+			CaptureFinished - CanonicalFinished, CompositionPrepared - CanonicalFinished,
+			CompositionFinished - CompositionPrepared, CaptureFinished - CompositionFinished, CaptureFinished - CaptureStarted,
+			bComposed ? TEXT("true") : TEXT("false"));
+		return bComposed;
 	}
 
 	bool TryBuildCompositionExportPlan(
@@ -6197,6 +6520,62 @@ namespace UE::UAI::HjsonWorkspace
 
 	namespace
 	{
+		// Retain only the last successful composition. Every reuse is justified by
+		// the newly captured complete model and its freshly planned projection;
+		// this is never a substitute for native capture or revision validation.
+		struct FCompositionExportBaseline
+		{
+			FString ContractId;
+			int32 ContractVersion = 0;
+			FString ProfileId;
+			TArray<FString> TargetUnitIds;
+			int32 LayoutVersion = 0;
+			TMap<FString, FString> LogicalPlacements;
+			TMap<FString, FString> PhysicalPlacements;
+			TMap<FString, TArray<FString>> PhysicalFiles;
+			TMap<FString, FString> PublicRefMapping;
+			TMap<FString, FString> UnitContentKeys;
+			TMap<FString, FString> ItemValueInvariantKeys;
+			TArray<FExportFilePlan> Files;
+			FString TargetKind;
+			TMap<FString, TSharedRef<FJsonObject>> PackedDocuments;
+			TMap<FString, FUeAgentCanonicalValueRef> PackedExamples;
+			TMap<FString, FUeAgentCanonicalValueRef> Inventory;
+			TMap<FString, FUeAgentCanonicalValueRef> ManifestInventory;
+			TMap<FString, FString> UnitPointers;
+			TMap<FString, FString> UnitEditHashes;
+			TMap<FString, TArray<FString>> UnitContentFiles;
+		};
+		thread_local TSharedPtr<const FCompositionExportBaseline> PreviousCompositionExport;
+		bool ExportDataIdentical(const FString& A, const FString& B)
+		{
+			return A.Equals(B, ESearchCase::CaseSensitive);
+		}
+		template <typename ItemType>
+		bool ExportDataIdentical(const TArray<ItemType>& A, const TArray<ItemType>& B)
+		{
+			if (A.Num() != B.Num()) return false;
+			for (int32 I = 0; I < A.Num(); ++I)
+				if (!ExportDataIdentical(A[I], B[I])) return false;
+			return true;
+		}
+
+		template <typename ValueType>
+		bool ExportMapsIdentical(const TMap<FString, ValueType>& A, const TMap<FString, ValueType>& B)
+		{
+			if (A.Num() != B.Num()) return false;
+			TArray<FString> LeftKeys, RightKeys;
+			A.GetKeys(LeftKeys); B.GetKeys(RightKeys);
+			LeftKeys.Sort(); RightKeys.Sort();
+			if (!ExportDataIdentical(LeftKeys, RightKeys)) return false;
+			for (const auto& Pair : A)
+			{
+				const auto* Other = B.Find(Pair.Key);
+				if (!Other || !ExportDataIdentical(Pair.Value, *Other)) return false;
+			}
+			return true;
+		}
+
 		bool IsGraphStructureUnit(const FSemanticUnit& Unit)
 		{
 			return Unit.GetUnitKind() == ESemanticUnitKind::StructureState
@@ -6237,6 +6616,9 @@ namespace UE::UAI::HjsonWorkspace
 		FExportWorkspacePlanPtr& OutPlan,
 		FWorkspaceError& OutError, const FString& TargetKind)
 	{
+		const double PlanStarted = FPlatformTime::Seconds();
+		double CompactValidationSeconds = 0.0;
+		int32 CompactValidationCount = 0;
 		OutPlan.Reset();
 		OutError.Reset();
 		if (!SnapshotBinding.IsValid())
@@ -6258,10 +6640,76 @@ namespace UE::UAI::HjsonWorkspace
 			return false;
 		}
 
+		const double LayoutFinished = FPlatformTime::Seconds();
+		const TSharedPtr<const FCompositionExportBaseline> Baseline = PreviousCompositionExport;
+		bool bReusableProjection = Baseline.IsValid() && ExportDataIdentical(Baseline->TargetKind, TargetKind)
+			&& ExportDataIdentical(Baseline->ContractId, Model->GetContractId())
+			&& Baseline->ContractVersion == Model->GetContractVersion()
+			&& ExportDataIdentical(Baseline->ProfileId, Model->GetProfileId())
+			&& ExportDataIdentical(Baseline->TargetUnitIds, Model->GetTargetUnitIds())
+			&& Baseline->UnitContentKeys.Num() == Model->GetUnits().Num()
+			&& Baseline->LayoutVersion == Layout->GetLayoutVersion()
+			&& ExportMapsIdentical(Baseline->LogicalPlacements, Layout->GetLogicalPlacements())
+			&& ExportMapsIdentical(Baseline->PhysicalPlacements, Layout->GetPhysicalPlacements())
+			&& ExportMapsIdentical(Baseline->PhysicalFiles, Layout->GetPhysicalFiles())
+			&& ExportMapsIdentical(Baseline->PublicRefMapping, Layout->GetMachineManifest().PublicRefMapping);
+		TMap<FString, FString> UnitContentKeys;
+		TMap<FString, FString> ItemValueInvariantKeys;
+		for (const FSemanticUnit& Unit : Model->GetUnits())
+		{
+			FString Key;
+			if (!TryHashSemanticUnitContent(Unit, Key, OutError)) return false;
+			// Semantic hashing deliberately excludes presentation provenance and
+			// category. Include both in the export proof, with unambiguous framing.
+			Key += FString::Printf(TEXT("|%d:"), Unit.GetSourceProvenance().Len()) + Unit.GetSourceProvenance();
+			for (const FString& Category : Unit.GetCategoryPath())
+				Key += FString::Printf(TEXT("|%d:"), Category.Len()) + Category;
+			UnitContentKeys.Add(Unit.GetUnitId(), Sha256Text(Key));
+			if (Unit.GetUnitKind() == ESemanticUnitKind::ItemState && Unit.GetValues().Contains(TEXT("value")))
+			{
+				// A standalone value/override can change without changing the item's
+				// identity, definition, owner, or any other projected state field.
+				auto Invariants = Unit.GetValues();
+				Invariants.Remove(TEXT("value"));
+				Invariants.Remove(TEXT("authored_override"));
+				FString InvariantKey;
+				if (!TryHashSemanticUnitContent(Unit.WithValues(MoveTemp(Invariants)), InvariantKey, OutError)) return false;
+				InvariantKey += FString::Printf(TEXT("|%d:"), Unit.GetSourceProvenance().Len()) + Unit.GetSourceProvenance();
+				for (const FString& Category : Unit.GetCategoryPath())
+					InvariantKey += FString::Printf(TEXT("|%d:"), Category.Len()) + Category;
+				ItemValueInvariantKeys.Add(Unit.GetUnitId(), Sha256Text(InvariantKey));
+			}
+		}
+		TSet<FString> IdenticalUnits;
+		int32 ChangedPropertyUnits = 0;
+		int32 ChangedValueItems = 0;
+		int32 ChangedOtherUnits = 0;
+		if (bReusableProjection)
+		{
+			for (const FSemanticUnit& Unit : Model->GetUnits())
+			{
+				const FString* Previous = Baseline->UnitContentKeys.Find(Unit.GetUnitId());
+				if (Previous && ExportDataIdentical(UnitContentKeys.FindChecked(Unit.GetUnitId()), *Previous)) IdenticalUnits.Add(Unit.GetUnitId());
+				else if (Unit.GetUnitKind() == ESemanticUnitKind::PropertySet) ++ChangedPropertyUnits;
+				else if (const FString* Invariant = ItemValueInvariantKeys.Find(Unit.GetUnitId()); Invariant
+					&& Baseline->ItemValueInvariantKeys.Contains(Unit.GetUnitId())
+					&& ExportDataIdentical(*Invariant, Baseline->ItemValueInvariantKeys.FindChecked(Unit.GetUnitId()))) ++ChangedValueItems;
+				else ++ChangedOtherUnits;
+			}
+			// Only value changes with unchanged item invariants and the exact
+			// complete projection qualify. Structure and unknown shapes regenerate.
+			bReusableProjection = ChangedOtherUnits == 0;
+		}
+		TMap<FString, const FExportFilePlan*> BaselineFiles;
+		if (bReusableProjection)
+			for (const FExportFilePlan& File : Baseline->Files) BaselineFiles.Add(File.GetRelativePath(), &File);
+		const double ComparisonFinished = FPlatformTime::Seconds();
+		int32 ReusedDocuments = 0;
+		int32 ReusedInventoryRows = 0;
 		TArray<FExportFilePlan> Files;
 		FAuthoringExampleCatalog Examples;
 		RegisterDomainAuthoringExampleRules(Examples);
-		TArray<TSharedRef<FJsonObject>> InventoryRows;
+		TMap<FString, FUeAgentCanonicalValueRef> InventoryByUnit;
 		TMap<FString, FString> UnitPointers;
 		TMap<FString, FString> UnitEditHashes;
 		TMap<FString, TArray<FString>> UnitContentFiles;
@@ -6293,7 +6741,8 @@ namespace UE::UAI::HjsonWorkspace
 					{
 						 return false;
 					}
-					Files.Emplace(Path, Bytes, Sha256(Bytes));
+					const FString ContentHash = Sha256(Bytes);
+					Files.Emplace(Path, MoveTemp(Bytes), ContentHash);
 					ContentPaths.Add(Path.ToLower());
 					UnitContentFiles.FindOrAdd(UnitId).Add(Path);
 					FUeAgentCanonicalValuePtr ReferencePath;
@@ -6304,6 +6753,8 @@ namespace UE::UAI::HjsonWorkspace
 				}, Resources, OutError);
 		};
 		TMap<FString, TSharedRef<FJsonObject>> PackedDocuments;
+		TMap<FString, FUeAgentCanonicalValueRef> PackedExamples;
+		TSet<FString> ReusedPackedDocuments;
 		TMap<FString, FString> PropertyPathsByItemRef;
 		for (const FSemanticUnit& Property : Model->GetUnits())
 		{
@@ -6342,6 +6793,30 @@ namespace UE::UAI::HjsonWorkspace
 				PhysicalFile.Value.Num() == 1
 				&& Model->FindUnit(PhysicalFile.Value[0]) != nullptr
 				&& IsGraphStructureUnit(*Model->FindUnit(PhysicalFile.Value[0]));
+			if (bReusableProjection && (bPackedPropertyContainer || bPackedDefinitionContainer)
+				&& Baseline->PackedDocuments.Contains(PhysicalFile.Key) && BaselineFiles.Contains(PhysicalFile.Key))
+			{
+				bool bAllMembersIdentical = true;
+				for (const FString& UnitId : PhysicalFile.Value)
+				{
+					// External content allocation also contributes examples and can
+					// depend on preceding path collisions. Keep that path authoritative.
+					if (!IdenticalUnits.Contains(UnitId) || Baseline->UnitContentFiles.Contains(UnitId))
+					{ bAllMembersIdentical = false; break; }
+				}
+				if (bAllMembersIdentical)
+				{
+					PackedDocuments.Add(PhysicalFile.Key, Baseline->PackedDocuments.FindChecked(PhysicalFile.Key));
+					ReusedPackedDocuments.Add(PhysicalFile.Key);
+					for (const FString& UnitId : PhysicalFile.Value)
+					{
+						UnitPointers.Add(UnitId, Baseline->UnitPointers.FindChecked(UnitId));
+						UnitEditHashes.Add(UnitId, Baseline->UnitEditHashes.FindChecked(UnitId));
+					}
+					++ReusedDocuments;
+					continue;
+				}
+			}
 			const bool bKeyedItemDocument =
 				PhysicalFile.Value.Num() == 1
 				&& Model->FindUnit(PhysicalFile.Value[0]) != nullptr
@@ -6573,15 +7048,23 @@ namespace UE::UAI::HjsonWorkspace
 					{
 						return false;
 					}
-					TArray<uint8> CompactRowBytes;
-					if (!TrySerializeSemanticHjsonObject(
-							CompactRow.ToSharedRef(),
-							CompactRowBytes, OutError, PhysicalFile.Key))
 					{
-						
-						return false;
+						// Keep the original formatter checks, including render failures.
+						// This row is not emitted, and its edit hash was overwritten below.
+						// Avoid the unused UTF-8 copy and SHA-256 without weakening validation.
+						const double ValidationStarted = FPlatformTime::Seconds();
+						FString ValidationText;
+						Contract::FDiagnostic ValidationError;
+						OutError.Reset();
+						if (!FUeAgentStructuredHjsonFormatter::TryWriteValue(
+							MakeShared<FJsonValueObject>(CompactRow.ToSharedRef()), ValidationText, ValidationError))
+						{
+							OutError.SetFailure(MoveTemp(ValidationError), PhysicalFile.Key);
+							return false;
+						}
+						CompactValidationSeconds += FPlatformTime::Seconds() - ValidationStarted;
+						++CompactValidationCount;
 					}
-					UnitEditHashes.Add(UnitId, Sha256(CompactRowBytes));
 					FString RowKey;
 					TSharedRef<FJsonObject> VisibleRow = MakeShared<FJsonObject>();
 					if (bPackedPropertyContainer)
@@ -6695,7 +7178,7 @@ namespace UE::UAI::HjsonWorkspace
 						
 						return false;
 					}
-					UnitEditHashes[UnitId] = Sha256(VisibleBytes);
+					UnitEditHashes.Add(UnitId, Sha256(VisibleBytes));
 					if (bPackedPropertyContainer)
 					{
 						FUeAgentCanonicalValuePtr Content;
@@ -6803,8 +7286,16 @@ namespace UE::UAI::HjsonWorkspace
 			else
 			{
 				FUeAgentCanonicalValuePtr ExampleDocument;
-				if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Packed.Value), Resources, ExampleDocument, OutError)) return false;
+				const auto* PreviousExample = ReusedPackedDocuments.Contains(Packed.Key) ? Baseline->PackedExamples.Find(Packed.Key) : nullptr;
+				if (PreviousExample) ExampleDocument = *PreviousExample;
+				else if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Packed.Value), Resources, ExampleDocument, OutError)) return false;
+				PackedExamples.Add(Packed.Key, ExampleDocument.ToSharedRef());
 				Examples.AddDocument(Packed.Key, ExampleDocument.ToSharedRef());
+			}
+			if (ReusedPackedDocuments.Contains(Packed.Key))
+			{
+				Files.Add(*BaselineFiles.FindChecked(Packed.Key));
+				continue;
 			}
 			TArray<uint8> FileBytes;
 			if (!TrySerializeSemanticHjsonObject(Packed.Value, FileBytes, OutError, Packed.Key))
@@ -6812,10 +7303,31 @@ namespace UE::UAI::HjsonWorkspace
 				
 				return false;
 			}
-			Files.Emplace(Packed.Key, FileBytes, Sha256(FileBytes));
+			const FString FileHash = Sha256(FileBytes);
+			Files.Emplace(Packed.Key, MoveTemp(FileBytes), FileHash);
 		}
+		const double DocumentsFinished = FPlatformTime::Seconds();
 		for (const FSemanticUnit& Unit : Model->GetUnits())
 		{
+			if (bReusableProjection && IdenticalUnits.Contains(Unit.GetUnitId()))
+			{
+				const auto* PreviousInventory = Baseline->Inventory.Find(Unit.GetUnitId());
+				const auto* Pointer = UnitPointers.Find(Unit.GetUnitId());
+				const auto* EditHash = UnitEditHashes.Find(Unit.GetUnitId());
+				const auto* PreviousPointer = Baseline->UnitPointers.Find(Unit.GetUnitId());
+				const auto* PreviousHash = Baseline->UnitEditHashes.Find(Unit.GetUnitId());
+				const auto* Content = UnitContentFiles.Find(Unit.GetUnitId());
+				const auto* PreviousContent = Baseline->UnitContentFiles.Find(Unit.GetUnitId());
+				const bool bSameContentPaths = (!Content && !PreviousContent)
+					|| (Content && PreviousContent && ExportDataIdentical(*Content, *PreviousContent));
+				if (PreviousInventory && Pointer && EditHash && PreviousPointer && PreviousHash
+					&& bSameContentPaths && ExportDataIdentical(*Pointer, *PreviousPointer) && ExportDataIdentical(*EditHash, *PreviousHash))
+				{
+					InventoryByUnit.Add(Unit.GetUnitId(), *PreviousInventory);
+					++ReusedInventoryRows;
+					continue;
+				}
+			}
 			TArray<uint8> RowBytes;
 			if (!TrySerializeSemanticUnitRow(Unit, RowBytes, OutError,
 				Layout->GetPhysicalPlacements().FindChecked(Unit.GetUnitId())))
@@ -6884,9 +7396,96 @@ namespace UE::UAI::HjsonWorkspace
 						TEXT("captured_definition"), ReadablePropertyDefinition(Unit, Model.Get()));
 				}
 			}
-			InventoryRows.Add(Inventory);
+			FUeAgentCanonicalValuePtr CanonicalInventory;
+			if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Inventory), Resources, CanonicalInventory, OutError)) return false;
+			InventoryByUnit.Add(Unit.GetUnitId(), CanonicalInventory.ToSharedRef());
 		}
+		// Keep the complete captured baseline, but partition its machine-only
+		// envelopes by the existing physical document owner. Coalesce those owners
+		// into a bounded set of stable buckets: one file per logical document added
+		// measured filesystem overhead in the Large consumer. Identity keys
+		// remain complete and unique; bucket sharing only widens invalidation.
+		TMap<FString, FUeAgentCanonicalValueRef> ManifestInventoryByUnit;
+		TMap<FString, TArray<TPair<FString, FUeAgentCanonicalValueRef>>> BaselineGroups;
+		TMap<FString, TArray<FUeAgentCanonicalValueRef>> InventoryGroups;
+		TMap<FString, FString> BaselinePaths;
+		TSet<FString> ChangedBaselineGroups;
+		for (const FSemanticUnit& Unit : Model->GetUnits())
+		{
+			const FString& DocumentPath = Layout->GetPhysicalPlacements().FindChecked(Unit.GetUnitId());
+			FString* GroupPath = BaselinePaths.Find(DocumentPath);
+			if (!GroupPath) GroupPath = &BaselinePaths.Add(DocumentPath,
+				TEXT(".uai/baselines/") + Sha256Text(DocumentPath).Right(64).Left(2) + TEXT(".hjson"));
+			const FString& Path = *GroupPath;
+			const auto& Complete = InventoryByUnit.FindChecked(Unit.GetUnitId());
+			const auto* Envelope = Complete->GetObjectItems().FindByPredicate(
+				[](const auto& Field) { return Field.Key == TEXT("envelope"); });
+			if (!Envelope) { OutError.SetSourceFailure(TEXT("composition_unit_envelope_failed"),
+				TEXT("A captured baseline envelope is missing."), Unit.GetUnitId()); return false; }
+			BaselineGroups.FindOrAdd(Path).Emplace(Unit.GetUnitId(), Envelope->Value);
+			const auto* PreviousComplete = bReusableProjection ? Baseline->Inventory.Find(Unit.GetUnitId()) : nullptr;
+			const auto* Previous = PreviousComplete && &PreviousComplete->Get() == &Complete.Get()
+				? Baseline->ManifestInventory.Find(Unit.GetUnitId()) : nullptr;
+			if (Previous)
+			{
+				InventoryGroups.FindOrAdd(Path.Replace(TEXT("/baselines/"), TEXT("/inventory/"))).Add(*Previous);
+				ManifestInventoryByUnit.Add(Unit.GetUnitId(), *Previous);
+				continue;
+			}
+			ChangedBaselineGroups.Add(Path);
+			auto Fields = Complete->GetObjectItems();
+			Fields.RemoveAll([](const auto& Field) { return Field.Key == TEXT("envelope"); });
+			FUeAgentCanonicalValuePtr Reference, Thin;
+			FUeAgentStateSemanticError Error;
+			if (!FUeAgentCanonicalValue::TryString(Path, Resources, Reference, Error))
+			{ OutError.SetFailure(Error); return false; }
+			Fields.Emplace(TEXT("envelope_ref"), Reference.ToSharedRef());
+			if (!FUeAgentCanonicalValue::TryObject(MoveTemp(Fields), Resources, Thin, Error))
+			{ OutError.SetFailure(Error); return false; }
+			InventoryGroups.FindOrAdd(Path.Replace(TEXT("/baselines/"), TEXT("/inventory/"))).Add(Thin.ToSharedRef());
+			ManifestInventoryByUnit.Add(Unit.GetUnitId(), Thin.ToSharedRef());
+		}
+		int32 ReusedBaselineFiles = 0;
+		for (auto& Group : BaselineGroups)
+		{
+			if (!ChangedBaselineGroups.Contains(Group.Key) && BaselineFiles.Contains(Group.Key))
+			{ Files.Add(*BaselineFiles.FindChecked(Group.Key)); ++ReusedBaselineFiles; continue; }
+			FUeAgentCanonicalValuePtr Envelopes;
+			FUeAgentStateSemanticError Error;
+			if (!FUeAgentCanonicalValue::TryObject(MoveTemp(Group.Value), Resources, Envelopes, Error))
+			{ OutError.SetFailure(Error); return false; }
+			TArray<uint8> Bytes;
+			if (!TrySerializeSemanticHjsonObject(*Envelopes, Bytes, OutError, Group.Key)) return false;
+			const FString Hash = Sha256(Bytes);
+			Files.Emplace(Group.Key, MoveTemp(Bytes), Hash);
+		}
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=baseline_documents files=%d reused_files=%d"),
+			BaselineGroups.Num(), ReusedBaselineFiles);
+		// The inventory is machine-owned just like the complete baselines. Keep
+		// its stable buckets separate from the changing revision header so the
+		// publisher/resolver can validate actual unchanged files with the same
+		// parser proof, rather than reparsing every row for three changed values.
+		TArray<FString> InventoryPaths;
+		InventoryGroups.GetKeys(InventoryPaths); InventoryPaths.Sort();
+		int32 ReusedInventoryFiles = 0;
+		for (const FString& Path : InventoryPaths)
+		{
+			const FString BaselinePath = Path.Replace(TEXT("/inventory/"), TEXT("/baselines/"));
+			if (!ChangedBaselineGroups.Contains(BaselinePath) && BaselineFiles.Contains(Path))
+			{ Files.Add(*BaselineFiles.FindChecked(Path)); ++ReusedInventoryFiles; continue; }
+			FUeAgentCanonicalValuePtr Rows, Document;
+			FUeAgentStateSemanticError Error;
+			if (!FUeAgentCanonicalValue::TryArray(MoveTemp(InventoryGroups.FindChecked(Path)), Resources, Rows, Error)
+				|| !FUeAgentCanonicalValue::TryObject({{TEXT("unit_inventory"), Rows.ToSharedRef()}}, Resources, Document, Error))
+			{ OutError.SetFailure(Error, Path); return false; }
+			TArray<uint8> Bytes;
+			if (!TrySerializeSemanticHjsonObject(*Document, Bytes, OutError, Path)) return false;
+			const FString Hash = Sha256(Bytes); Files.Emplace(Path, MoveTemp(Bytes), Hash);
+		}
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=inventory_documents files=%d reused_files=%d"),
+			InventoryPaths.Num(), ReusedInventoryFiles);
 
+		const double InventoryFinished = FPlatformTime::Seconds();
 		const auto Targets = MakeShared<FJsonObject>();
 		TMap<FString, FString> PreviewAssetPaths;
 		for (const FSemanticUnit& Unit : Model->GetUnits())
@@ -6971,7 +7570,9 @@ namespace UE::UAI::HjsonWorkspace
 			Files.Emplace(TEXT("preview/index.hjson"), NavigationBytes, Sha256(NavigationBytes));
 		}
 
+		const double ExamplesStarted = FPlatformTime::Seconds();
 		if (!Examples.Publish(Files, OutError, [](const TArray<uint8>& Bytes) { return Sha256(Bytes); })) return false;
+		const double ExamplesFinished = FPlatformTime::Seconds();
 
 		const FUeAgentStateRevision& Revision =
 			SnapshotBinding.Revision;
@@ -6983,12 +7584,12 @@ namespace UE::UAI::HjsonWorkspace
 		Manifest->SetStringField(
 			TEXT("contract_id"),
 			Model->GetContractId());
-		Manifest->SetNumberField(
+		Manifest->SetField(
 			TEXT("contract_version"),
-			Model->GetContractVersion());
-		Manifest->SetNumberField(
+			MakeShared<FJsonValueNumberString>(FString::FromInt(Model->GetContractVersion())));
+		Manifest->SetField(
 			TEXT("layout_version"),
-			Layout->GetLayoutVersion());
+			MakeShared<FJsonValueNumberString>(FString::FromInt(Layout->GetLayoutVersion())));
 		Manifest->SetStringField(
 			TEXT("profile_id"),
 			Model->GetProfileId());
@@ -7003,9 +7604,9 @@ namespace UE::UAI::HjsonWorkspace
 		RevisionObject->SetStringField(
 			TEXT("generation"),
 			Revision.GetGeneration());
-		RevisionObject->SetNumberField(
+		RevisionObject->SetField(
 			TEXT("sequence"),
-			Revision.GetSequence());
+			MakeShared<FJsonValueNumberString>(FString::Printf(TEXT("%lld"), Revision.GetSequence())));
 		Manifest->SetObjectField(
 			TEXT("base_state_revision"),
 			RevisionObject);
@@ -7015,29 +7616,25 @@ namespace UE::UAI::HjsonWorkspace
 		Manifest->SetArrayField(
 			TEXT("target_unit_ids"),
 			StringArray(Model->GetTargetUnitIds()));
-		TArray<TSharedPtr<FJsonValue>> InventoryValues;
-		for (const TSharedRef<FJsonObject>& Inventory : InventoryRows)
-		{
-			InventoryValues.Add(
-				MakeShared<FJsonValueObject>(Inventory));
-		}
-		Manifest->SetArrayField(
-			TEXT("unit_inventory"),
-			MoveTemp(InventoryValues));
 		Manifest->SetArrayField(
 			TEXT("structural_edits"),
 			TArray<TSharedPtr<FJsonValue>>{});
+		Manifest->SetArrayField(TEXT("unit_inventory_files"), StringArray(InventoryPaths));
 
 		TArray<uint8> ManifestBytes;
-		if (!TrySerializeSemanticHjsonObject(Manifest, ManifestBytes, OutError, ManifestPath))
+		FUeAgentCanonicalValuePtr CanonicalManifest;
+		if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Manifest), Resources, CanonicalManifest, OutError)) return false;
+		if (!TrySerializeSemanticHjsonObject(*CanonicalManifest, ManifestBytes, OutError, ManifestPath))
 		{
 			
 			return false;
 		}
+		const FString ManifestHash = Sha256(ManifestBytes);
 		Files.Emplace(
 			ManifestPath,
-			ManifestBytes,
-			Sha256(ManifestBytes));
+			MoveTemp(ManifestBytes),
+			ManifestHash);
+		const double ManifestFinished = FPlatformTime::Seconds();
 		Files.Sort(
 			[](const FExportFilePlan& Left,
 				const FExportFilePlan& Right)
@@ -7089,6 +7686,46 @@ namespace UE::UAI::HjsonWorkspace
 			MoveTemp(Files),
 			Fingerprint,
 			ObservedTokens);
+		// A single bounded candidate, never a registry of live assets. Larger
+		// exports simply retain the existing uncached path.
+		PreviousCompositionExport.Reset();
+		if (OutputBytes <= 512ll * 1024 * 1024 && Model->GetUnits().Num() <= 200000)
+		{
+			auto Next = MakeShared<FCompositionExportBaseline>();
+			Next->ContractId = Model->GetContractId();
+			Next->ContractVersion = Model->GetContractVersion();
+			Next->ProfileId = Model->GetProfileId();
+			Next->TargetUnitIds = Model->GetTargetUnitIds();
+			Next->LayoutVersion = Layout->GetLayoutVersion();
+			Next->LogicalPlacements = Layout->GetLogicalPlacements();
+			Next->PhysicalPlacements = Layout->GetPhysicalPlacements();
+			Next->PhysicalFiles = Layout->GetPhysicalFiles();
+			Next->PublicRefMapping = Layout->GetMachineManifest().PublicRefMapping;
+			Next->UnitContentKeys = MoveTemp(UnitContentKeys);
+			Next->ItemValueInvariantKeys = MoveTemp(ItemValueInvariantKeys);
+			for (const FExportFilePlan& File : OutPlan->GetFiles())
+				if (File.GetRelativePath() != ManifestPath) Next->Files.Add(File);
+			Next->TargetKind = TargetKind;
+			Next->PackedDocuments = MoveTemp(PackedDocuments);
+			Next->PackedExamples = MoveTemp(PackedExamples);
+			Next->Inventory = MoveTemp(InventoryByUnit);
+			Next->ManifestInventory = MoveTemp(ManifestInventoryByUnit);
+			Next->UnitPointers = MoveTemp(UnitPointers);
+			Next->UnitEditHashes = MoveTemp(UnitEditHashes);
+			Next->UnitContentFiles = MoveTemp(UnitContentFiles);
+			PreviousCompositionExport = MoveTemp(Next);
+		}
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=incremental_composition eligible=%s changed_properties=%d changed_value_items=%d changed_other=%d reused_documents=%d reused_inventory=%d compare_s=%.6f"),
+			bReusableProjection ? TEXT("true") : TEXT("false"), ChangedPropertyUnits, ChangedValueItems, ChangedOtherUnits,
+			ReusedDocuments, ReusedInventoryRows, ComparisonFinished - LayoutFinished);
+		const double PlanFinished = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=export_plan kind=%s units=%d files=%d bytes=%lld layout_s=%.6f documents_s=%.6f inventory_s=%.6f navigation_s=%.6f examples_s=%.6f manifest_s=%.6f finalize_s=%.6f total_s=%.6f compact_validation_s=%.6f compact_rows=%d success=true"),
+			*TargetKind, Model->GetUnits().Num(), OutPlan->GetFiles().Num(), OutputBytes,
+			LayoutFinished - PlanStarted, DocumentsFinished - LayoutFinished,
+			InventoryFinished - DocumentsFinished, ExamplesStarted - InventoryFinished,
+			ExamplesFinished - ExamplesStarted, ManifestFinished - ExamplesFinished,
+			PlanFinished - ManifestFinished, PlanFinished - PlanStarted,
+			CompactValidationSeconds, CompactValidationCount);
 		return true;
 	}
 
@@ -7097,8 +7734,10 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& ProfileId,
 		const UeAgentAuthoringState::FStateSnapshot& Snapshot,
 		const FString& WorkspaceRoot,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
+		if (PreparedExport) *PreparedExport = {};
 		OutResult =
 			UeAgentExportWorkspaceWriter::FWorkspaceResult();
 		OutResult.Status = TEXT("failed");
@@ -7128,14 +7767,31 @@ namespace UE::UAI::HjsonWorkspace
 			OutResult.Diagnostic = WorkspaceError.GetDiagnostic();
 			return false;
 		}
+		return TryExportCapturedCompositionWorkspace(TargetKind, ProfileId, Model.ToSharedRef(),
+			{CanonicalSnapshot->GetSnapshotId(), CanonicalSnapshot->GetRevision(),
+				CanonicalSnapshot->GetProvenance().GetEvidenceId()},
+			WorkspaceRoot, Resources, OutResult, PreparedExport);
+	}
+
+	bool TryExportCapturedCompositionWorkspace(
+		const FString& TargetKind,
+		const FString& ProfileId,
+		FAuthoringModelRef Model,
+		const FCompositionSnapshotBinding& SnapshotBinding,
+		const FString& WorkspaceRoot,
+		FUeAgentResourceTracker& Resources,
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		FPreparedWorkspaceExport* PreparedExport)
+	{
+		const double ExportStarted = FPlatformTime::Seconds();
+		if (PreparedExport) *PreparedExport = {};
+		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
+		OutResult.Status = TEXT("failed");
+		FWorkspaceError WorkspaceError;
 		FExportWorkspacePlanPtr Plan;
 		if (!TryBuildCompositionExportPlan(
-			Model.ToSharedRef(),
-			{
-				CanonicalSnapshot->GetSnapshotId(),
-				CanonicalSnapshot->GetRevision(),
-				CanonicalSnapshot->GetProvenance().GetEvidenceId(),
-			},
+			Model,
+			SnapshotBinding,
 			{},
 			Resources,
 			Plan,
@@ -7145,11 +7801,24 @@ namespace UE::UAI::HjsonWorkspace
 			OutResult.Diagnostic = WorkspaceError.GetDiagnostic();
 			return false;
 		}
+		const double PlanFinished = FPlatformTime::Seconds();
 		FArtifactPublishReceipt Receipt;
 		FArtifactPublishError PublishError;
 		const FString OwnerId =
 			TEXT("uai.authoring.composition.")
 			+ TargetKind.Replace(TEXT("."), TEXT("_"));
+		if (PreparedExport)
+		{
+			PreparedExport->Plan = Plan;
+			PreparedExport->PublisherOwnerId = OwnerId;
+			OutResult.Status = TEXT("prepared");
+			OutResult.ProfileId = ProfileId;
+			OutResult.WorkspaceRoot = WorkspaceRoot;
+			OutResult.ExpectedRevision = Model->GetBaseRevision();
+			UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=workspace_export_prepare target_kind=%s plan_s=%.6f total_s=%.6f"),
+				*TargetKind, PlanFinished - ExportStarted, FPlatformTime::Seconds() - ExportStarted);
+			return true;
+		}
 		if (!TryPublishExportPlan(
 			FArtifactPublishRequest(
 				Plan.ToSharedRef(),
@@ -7163,6 +7832,7 @@ namespace UE::UAI::HjsonWorkspace
 			return false;
 		}
 
+		const double PublishFinished = FPlatformTime::Seconds();
 		OutResult.Status = TEXT("written");
 		OutResult.ContractId = Model->GetContractId();
 		OutResult.ContractVersion =
@@ -7224,6 +7894,11 @@ namespace UE::UAI::HjsonWorkspace
 				Warnings.Add(MakeShared<FJsonValueObject>(Warning.ToPublicJson()));
 			ReceiptJson->SetArrayField(TEXT("warnings"), MoveTemp(Warnings));
 		}
+		const double ExportFinished = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=workspace_export kind=%s profile=%s plan_s=%.6f publish_s=%.6f result_s=%.6f total_s=%.6f success=true"),
+			*TargetKind, *ProfileId, PlanFinished - ExportStarted,
+			PublishFinished - PlanFinished, ExportFinished - PublishFinished,
+			ExportFinished - ExportStarted);
 		return true;
 	}
 

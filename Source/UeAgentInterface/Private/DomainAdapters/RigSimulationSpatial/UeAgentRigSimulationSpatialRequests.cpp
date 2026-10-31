@@ -59,6 +59,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		const TArray<FRequestSpec>& RequestSpecs()
 		{
 			static const TArray<FRequestSpec> Specs = {
+				{TEXT("rig.control.bake.context"), TEXT("rig_simulation_spatial.control_rig.bake_context.request.v1"), TEXT("control_rig.bake_context.request.v1"), TEXT("rig_bake"), false, false, false, {TEXT("sequence_ref"), TEXT("rig_ref")}, {TEXT("sequence_ref"), TEXT("binding_name"), TEXT("rig_ref")}, {TEXT("target_animation_ref")}},
 				{TEXT("rig.skeleton.preview_mesh.bind"), TEXT("rig_simulation_spatial.skeleton.bind_preview_mesh.request.v1"), TEXT("skeleton.bind_preview_mesh.request.v1"), TEXT("skeletal_attachment"), true, true, false, {TEXT("skeleton_ref"), TEXT("preview_mesh_ref")}, {TEXT("skeleton_ref"), TEXT("preview_mesh_ref"), TEXT("expected_revision")}, {}},
 				{TEXT("rig.skeleton.socket.update"), TEXT("rig_simulation_spatial.skeleton.update_socket.request.v1"), TEXT("skeleton.update_socket.request.v1"), TEXT("skeletal_attachment"), true, true, false, {TEXT("skeleton_ref")}, {TEXT("skeleton_ref"), TEXT("operation"), TEXT("socket_ref"), TEXT("parent_bone_ref"), TEXT("socket_transform"), TEXT("expected_revision")}, {}},
 				{TEXT("rig.control.bake.animation"), TEXT("rig_simulation_spatial.control_rig.bake_animation.request.v1"), TEXT("control_rig.bake_animation.request.v1"), TEXT("rig_bake"), true, true, false, {TEXT("source_sequence_ref"), TEXT("target_animation_ref"), TEXT("binding_ref"), TEXT("rig_ref")}, {TEXT("source_sequence_ref"), TEXT("target_animation_ref"), TEXT("binding_ref"), TEXT("rig_ref"), TEXT("authored_range"), TEXT("sample_rate"), TEXT("expected_revision")}, {}},
@@ -934,6 +935,18 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				Out.PrimaryTargetRef = Value.SkeletonRef;
 				Out.Transforms.Emplace(Value.SocketTransform, TEXT("/socket_transform/frame"));
 				Out.Payload.Set<FRigSkeletonSocketUpdateInput>(MoveTemp(Value));
+				return true;
+			}
+			if (Capability == TEXT("rig.control.bake.context"))
+			{
+				FRigControlBakeContextInput Value;
+				if (!RequiredString(Root, TEXT("sequence_ref"), Value.SequenceRef, Error)
+					|| !RequiredString(Root, TEXT("binding_name"), Value.BindingName, Error)
+					|| !RequiredString(Root, TEXT("rig_ref"), Value.RigRef, Error)
+					|| (Root->HasField(TEXT("target_animation_ref"))
+						&& !RequiredString(Root, TEXT("target_animation_ref"), Value.TargetAnimationRef, Error))) return false;
+				Out.PrimaryTargetRef = Value.SequenceRef;
+				Out.Payload.Set<FRigControlBakeContextInput>(MoveTemp(Value));
 				return true;
 			}
 			if (Capability == TEXT("rig.control.bake.animation"))

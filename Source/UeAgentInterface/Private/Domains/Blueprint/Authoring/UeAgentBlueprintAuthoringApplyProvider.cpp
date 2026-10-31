@@ -157,6 +157,8 @@ namespace UeAgentBlueprintAuthoring
 				EOperation InOperation,
 				UBlueprint* InExisting,
 				UBlueprint* InProposed,
+				UBlueprint* InValidation,
+				TUniquePtr<FScratchBlueprintPackages> InScratchPackages,
 				TArray<UBlueprint*> InDependentBlueprints,
 				const TArray<AActor*>& InAffectedActors,
 				TUniquePtr<FPreparedBlueprintMutation> InMutation,
@@ -164,10 +166,12 @@ namespace UeAgentBlueprintAuthoring
 				bool bInCompile,
 				bool bInSave)
 				: PackagePath(MoveTemp(InPackagePath))
+				, ScratchPackages(MoveTemp(InScratchPackages))
 				, AssetKind(MoveTemp(InAssetKind))
 				, Operation(InOperation)
 				, Existing(InExisting)
 				, Proposed(InProposed)
+				, Validation(InValidation)
 				, Mutation(MoveTemp(InMutation))
 				, ActualCounters(MoveTemp(InPreparedCounters))
 				, bCompile(bInCompile)
@@ -211,9 +215,7 @@ namespace UeAgentBlueprintAuthoring
 				if (RequiresCheckpointRollback()) return true;
 				if (Operation == EOperation::Update)
 				{
-					UPackage* Package = CreatePackage(*FString::Printf(
-						TEXT("/Temp/UAI/Blueprint/Rollback_%s"),
-						*FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+					UPackage* Package = ScratchPackages->Create(TEXT("Rollback"));
 					Backup.Reset(DuplicateBlueprint(Existing.Get(), Package, NAME_None, true, &OutFailure.Diagnostic));
 					if (!Backup.IsValid())
 					{
@@ -224,8 +226,7 @@ namespace UeAgentBlueprintAuthoring
 					}
 					for (auto& Entry : DependentBlueprints)
 					{
-						UPackage* DependentPackage = CreatePackage(*FString::Printf(
-							TEXT("/Temp/UAI/Blueprint/Rollback_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+						UPackage* DependentPackage = ScratchPackages->Create(TEXT("Rollback"));
 						Entry.Backup.Reset(DuplicateBlueprint(Entry.Target.Get(), DependentPackage, NAME_None, true, &OutFailure.Diagnostic));
 						if (!Entry.Backup.IsValid())
 {
@@ -350,7 +351,9 @@ namespace UeAgentBlueprintAuthoring
 			{
 				OutFailure = FOperationFailure();
 				Existing.Reset();
+				ScratchPackages->Reset();
 				Proposed.Reset();
+				Validation.Reset();
 				Backup.Reset();
 				for (auto& Entry : DependentBlueprints) { Entry.Target.Reset(); Entry.Backup.Reset(); }
 				Actual = nullptr;
@@ -582,6 +585,7 @@ namespace UeAgentBlueprintAuthoring
 			}
 
 			FString PackagePath;
+			TUniquePtr<FScratchBlueprintPackages> ScratchPackages;
 			struct FDependentBlueprint
 			{
 				FString PackagePath;
@@ -596,6 +600,9 @@ namespace UeAgentBlueprintAuthoring
 			EOperation Operation = EOperation::Update;
 			TStrongObjectPtr<UBlueprint> Existing;
 			TStrongObjectPtr<UBlueprint> Proposed;
+			// Updates publish Existing, but their separate validation duplicate can
+			// participate in native dependent compilation and must survive its GC.
+			TStrongObjectPtr<UBlueprint> Validation;
 			TStrongObjectPtr<UBlueprint> Backup;
 			FAssetRemovalStage RemovalStage;
 			UBlueprint* Actual = nullptr;
@@ -739,10 +746,18 @@ namespace UeAgentBlueprintAuthoring
 					return false;
 				}
 
+				FScratchBlueprintPreflightTransaction ScratchTransaction;
+				FDiagnostic Error;
+				if (Operation != EOperation::Remove && !ScratchTransaction.Begin(PackagePath, Error))
+				{
+					SetFailure(OutFailure, MoveTemp(Error));
+					return false;
+				}
+
 				UBlueprint* Proposed = Existing;
 				UBlueprint* ValidationTarget = nullptr;
 				UPackage* ScratchPackage = nullptr;
-				FDiagnostic Error;
+				auto ScratchPackages = MakeUnique<FScratchBlueprintPackages>();
 				if (Existing && Operation == EOperation::Update
 					&& (!FPreparedBlueprintMutation::ValidateGraphNames(*Existing, Request.Input->ProviderExtension, Error)
 						|| !FPreparedBlueprintMutation::ValidateMemberNames(*Existing, Request.Input->ProviderExtension, Error)
@@ -756,9 +771,7 @@ namespace UeAgentBlueprintAuthoring
 				}
 				if (Operation != EOperation::Remove)
 				{
-					ScratchPackage = CreatePackage(*FString::Printf(
-						TEXT("/Temp/UAI/Blueprint/Proposed_%s"),
-						*FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+					ScratchPackage = ScratchPackages->Create(TEXT("Proposed"));
 					if (Operation == EOperation::Create)
 					{
 						ValidationTarget = Cast<UBlueprint>(CreateFactorySeed(
@@ -795,6 +808,7 @@ namespace UeAgentBlueprintAuthoring
 					}
 				}
 
+				TStrongObjectPtr<UBlueprint> ValidationGuard(ValidationTarget);
 				if (ValidationTarget)
 					SetAuthoringContext(*ValidationTarget, PackagePath, Existing);
 				TUniquePtr<FPreparedBlueprintMutation> Mutation;
@@ -825,6 +839,8 @@ namespace UeAgentBlueprintAuthoring
 					Operation,
 					Existing,
 					Proposed,
+					ValidationTarget,
+					MoveTemp(ScratchPackages),
 					MoveTemp(DependentBlueprints),
 					AffectedActors,
 					MoveTemp(Mutation),

@@ -9,6 +9,7 @@
 #include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
 #include "Core/HjsonWorkspace/UeAgentReflectedPropertyRows.h"
 #include "Misc/Paths.h"
+#include "HAL/PlatformTime.h"
 
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Utilities/UeAgentStructuredHjsonFormatter.h"
@@ -35,6 +36,17 @@ namespace UE::UAI::HjsonWorkspace
 			TEXT("uai.authoring.workspace/2");
 		const FString ManifestPath =
 			TEXT(".uai/workspace.hjson");
+
+		void EncodeSerializedText(const FString& Text, TArray<uint8>& OutBytes)
+		{
+			// Use the same converter/terminated input as FTCHARToUTF8, but write
+			// into the final byte array instead of allocating and copying a second one.
+			const int32 SourceLength = FCString::Strlen(*Text);
+			const int32 ByteLength = FTCHARToUTF8_Convert::ConvertedLength(*Text, SourceLength);
+			OutBytes.SetNumUninitialized(ByteLength);
+			FTCHARToUTF8_Convert::Convert(reinterpret_cast<UTF8CHAR*>(OutBytes.GetData()),
+				ByteLength, *Text, SourceLength);
+		}
 
 		FString Normalize(FString Value)
 		{
@@ -1431,6 +1443,7 @@ namespace UE::UAI::HjsonWorkspace
 		for (int32 Index = 0; Index < Units.Num(); ++Index)
 		{
 			UnitIndex.Add(Units[Index].GetUnitId(), Index);
+			TargetIdentityIndex.FindOrAdd(GetTypeHash(Units[Index].GetTargetIdentityKey())).Add(Index);
 		}
 		// Definition aliases are local to their owning catalog. They are not type names.
 		TMap<FString, TMap<FString, TArray<FString>>> DefinitionsByOwner;
@@ -1500,6 +1513,16 @@ namespace UE::UAI::HjsonWorkspace
 	{
 		const int32* Index = UnitIndex.Find(UnitId);
 		return Index == nullptr ? nullptr : &Units[*Index];
+	}
+	TArray<const FSemanticUnit*> FAuthoringModel::FindUnitsForTargetIdentity(const FString& TargetIdentity) const
+	{
+		TArray<const FSemanticUnit*> Matches;
+		// Index positions, not copies of long native identity strings. Compare the
+		// complete key within the hash bucket and retain the model's unit order.
+		if (const auto* Indices = TargetIdentityIndex.Find(GetTypeHash(TargetIdentity)))
+			for (const int32 Index : *Indices)
+				if (Units[Index].GetTargetIdentityKey() == TargetIdentity) Matches.Add(&Units[Index]);
+		return Matches;
 	}
 	const FString& FAuthoringModel::GetSemanticFingerprint() const
 	{
@@ -1712,13 +1735,12 @@ namespace UE::UAI::HjsonWorkspace
 		FString Text;
 		Contract::FDiagnostic Error;
 		FUeAgentStructuredHjsonWriteOptions Options;
-		Options.CanonicalLeafProjection = &TrySemanticLeafProjection;
+		Options.StableCanonicalLeafProjection = &TrySemanticLeafProjection;
 		if (!FUeAgentStructuredHjsonFormatter::TryWriteValue(Object, Options, Text, Error)) {
 			OutError.SetFailure(MoveTemp(Error), SourceUnit); return false;
 		}
 		Text.AppendChar(TEXT('\n'));
-		const FTCHARToUTF8 Utf8(*Text);
-		OutCanonicalUtf8.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+		EncodeSerializedText(Text, OutCanonicalUtf8);
 		return true;
 	}
 
@@ -1735,8 +1757,7 @@ namespace UE::UAI::HjsonWorkspace
 			OutError.SetFailure(MoveTemp(Error), SourceUnit); return false;
 		}
 		Text.AppendChar(TEXT('\n'));
-		const FTCHARToUTF8 Utf8(*Text);
-		OutCanonicalUtf8.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+		EncodeSerializedText(Text, OutCanonicalUtf8);
 		return true;
 	}
 
@@ -2031,13 +2052,18 @@ namespace UE::UAI::HjsonWorkspace
 		OutError.Reset();
 		if (!TryBuildReadableAliases(Model, OutProjection.ReadableAliases, OutError)) return false;
 		TSet<FString> UsedHandles;
+		TMap<FString, int32> LastHandleOrdinals;
 		for (const FSemanticUnit& Unit : Model.GetUnits())
 		{
 			const FString Base = OutProjection.ReadableAliases.FindChecked(Unit.GetUnitId());
-			FString Handle = Base;
-			int32 Ordinal = 1;
+			// UsedHandles only grows. Every lower ordinal for this case-folded
+			// base was already occupied, so restarting at 1 repeats the same scan.
+			int32& LastOrdinal = LastHandleOrdinals.FindOrAdd(Base.ToLower());
+			int32 Ordinal = FMath::Max(1, LastOrdinal);
+			FString Handle = Ordinal == 1 ? Base : Base + FString::Printf(TEXT("-%d"), Ordinal);
 			while (UsedHandles.Contains(Handle.ToLower()))
 				Handle = Base + FString::Printf(TEXT("-%d"), ++Ordinal);
+			LastOrdinal = Ordinal;
 			UsedHandles.Add(Handle.ToLower());
 			OutProjection.Handles.Add(Unit.GetUnitId(), MoveTemp(Handle));
 		}
@@ -2050,6 +2076,31 @@ namespace UE::UAI::HjsonWorkspace
 		return true;
 	}
 
+	bool HaveOnlyNumericOrBooleanValueChanges(const FUeAgentCanonicalValue& A, const FUeAgentCanonicalValue& B)
+	{
+		const auto IsNumber = [](EUeAgentValueKind Kind) { return Kind == EUeAgentValueKind::Integer || Kind == EUeAgentValueKind::Decimal; };
+		if (IsNumber(A.GetKind()) && IsNumber(B.GetKind())) return true;
+		if (A.GetKind() != B.GetKind()) return false;
+		if (A.GetKind() == EUeAgentValueKind::Boolean || A.GetKind() == EUeAgentValueKind::Null) return true;
+		if (A.GetKind() == EUeAgentValueKind::String) return A.GetText().Equals(B.GetText(), ESearchCase::CaseSensitive);
+		if (A.GetKind() == EUeAgentValueKind::Array) {
+			if (A.GetArrayItems().Num() != B.GetArrayItems().Num()) return false;
+			for (int32 I = 0; I < A.GetArrayItems().Num(); ++I)
+				if (!HaveOnlyNumericOrBooleanValueChanges(A.GetArrayItems()[I].Get(), B.GetArrayItems()[I].Get())) return false;
+			return true;
+		}
+		if (A.GetKind() == EUeAgentValueKind::Object) {
+			if (A.GetObjectItems().Num() != B.GetObjectItems().Num()) return false;
+			for (int32 I = 0; I < A.GetObjectItems().Num(); ++I) {
+				const auto& Left = A.GetObjectItems()[I]; const auto& Right = B.GetObjectItems()[I];
+				if (!Left.Key.Equals(Right.Key, ESearchCase::CaseSensitive)
+					|| !HaveOnlyNumericOrBooleanValueChanges(Left.Value.Get(), Right.Value.Get())) return false;
+			}
+			return true;
+		}
+		return false;
+	}
+
 	bool TryPlanWorkspaceLayout(
 		FAuthoringModelRef Model,
 		int32 LayoutVersion,
@@ -2059,6 +2110,10 @@ namespace UE::UAI::HjsonWorkspace
 		FWorkspaceLayoutPlanPtr& OutPlan,
 		FWorkspaceError& OutError)
 	{
+		static thread_local FWorkspaceLayoutPlanPtr PreviousLayout;
+		static thread_local TMap<EUeAgentResourceDimension, int64> PreviousCharges;
+		const auto UsageBefore = Resources.Snapshot();
+		const double Started = FPlatformTime::Seconds();
 		OutPlan.Reset();
 		OutError.Reset();
 		if (LayoutVersion < 1)
@@ -2090,6 +2145,61 @@ namespace UE::UAI::HjsonWorkspace
 			NormalizedTelemetry.Add(Key, Entry.Value);
 		}
 		Telemetry = MoveTemp(NormalizedTelemetry);
+		const auto Previous = PreviousLayout;
+		bool bReuse = Previous && Previous->GetLayoutVersion() == LayoutVersion && Previous->GetSourceMode() == SourceMode
+			&& Previous->GetModel()->GetContractId() == Model->GetContractId()
+			&& Previous->GetModel()->GetContractVersion() == Model->GetContractVersion()
+			&& Previous->GetModel()->GetProfileId() == Model->GetProfileId()
+			&& Previous->GetModel()->GetTargetUnitIds() == Model->GetTargetUnitIds()
+			&& Previous->GetModel()->GetUnits().Num() == Model->GetUnits().Num();
+		TMap<FString, FString> ChangedHashes;
+		if (bReuse && Previous->GetModel() != Model) {
+			for (const auto& Unit : Model->GetUnits()) {
+				const auto* Old = Previous->GetModel()->FindUnit(Unit.GetUnitId());
+				// Prove the complete layout/reference invariants. The old collision,
+				// alias and grouping result is reusable only for this exact structure.
+				if (!Old || Old->GetUnitKind() != Unit.GetUnitKind() || Old->GetOwnerRef() != Unit.GetOwnerRef()
+					|| Old->GetSemanticTypeRef() != Unit.GetSemanticTypeRef() || Old->GetRole() != Unit.GetRole()
+					|| Old->GetFieldSetRef() != Unit.GetFieldSetRef() || Old->GetItemRefs() != Unit.GetItemRefs()
+					|| Old->GetRelationRefs() != Unit.GetRelationRefs() || Old->GetOrderingRef() != Unit.GetOrderingRef()
+					|| Old->GetLayoutRef() != Unit.GetLayoutRef() || Old->GetDependencyRefs() != Unit.GetDependencyRefs()
+					|| Old->GetProfileVisibility() != Unit.GetProfileVisibility() || Old->GetSourceProvenance() != Unit.GetSourceProvenance()
+					|| Old->GetTargetIdentityKey() != Unit.GetTargetIdentityKey() || Old->GetCategoryPath() != Unit.GetCategoryPath()
+					|| Old->GetValues().Num() != Unit.GetValues().Num()) { bReuse = false; break; }
+				bool bChanged = false;
+				for (const auto& Value : Unit.GetValues()) {
+					const auto* OldValue = Old->GetValues().Find(Value.Key);
+					if (!OldValue) { bReuse = false; break; }
+					if (&OldValue->Get() == &Value.Value.Get()) continue;
+					if (Unit.GetUnitKind() != ESemanticUnitKind::PropertySet
+						|| !Unit.GetSemanticTypeRef().StartsWith(TEXT("uai.semantic.level."))
+						|| !Unit.GetSemanticTypeRef().EndsWith(TEXT(".property"))
+						|| !HaveOnlyNumericOrBooleanValueChanges(OldValue->Get(), Value.Value.Get())) { bReuse = false; break; }
+					bChanged = true;
+				}
+				if (!bReuse) break;
+				if (bChanged) {
+					FString Hash;
+					if (!TryHashSemanticUnitContent(Unit, Hash, OutError)) return false;
+					ChangedHashes.Add(Unit.GetUnitId(), MoveTemp(Hash));
+				}
+			}
+		}
+		if (bReuse) {
+			FUeAgentResourceChargeError ResourceError;
+			if (!Resources.TryChargeMany(PreviousCharges, TEXT("semantic_layout.plan"), ResourceError)) return FailResource(OutError, ResourceError);
+			FMachineWorkspaceManifest Manifest = Previous->GetMachineManifest();
+			Manifest.SemanticFingerprint = Model->GetSemanticFingerprint(); Manifest.BaseRevision = Model->GetBaseRevision();
+			for (auto& Entry : Manifest.UnitInventory)
+				if (const auto* Hash = ChangedHashes.Find(Entry.UnitId)) Entry.ContentHash = *Hash;
+			OutPlan = MakeShareable(new FWorkspaceLayoutPlan(Model, LayoutVersion, SourceMode,
+				Previous->GetLogicalPlacements(), Previous->GetPhysicalPlacements(), Previous->GetPhysicalFiles(),
+				Previous->GetLlmIndex(), MoveTemp(Manifest), MoveTemp(Telemetry)));
+			PreviousLayout = OutPlan;
+			UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=layout_reuse units=%d changed_units=%d total_s=%.6f"),
+				Model->GetUnits().Num(), ChangedHashes.Num(), FPlatformTime::Seconds() - Started);
+			return true;
+		}
 
 		FSemanticReferenceProjection References;
 		if (!TryBuildSemanticReferenceProjection(Model.Get(), References, OutError)) return false;
@@ -2403,6 +2513,15 @@ namespace UE::UAI::HjsonWorkspace
 			MoveTemp(Index),
 			MoveTemp(Manifest),
 			MoveTemp(Telemetry)));
+		if (OutPlan->GetModel()->GetUnits().Num() <= 200000) {
+			PreviousLayout = OutPlan; PreviousCharges.Reset();
+			const auto UsageAfter = Resources.Snapshot();
+			for (uint8 D = 0; D <= static_cast<uint8>(EUeAgentResourceDimension::EstimatedMemoryBytes); ++D) {
+				const auto Dimension = static_cast<EUeAgentResourceDimension>(D);
+				const int64 Delta = UsageAfter.Consumed(Dimension) - UsageBefore.Consumed(Dimension);
+				if (Delta > 0) PreviousCharges.Add(Dimension, Delta);
+			}
+		} else { PreviousLayout.Reset(); PreviousCharges.Reset(); }
 		return true;
 	}
 

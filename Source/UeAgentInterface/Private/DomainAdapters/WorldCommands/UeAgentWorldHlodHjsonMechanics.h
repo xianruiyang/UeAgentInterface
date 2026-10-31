@@ -10,5 +10,6 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		HjsonWorkspace::FWorkspaceError& OutError);
+		HjsonWorkspace::FWorkspaceError& OutError,
+		const FString& RootType = TEXT("/Script/Engine.HLODLayer"));
 }

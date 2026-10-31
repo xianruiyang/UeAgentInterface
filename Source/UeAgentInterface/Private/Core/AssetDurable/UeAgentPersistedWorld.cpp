@@ -131,6 +131,28 @@ namespace UE::UAI::AssetDurable
 		const FPersistedWorldObserver Observer,
 		FPersistedWorldLoadError& OutError)
 	{
+		TArray<FPersistedWorldPackage> Packages;
+		for (const FDurableArtifact& Artifact : Artifacts)
+		{
+			if (Artifact.GetArtifactKind() == EDurableArtifactKind::Package
+				&& Artifact.GetRole() == TEXT("package_header"))
+				Packages.Add({Artifact.GetDurableLocation(), Artifact.GetFinalPath(),
+					Artifact.GetIntent() == EAssetDurableIntent::Delete});
+		}
+		if (Packages.IsEmpty() && !Artifacts.IsEmpty())
+		{
+			SetError(OutError, TEXT("persisted_world_map_missing"), TEXT("The durable artifacts contain no .umap package header for world readback."));
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1); OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+			return false;
+		}
+		return TryObservePersistedWorld(Packages, Observer, OutError);
+	}
+
+	bool TryObservePersistedWorld(
+		const TArray<FPersistedWorldPackage>& Artifacts,
+		const FPersistedWorldObserver Observer,
+		FPersistedWorldLoadError& OutError)
+	{
 		OutError = {};
 		if (Artifacts.IsEmpty())
 		{
@@ -139,56 +161,51 @@ namespace UE::UAI::AssetDurable
 			return false;
 		}
 
-		const FDurableArtifact* WorldHeader = nullptr;
-		TArray<const FDurableArtifact*> PackageHeaders;
+		const FPersistedWorldPackage* WorldHeader = nullptr;
+		TArray<const FPersistedWorldPackage*> PackageHeaders;
 		TSet<FString> SeenPackages;
-		for (const FDurableArtifact& Artifact : Artifacts)
+		for (const FPersistedWorldPackage& Artifact : Artifacts)
 		{
-			if (Artifact.GetArtifactKind() != EDurableArtifactKind::Package
-				|| Artifact.GetRole() != TEXT("package_header"))
-			{
-				continue;
-			}
 			const FString PackageKey =
-				Artifact.GetDurableLocation().ToLower();
-			if (Artifact.GetIntent() == EAssetDurableIntent::Delete)
+				Artifact.PackageName.ToLower();
+			if (Artifact.bDeleted)
 			{
-				if (IFileManager::Get().FileExists(*Artifact.GetFinalPath()))
+				if (IFileManager::Get().FileExists(*Artifact.FinalPath))
 				{
 					SetError(OutError, TEXT("persisted_world_deleted_package_present"),
-						TEXT("A package removed by the world mutation still exists on disk."), Artifact.GetDurableLocation());
+						TEXT("A package removed by the world mutation still exists on disk."), Artifact.PackageName);
 					OutError.ActualValue = MakeShared<FJsonValueBoolean>(true);
 					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
-					OutError.InternalContext = Artifact.GetFinalPath();
+					OutError.InternalContext = Artifact.FinalPath;
 					return false;
 				}
 				continue;
 			}
 			if (SeenPackages.Contains(PackageKey)
 				|| !FPackageName::IsValidLongPackageName(
-					Artifact.GetDurableLocation())
-				|| !IFileManager::Get().FileExists(*Artifact.GetFinalPath()))
+					Artifact.PackageName)
+				|| !IFileManager::Get().FileExists(*Artifact.FinalPath))
 			{
 				SetError(
 					OutError,
 					TEXT("persisted_world_artifact_invalid"),
 					SeenPackages.Contains(PackageKey) ? TEXT("More than one package-header artifact identifies the same package.")
-						: !FPackageName::IsValidLongPackageName(Artifact.GetDurableLocation()) ? TEXT("The package-header artifact has an invalid long package name.")
+						: !FPackageName::IsValidLongPackageName(Artifact.PackageName) ? TEXT("The package-header artifact has an invalid long package name.")
 						: TEXT("The package-header artifact file does not exist."),
-					Artifact.GetDurableLocation());
-				OutError.ActualValue = MakeShared<FJsonValueString>(Artifact.GetDurableLocation()); OutError.InternalContext = Artifact.GetFinalPath();
+					Artifact.PackageName);
+				OutError.ActualValue = MakeShared<FJsonValueString>(Artifact.PackageName); OutError.InternalContext = Artifact.FinalPath;
 				return false;
 			}
 			SeenPackages.Add(PackageKey);
 			PackageHeaders.Add(&Artifact);
-			if (FPaths::GetExtension(Artifact.GetFinalPath()).Equals(
+			if (FPaths::GetExtension(Artifact.FinalPath).Equals(
 				TEXT("umap"), ESearchCase::IgnoreCase))
 			{
 				if (WorldHeader)
 				{
-					SetError(OutError, TEXT("persisted_world_ambiguous"), TEXT("Persisted world readback requires exactly one map header, but two map headers were found."), Artifact.GetDurableLocation());
-					OutError.ExpectedValue = MakeShared<FJsonValueString>(WorldHeader->GetDurableLocation());
-					OutError.ActualValue = MakeShared<FJsonValueString>(Artifact.GetDurableLocation());
+					SetError(OutError, TEXT("persisted_world_ambiguous"), TEXT("Persisted world readback requires exactly one map header, but two map headers were found."), Artifact.PackageName);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(WorldHeader->PackageName);
+					OutError.ActualValue = MakeShared<FJsonValueString>(Artifact.PackageName);
 					return false;
 				}
 				WorldHeader = &Artifact;
@@ -201,7 +218,7 @@ namespace UE::UAI::AssetDurable
 			return false;
 		}
 
-		const FString SourceWorldPackage = WorldHeader->GetDurableLocation();
+		const FString SourceWorldPackage = WorldHeader->PackageName;
 		const FString SnapshotToken =
 			FGuid::NewGuid().ToString(EGuidFormats::Digits);
 		const FString SnapshotWorldPackage =
@@ -213,10 +230,10 @@ namespace UE::UAI::AssetDurable
 		InstancingContext.AddPackageMapping(
 			FName(*SourceWorldPackage), FName(*SnapshotWorldPackage));
 		TMap<FString, FString> InstancedPackages;
-		for (const FDurableArtifact* Artifact : PackageHeaders)
+		for (const FPersistedWorldPackage* Artifact : PackageHeaders)
 		{
 			if (Artifact == WorldHeader) continue;
-			const FString& SourcePackage = Artifact->GetDurableLocation();
+			const FString& SourcePackage = Artifact->PackageName;
 			const FString InstancedPackage =
 				ULevel::GetExternalActorPackageInstanceName(
 					SnapshotWorldPackage, SourcePackage);

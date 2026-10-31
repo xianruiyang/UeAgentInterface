@@ -1,0 +1,84 @@
+--- a/Engine/Source/Editor/UnrealEd/Private/PlayLevel.cpp
++++ b/Engine/Source/Editor/UnrealEd/Private/PlayLevel.cpp
+@@ -1,6 +1,7 @@
+ // Copyright Epic Games, Inc. All Rights Reserved.
+ 
+ #include "PlayLevel.h"
++#include "IPIEBlueprintCompileErrorHandler.h"
+ #include "CoreMinimal.h"
+ #include "AssetCompilingManager.h"
+ #include "AssetRegistry/AssetRegistryModule.h"
+@@ -1482,6 +1483,11 @@
+ 	return true;
+ }
+ 
++FName IPIEBlueprintCompileErrorHandler::GetModularFeatureName()
++{
++	return TEXT("PIEBlueprintCompileErrorHandler");
++}
++
+ static bool ShowBlueprintErrorDialog( TArray<UBlueprint*> ErroredBlueprints )
+ {
+ 	if (FApp::IsUnattended() || GIsRunningUnattendedScript)
+@@ -2659,15 +2665,26 @@
+ 	TArray<UBlueprint*> ErroredBlueprints;
+ 	FInternalPlayLevelUtils::ResolveDirtyBlueprints(!EditorPlaySettings->AutoRecompileBlueprints, ErroredBlueprints);
+ 
+-	// Don't show the dialog if we're in the middle of a demo, just assume they'll work.
+-	if (ErroredBlueprints.Num() && !GIsDemoMode)
++	// Request-aware automation observes the actual compilation result. The callback
++	// also runs when earlier manual choices suppressed an error's display warning.
++	bool bCancelWithoutDialog = false;
++	for (IPIEBlueprintCompileErrorHandler* Handler : IModularFeatures::Get().GetModularFeatureImplementations<IPIEBlueprintCompileErrorHandler>(IPIEBlueprintCompileErrorHandler::GetModularFeatureName()))
++	{
++		bCancelWithoutDialog |= Handler->CancelOnBlueprintCompileErrors(InRequestParams, ErroredBlueprints);
++	}
++
++	// Unowned/manual requests retain the existing demo and unattended behavior.
++	if (bCancelWithoutDialog || (ErroredBlueprints.Num() && !GIsDemoMode))
+ 	{
+ 		// There was at least one blueprint with an error, make sure the user is OK with that.
+-		bool bContinuePIE = ShowBlueprintErrorDialog(ErroredBlueprints);
++		const bool bContinuePIE = !bCancelWithoutDialog && ShowBlueprintErrorDialog(ErroredBlueprints);
+ 
+ 		if (!bContinuePIE)
+ 		{
+-			FMessageLog("BlueprintLog").Open(EMessageSeverity::Warning);
++			if (!bCancelWithoutDialog)
++			{
++				FMessageLog("BlueprintLog").Open(EMessageSeverity::Warning);
++			}
+ 
+ 			FEditorDelegates::EndPIE.Broadcast(InRequestParams.WorldType == EPlaySessionWorldType::SimulateInEditor);
+ 			FNavigationSystem::OnPIEEnd(*InWorld);
+--- /dev/null
++++ b/Engine/Source/Editor/UnrealEd/Public/IPIEBlueprintCompileErrorHandler.h
+@@ -0,0 +1,28 @@
++// Copyright Epic Games, Inc. All Rights Reserved.
++
++#pragma once
++
++#include "CoreMinimal.h"
++#include "Features/IModularFeature.h"
++
++class UBlueprint;
++struct FRequestPlaySessionParams;
++
++/** Optional request-aware policy for native PIE Blueprint compilation errors. */
++class IPIEBlueprintCompileErrorHandler : public IModularFeature
++{
++public:
++	// Exported so consumers cannot silently link against an engine without this hook.
++	static UNREALED_API FName GetModularFeatureName();
++
++	/** Called on the game thread after native compilation, before the error dialog
++	 * or PIE world creation. Return true only for a request owned by this handler
++	 * to cancel through the normal EndPIE/navigation/CancelPIE cleanup path.
++	 * ErroredBlueprints contains native reported errors; it may be empty when a
++	 * prior interactive choice suppressed a Blueprint's display warning.
++	 * Observe/copy errors here; do not reenter play-session lifecycle APIs.
++	 * False preserves the editor's existing behavior for that request.
++	 */
++	virtual bool CancelOnBlueprintCompileErrors(const FRequestPlaySessionParams& Request,
++		const TArray<UBlueprint*>& ErroredBlueprints) = 0;
++};

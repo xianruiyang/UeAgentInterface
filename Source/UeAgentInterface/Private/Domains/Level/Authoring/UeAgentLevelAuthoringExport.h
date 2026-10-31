@@ -34,12 +34,21 @@ namespace UeAgentLevelAuthoring
 				&& Model.IsValid();
 		}
 	};
+	/** Same-operation preparation and activation for a subsequent native read.
+	 * Activation is reserved for the isolated, non-structural persisted observer. */
+	void PrepareLevelCaptureReuse(UWorld& World, FLevelAuthoringCapture& Capture,
+		const FString& ProfileId);
+	void ActivateLevelCaptureReuse(UWorld& World);
+	void DiscardLevelCaptureReuse();
+	void StartLevelCaptureObservation();
+	void StopLevelCaptureObservation();
 
 	/** Captures the current Level without mutating the world or package dirty state. */
 	UEAGENTINTERFACE_API bool TryCaptureLevelAuthoringState(
 		UWorld& World,
 		FLevelAuthoringCapture& OutCapture,
-		UE::UAI::Contract::FDiagnostic& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const FString& ProfileId = TEXT("llm_authoring"));
 	/** Continues verification across an external save/reload, using the same semantic capture. */
 	UEAGENTINTERFACE_API bool VerifyLevelAuthoringReadback(UWorld& World,
 		const UeAgentAuthoringState::FStateSnapshot& Expected,
@@ -70,5 +79,6 @@ namespace UeAgentLevelAuthoring
 		UWorld& World,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		FLevelExportResult& OutResult);
+		FLevelExportResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

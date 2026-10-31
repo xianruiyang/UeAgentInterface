@@ -17,6 +17,11 @@ namespace UE::UAI::BindingGateway::Query
 		{
 			return {Name, Name, bRequired, EUeAgentQueryPublicIdentityField::Selector, MoveTemp(Children), false};
 		}
+		FField NullableField(FField Field)
+		{
+			Field.bNullable = true;
+			return Field;
+		}
 		FField ArrayField(const TCHAR* Name, TArray<FField> Children = {}, const bool bRequired = false)
 		{
 			return {Name, Name, bRequired, EUeAgentQueryPublicIdentityField::Selector, MoveTemp(Children), true};
@@ -83,7 +88,11 @@ namespace UE::UAI::BindingGateway::Query
 		{
 			return ObjectField(TEXT("sample"), {ScalarField(TEXT("kind"), true), ScalarField(TEXT("index")),
 				VectorField(TEXT("origin_cm")), VectorField(TEXT("extent_cm")),
-				ScalarField(TEXT("sphere_radius_cm")), VectorField(TEXT("position_cm"))}, true);
+				ScalarField(TEXT("sphere_radius_cm")), VectorField(TEXT("position_cm")),
+				ScalarField(TEXT("section_count")), ScalarField(TEXT("material_slot_count")),
+				ScalarField(TEXT("material_index")), ScalarField(TEXT("material_index_valid")),
+				ScalarField(TEXT("material_path")), ScalarField(TEXT("triangle_count")),
+				ScalarField(TEXT("section_info_material_index")), ScalarField(TEXT("original_section_info_material_index"))}, true);
 		}
 		FField AssetRelationsField()
 		{
@@ -116,6 +125,33 @@ namespace UE::UAI::BindingGateway::Query
 			FQueryPublicFieldProjection Field{TEXT("observation_json"), TEXT("observation"), true};
 			Field.bStructuredValue = true;
 			return Field;
+		}
+
+		FQueryPublicFieldProjection SceneAnalysisField()
+		{
+			FQueryPublicFieldProjection Field = ScalarField(TEXT("analysis"), true);
+			Field.bStructuredValue = true;
+			return Field;
+		}
+
+		TArray<FQueryPublicFieldProjection> RigBakeContextFields()
+		{
+			const auto Rate = [](const TCHAR* Name) {
+				return ObjectField(Name, {ScalarField(TEXT("numerator"), true), ScalarField(TEXT("denominator"), true)}, true);
+			};
+			const auto Input = [&](const TCHAR* Name, const bool bAnimation) {
+				TArray<FField> Fields = {ScalarField(TEXT("binding_ref"), true), ScalarField(TEXT("rig_ref"), true),
+					ObjectField(TEXT("authored_range"), {ScalarField(TEXT("clock_id"), true),
+						ScalarField(TEXT("lower_tick"), true), ScalarField(TEXT("upper_tick"), true),
+						Rate(TEXT("rate")), ScalarField(TEXT("state"), true)}, true), Rate(TEXT("sample_rate")),
+					ObjectField(TEXT("expected_revision"), {ScalarField(TEXT("source_id"), true),
+						ScalarField(TEXT("generation"), true), ScalarField(TEXT("sequence"), true)}, true)};
+				Fields.Add(ScalarField(bAnimation ? TEXT("source_sequence_ref") : TEXT("target_sequence_ref"), true));
+				if (bAnimation) Fields.Add(ScalarField(TEXT("target_animation_ref"), true));
+				return ObjectField(Name, MoveTemp(Fields), !bAnimation);
+			};
+			return {ScalarField(TEXT("sequence_ref"), true), ScalarField(TEXT("binding_name"), true),
+				Input(TEXT("controls_input"), false), Input(TEXT("animation_input"), true)};
 		}
 
 		TArray<FQueryPublicFieldProjection> TimelineSequenceFields()
@@ -196,6 +232,14 @@ namespace UE::UAI::BindingGateway::Query
 		}
 
 		const TArray<FQueryPublicProjectionDescriptor> Descriptors = {
+			{
+				TEXT("rig_bake_context"), EUeAgentQueryPublicProjectionStrategy::SingleRecord, TEXT("record"),
+				{{TEXT("bake_context"), TEXT("bake_context"), true,
+					EUeAgentQueryPublicIdentityField::ObjectRole, RigBakeContextFields(), false}},
+				{{TEXT("bake_context"), TEXT("object"), true, TEXT("Ready inputs for the existing Control Rig bake operations.")}},
+				TEXT("Use the public SDK result.rig_bake_context handle to bake_controls or bake_animation; refresh the context after editing or restarting Editor."),
+				false, {}, FString(), {}, FString(), {TEXT("rig.control.bake.context")},
+			},
 			{
 				TEXT("graph_view_state"),
 				EUeAgentQueryPublicProjectionStrategy::SingleRecord,
@@ -538,9 +582,9 @@ namespace UE::UAI::BindingGateway::Query
 					AssetSampleField(),
 				},
 				{
-					{TEXT("samples"), TEXT("array"), true, TEXT("Normalized bounds or vertex observations with units carried by field names.")},
+					{TEXT("samples"), TEXT("array"), true, TEXT("Normalized mesh bounds, vertex or LOD 0 section observations.")},
 				},
-				TEXT("Bounds return origin_cm, extent_cm and sphere_radius_cm; vertex returns index and position_cm. The target, request controls, snapshot identity and conversion envelope are not repeated."),
+				TEXT("Bounds return origin_cm, extent_cm and sphere_radius_cm; vertex returns index and position_cm. Section defaults to index 0 and returns LOD 0 render material assignment, slot/section counts, triangle count and current/original section-map indices; an invalid material index remains observable. The target and request envelope are not repeated."),
 				true,
 			},
 			{
@@ -800,11 +844,26 @@ namespace UE::UAI::BindingGateway::Query
 				TEXT("record"),
 				{
 					{TEXT("blocked_segments"), TEXT("blocked_segments"), true},
+					NullableField(ObjectField(TEXT("first_blocking_hit"), {
+						ScalarField(TEXT("segment_index"), true),
+						NullableField(ScalarField(TEXT("target_ref"), true)),
+						SpatialField(TEXT("shape_location"), TEXT("shape_location"), true),
+						SpatialField(TEXT("impact_point"), TEXT("impact_point"), true),
+						ScalarField(TEXT("start_penetrating"), true)})),
 				},
 				{
 					{TEXT("blocked_segments"), TEXT("integer"), true, TEXT("Number of input path segments blocked by the capsule sweep.")},
+					{TEXT("first_blocking_hit"), TEXT("object"), false, TEXT("Only when include_first_hit is true: first blocking segment_index (zero-based), native component target_ref (or null), shape_location, impact_point and start_penetrating; null when no segment is blocked."), true},
 				},
-				TEXT("Use blocked_segments as the complete obstruction summary; path points, request controls and internal sweep state are not repeated."),
+				TEXT("Use blocked_segments by default. Request include_first_hit when locating the first obstruction; segment and substep order are preserved without another sweep. Positions are ue.world centimeters; initial penetration is not a precise contact surface. trace_complex selects the native query representation, not runtime traversability. Request geometry and controls are not repeated."),
+			},
+			{
+				TEXT("world_scene_analysis"),
+				EUeAgentQueryPublicProjectionStrategy::SingleRecord,
+				TEXT("record"),
+				{SceneAnalysisField()},
+				{{TEXT("analysis"), TEXT("object"), true, TEXT("Versioned scene context or geometry facts with explicit pagination and coverage.")}},
+				TEXT("Geometry facts do not decide design validity or prove rendered Z-fighting. Reuse analysis_ref for pages or the other analysis. Unsupported, pending and stale are never clear."),
 			},
 			{
 				TEXT("world_nearby_shapes"),
@@ -931,6 +990,13 @@ namespace UE::UAI::BindingGateway::Query
 				TEXT("levels"),
 				{
 					{TEXT("package_name"), TEXT("package_name"), true},
+					{TEXT("loaded"), TEXT("loaded"), true},
+					{TEXT("visible"), TEXT("visible"), true},
+					{TEXT("editor_visible"), TEXT("editor_visible"), true},
+					{TEXT("should_be_loaded"), TEXT("should_be_loaded"), true},
+					{TEXT("should_be_visible"), TEXT("should_be_visible"), true},
+					{TEXT("initially_loaded"), TEXT("initially_loaded"), false},
+					{TEXT("initially_visible"), TEXT("initially_visible"), false},
 				},
 				{
 					{TEXT("levels"), TEXT("array"), true, TEXT("Streaming Level objects and package names, optionally filtered by exact package.")},
@@ -949,18 +1015,23 @@ namespace UE::UAI::BindingGateway::Query
 					{TEXT("streaming_enabled"), TEXT("streaming_enabled"), true},
 					{TEXT("user_loaded_region_count"), TEXT("loaded_region_count"), true},
 					ArrayField(TEXT("loaded_regions"), {SpatialField(TEXT("center"), TEXT("center"), true), SpatialField(TEXT("extent"), TEXT("extent"), true)}),
+					ArrayField(TEXT("actor_descriptors"), {ScalarField(TEXT("object_path"), true),
+						ScalarField(TEXT("package"), true), ScalarField(TEXT("label"), true), ScalarField(TEXT("native_class"), true),
+						ScalarField(TEXT("loaded"), true), ScalarField(TEXT("spatially_loaded"), true), ScalarField(TEXT("runtime_grid"), true),
+						ScalarField(TEXT("hlod_layer"), true), ArrayField(TEXT("data_layers"), {}, true)}),
 				},
 				{
 					{TEXT("enabled"), TEXT("boolean"), true, TEXT("Whether the current world has World Partition.")},
 					{TEXT("streaming_enabled"), TEXT("boolean"), true, TEXT("Whether World Partition streaming is enabled in the Editor.")},
 					{TEXT("loaded_region_count"), TEXT("integer"), true, TEXT("Number of user-loaded Editor regions.")},
 					{TEXT("loaded_regions"), TEXT("array"), false, TEXT("Region center and extent in ue.world centimeters only when explicitly requested.")},
+					{TEXT("actor_descriptors"), TEXT("array"), false, TEXT("Opt-in native WP descriptors, including external package and current loaded state; reading does not load Actors.")},
 				},
 				TEXT("Use enabled and streaming_enabled first. Request loaded_regions only when geometry is necessary; world identity, Editor name and internal spatial envelopes are not public."),
 				false,
 				{},
 				FString(),
-				{TEXT("loaded_regions")},
+				{TEXT("loaded_regions"), TEXT("actor_descriptors")},
 			},
 			{
 				TEXT("world_partition_health"),

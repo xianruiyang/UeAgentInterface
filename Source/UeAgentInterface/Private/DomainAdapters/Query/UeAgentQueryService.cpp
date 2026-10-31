@@ -51,6 +51,8 @@ namespace UE::UAI::DomainAdapters::Query
 	namespace
 	{
 		const TArray<FQueryRoute> Routes = {
+			{TEXT("world.scene_context"), TEXT("world.scene_context"), TEXT("world_scene_analysis"), false, false, FString(), TEXT("world_scene_analysis")},
+			{TEXT("world.geometry_overlap"), TEXT("world.geometry_overlap"), TEXT("world_scene_analysis"), false, false, FString(), TEXT("world_scene_analysis")},
 			{TEXT("asset.owned_candidates"), TEXT("asset.owned_candidates"), TEXT("asset_owned_candidates"), true, false, FString(), TEXT("owned_candidate_names")},
 			{TEXT("asset.collection"), TEXT("asset.collection"), TEXT("asset_collection"), true, false, FString(), TEXT("asset_collection")},
 			{TEXT("asset.properties"), TEXT("asset.properties"), TEXT("asset_properties"), true, false, FString(), TEXT("asset_properties")},

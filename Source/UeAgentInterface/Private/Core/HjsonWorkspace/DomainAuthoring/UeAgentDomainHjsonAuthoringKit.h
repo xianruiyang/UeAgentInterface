@@ -307,5 +307,7 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		const TSharedPtr<const FJsonObject>& Candidate,
 		const FString& JsonPointer,
 		FDomainHjsonCandidateSelector& OutSelector,
-		FWorkspaceError& OutError);
+		FWorkspaceError& OutError,
+		const FString& NameField = TEXT("name"),
+		const FString& SelectField = TEXT("select"));
 }

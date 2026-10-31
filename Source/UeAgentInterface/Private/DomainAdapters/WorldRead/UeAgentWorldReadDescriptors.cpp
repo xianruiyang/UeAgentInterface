@@ -111,6 +111,14 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			TArray<FUeAgentOperationDescriptor>& Descriptors,
 			UE::UAI::Contract::FDiagnostic& OutError)
 		{
+			AddWithError(Descriptors, TEXT("uai.query.world.scene_context"),
+				TEXT("world.scene_context.read"), TEXT("world.read.scene_context"),
+				EUeAgentQueryKind::State, Authoring(), WorldFacet(),
+				TEXT(R"json({"type":"object","properties":{"workspace_root":{"type":"string"},"analysis_ref":{"type":"string"},"targets":{"type":"array","items":{"type":"string"}},"regions":{"type":"array","items":{"type":"object","properties":{"min_cm":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"max_cm":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["min_cm","max_cm"],"additionalProperties":false}},"margin_cm":{"type":"number","minimum":0},"near_distance_cm":{"type":"number","minimum":0,"maximum":10},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":200},"object_ref":{"type":"string"}},"additionalProperties":false})json"), OutError);
+			AddWithError(Descriptors, TEXT("uai.query.world.geometry_overlap"),
+				TEXT("world.geometry_overlap.read"), TEXT("world.read.geometry_overlap"),
+				EUeAgentQueryKind::State, Authoring(), WorldFacet(),
+				TEXT(R"json({"type":"object","properties":{"workspace_root":{"type":"string"},"analysis_ref":{"type":"string"},"targets":{"type":"array","items":{"type":"string"}},"regions":{"type":"array","items":{"type":"object","properties":{"min_cm":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"max_cm":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["min_cm","max_cm"],"additionalProperties":false}},"margin_cm":{"type":"number","minimum":0},"near_distance_cm":{"type":"number","minimum":0,"maximum":10},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":200},"object_ref":{"type":"string"}},"additionalProperties":false})json"), OutError);
 			AddWithError(
 				Descriptors,
 				TEXT("uai.query.world.summary"),
@@ -215,7 +223,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				EUeAgentQueryKind::RuntimeProbe,
 				AuthoringAndRuntime(),
 				WorldFacet(),
-				TEXT(R"json({"type":"object","properties":{"points":{"type":"array","items":{"type":"object","properties":{"frame_id":{"type":"string","const":"ue.world"},"unit":{"type":"string","const":"centimeter"},"components":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["frame_id","unit","components"],"additionalProperties":false},"minItems":2},"radius_cm":{"type":"number","exclusiveMinimum":0},"half_height_cm":{"type":"number","exclusiveMinimum":0},"step_cm":{"type":"number","exclusiveMinimum":0},"trace_channel":{"type":"string","minLength":1}},"required":["points","radius_cm","half_height_cm","step_cm"],"additionalProperties":false})json"),
+				TEXT(R"json({"type":"object","properties":{"points":{"type":"array","items":{"type":"object","properties":{"frame_id":{"type":"string","const":"ue.world"},"unit":{"type":"string","const":"centimeter"},"components":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["frame_id","unit","components"],"additionalProperties":false},"minItems":2},"radius_cm":{"type":"number","exclusiveMinimum":0},"half_height_cm":{"type":"number","exclusiveMinimum":0},"step_cm":{"type":"number","exclusiveMinimum":0},"trace_channel":{"type":"string","minLength":1},"include_first_hit":{"type":"boolean"},"trace_complex":{"type":"boolean"}},"required":["points","radius_cm","half_height_cm","step_cm"],"additionalProperties":false})json"),
 				OutError);
 			AddWithError(
 				Descriptors,
@@ -327,7 +335,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				EUeAgentQueryKind::State,
 				AuthoringAndRuntime(),
 				WorldFacet(),
-				TEXT(R"json({"type":"object","properties":{"include_loaded_regions":{"type":"boolean"}},"additionalProperties":false})json"),
+				TEXT(R"json({"type":"object","properties":{"include_loaded_regions":{"type":"boolean"},"include_actor_descriptors":{"type":"boolean"}},"additionalProperties":false})json"),
 				OutError);
 			AddWithError(
 				Descriptors,

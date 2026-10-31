@@ -454,6 +454,25 @@ namespace
 		return false;
 	}
 
+	struct FCanonicalFragmentProof
+	{
+		TSharedPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalValue> Value;
+		FString Text;
+		int32 Level = 0;
+		int32 InlineCount = 0;
+		int32 InlineLength = 0;
+		int32 InlineDepth = 0;
+		FUeAgentStructuredResourceUsage AnalysisCharges;
+		FUeAgentStructuredResourceUsage RenderCharges;
+	};
+	struct FCanonicalFragmentCache
+	{
+		FUeAgentStructuredHjsonWriteOptions::FStableLeafProjection Projection = nullptr;
+		TMap<FString, TArray<FString>> KeyOrder;
+		TMap<FString, TSharedPtr<const FCanonicalFragmentProof>> Fragments;
+	};
+	static thread_local TSharedPtr<const FCanonicalFragmentCache> PreviousCanonicalFragments;
+
 	class FHjsonWriter
 	{
 	public:
@@ -484,6 +503,7 @@ namespace
 				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_root_not_object"), TEXT("The HJSON root must be an object."), TEXT("hjson_write"));
 				return false;
 			}
+			BeginFragmentReuse(Object, true);
 			if (!AnalyzeRootObject(Object))
 			{
 				OutText.Reset();
@@ -516,14 +536,12 @@ namespace
 			}
 			TArray<FWriteTask> Tasks;
 			Tasks.Add(FWriteTask::ObjectBody(Object, 0, TEXT("/")));
-			if (!PreflightRender(Tasks))
+			if (!RenderChecked(Tasks, OutText))
 			{
 				OutText.Reset();
 				OutError = Error;
 				return false;
 			}
-			Tasks.Add(FWriteTask::ObjectBody(Object, 0, TEXT("/")));
-			OutText = Render(Tasks);
 			if (Error.IsEmpty())
 			{
 				ResourceTracker.Checkpoint(TEXT("/"), Error);
@@ -534,6 +552,7 @@ namespace
 				OutText.Reset();
 				return false;
 			}
+			CommitFragments();
 			return true;
 		}
 
@@ -543,6 +562,7 @@ namespace
 			UE::UAI::Contract::FDiagnostic& OutError) const
 		{
 			Error.Reset();
+			BeginFragmentReuse(Value, false);
 			if (!AnalyzeRootValue(Value))
 			{
 				OutText.Reset();
@@ -551,14 +571,12 @@ namespace
 			}
 			TArray<FWriteTask> Tasks;
 			Tasks.Add(FWriteTask::ValueTask(Value, 0, FString(), TEXT("/")));
-			if (!PreflightRender(Tasks))
+			if (!RenderChecked(Tasks, OutText))
 			{
 				OutText.Reset();
 				OutError = Error;
 				return false;
 			}
-			Tasks.Add(FWriteTask::ValueTask(Value, 0, FString(), TEXT("/")));
-			OutText = Render(Tasks);
 			if (Error.IsEmpty())
 			{
 				ResourceTracker.Checkpoint(TEXT("/"), Error);
@@ -569,15 +587,96 @@ namespace
 				OutText.Reset();
 				return false;
 			}
+			CommitFragments();
 			return true;
 		}
 
 	private:
+		struct FPendingFragment
+		{
+			TSharedPtr<FCanonicalFragmentProof> Proof;
+			FUeAgentStructuredResourceUsage AnalysisBefore;
+			FUeAgentStructuredResourceUsage RenderBefore;
+			int32 OutputStart = 0;
+		};
+
+		static bool UsageDelta(const FUeAgentStructuredResourceUsage& Before,
+			const FUeAgentStructuredResourceUsage& After, FUeAgentStructuredResourceUsage& Delta)
+		{
+			const auto Copy = [](int64 A, int64 B, int64& Out) {
+				if (B == MAX_int64 || B < A) return false;
+				Out = B - A; return true;
+			};
+			return Copy(Before.InputBytes, After.InputBytes, Delta.InputBytes)
+				&& Copy(Before.Nodes, After.Nodes, Delta.Nodes)
+				&& Copy(Before.Items, After.Items, Delta.Items)
+				&& Copy(Before.WorkUnits, After.WorkUnits, Delta.WorkUnits)
+				&& Copy(Before.OutputChars, After.OutputChars, Delta.OutputChars)
+				&& Copy(Before.EstimatedMemoryBytes, After.EstimatedMemoryBytes, Delta.EstimatedMemoryBytes);
+		}
+
+		bool ReplayUsage(const FUeAgentStructuredResourceUsage& Usage, const FString& Pointer) const
+		{
+			return ResourceTracker.ChargeInputBytes(Usage.InputBytes, Pointer, Error)
+				&& ResourceTracker.ChargeNodes(Usage.Nodes, Pointer, Error)
+				&& ResourceTracker.ChargeItems(Usage.Items, Pointer, Error)
+				&& ResourceTracker.ChargeWorkUnits(Usage.WorkUnits, Pointer, Error)
+				&& ResourceTracker.ChargeOutputChars(Usage.OutputChars, Pointer, Error)
+				&& ResourceTracker.ChargeEstimatedMemoryBytes(Usage.EstimatedMemoryBytes, Pointer, Error)
+				&& ResourceTracker.Checkpoint(Pointer, Error);
+		}
+
+		void BeginFragmentReuse(const FWriterNodeView& Root, bool bRootObject) const
+		{
+			if (!Root.Canonical || Root.Type != EJson::Object || (Options && Options->CanonicalLeafProjection)) return;
+			CandidateLevel = bRootObject ? 1 : 2;
+			for (const auto& Field : Root.Canonical->GetObjectItems())
+			{
+				if (Field.Value->GetKind() != UE::UAI::StateSemantic::EUeAgentValueKind::Array) continue;
+				const auto& Items = Field.Value->GetArrayItems();
+				// A direct array of objects is always block-form in this writer.
+				// Its parent root consequently cannot become inline either.
+				if (Items.Num() < 32 || Items.Num() + FragmentCandidates.Num() > 200000) continue;
+				bool bObjects = true;
+				for (const auto& Item : Items)
+					if (Item->GetKind() != UE::UAI::StateSemantic::EUeAgentValueKind::Object) { bObjects = false; break; }
+				if (!bObjects) continue;
+				const FString Parent = AppendJsonPointer(TEXT("/"), Field.Key);
+				for (int32 Index = 0; Index < Items.Num(); ++Index)
+					FragmentCandidates.Add(AppendJsonPointer(Parent, FString::FromInt(Index)), Items[Index]);
+			}
+			if (FragmentCandidates.IsEmpty()) return;
+			NextFragments = MakeShared<FCanonicalFragmentCache>();
+			NextFragments->Projection = Options ? Options->StableCanonicalLeafProjection : nullptr;
+			if (Options) NextFragments->KeyOrder = Options->PreferredKeyOrderByJsonPointer;
+			if (PreviousCanonicalFragments && PreviousCanonicalFragments->Projection == NextFragments->Projection
+				&& PreviousCanonicalFragments->KeyOrder.OrderIndependentCompareEqual(NextFragments->KeyOrder))
+				PriorFragments = PreviousCanonicalFragments;
+		}
+
+		void KeepFragment(const FString& Pointer, const TSharedPtr<const FCanonicalFragmentProof>& Proof) const
+		{
+			if (NextFragments && CachedFragmentChars + Proof->Text.Len() <= 256LL * 1024 * 1024)
+			{
+				CachedFragmentChars += Proof->Text.Len();
+				NextFragments->Fragments.Add(Pointer, Proof);
+			}
+		}
+
+		void CommitFragments() const
+		{
+			if (!NextFragments) return;
+			UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=hjson_fragment_format candidates=%d reused=%d retained=%d"),
+				FragmentCandidates.Num(), ReusedFragmentCount, NextFragments->Fragments.Num());
+			PreviousCanonicalFragments = MoveTemp(NextFragments);
+		}
+
 		enum class EWriteTaskType : uint8
 		{
 			Text,
 			Value,
 			ObjectBody,
+			FragmentExit,
 		};
 
 		struct FWriteTask
@@ -644,6 +743,7 @@ namespace
 			ObjectExit,
 			ArrayEnter,
 			ArrayExit,
+			FragmentExit,
 		};
 
 		struct FAnalysisTask
@@ -816,6 +916,48 @@ namespace
 			while (Stack.Num() > 0 && Error.IsEmpty())
 			{
 				FAnalysisTask Task = Stack.Pop(EAllowShrinking::No);
+				if (Task.Type == EAnalysisTaskType::FragmentExit)
+				{
+					auto* Pending = PendingFragments.Find(Task.JsonPointer);
+					const auto* Count = ObjectInlineCountCache.Find(Task.Value.Get());
+					const auto* Length = ObjectInlineLengthCache.Find(Task.Value.Get());
+					const auto* Depth = ObjectInlineDepthCache.Find(Task.Value.Get());
+					if (Pending && Count && Length && Depth
+						&& UsageDelta(Pending->AnalysisBefore, ResourceTracker.GetUsage(), Pending->Proof->AnalysisCharges))
+					{
+						Pending->Proof->InlineCount = *Count;
+						Pending->Proof->InlineLength = *Length;
+						Pending->Proof->InlineDepth = *Depth;
+					}
+					else PendingFragments.Remove(Task.JsonPointer);
+					continue;
+				}
+				if (Task.Type == EAnalysisTaskType::ValueEnter)
+				{
+					if (const auto* Candidate = FragmentCandidates.Find(Task.JsonPointer);
+						Candidate && Candidate->Get() == Task.Value.Canonical)
+					{
+						const auto* Prior = PriorFragments ? PriorFragments->Fragments.Find(Task.JsonPointer) : nullptr;
+						if (Prior && (*Prior)->Value.Get() == Task.Value.Canonical && (*Prior)->Level == CandidateLevel)
+						{
+							if (!ReplayUsage((*Prior)->AnalysisCharges, Task.JsonPointer)) return false;
+							ObjectInlineCountCache.Add(Task.Value.Get(), (*Prior)->InlineCount);
+							ObjectInlineLengthCache.Add(Task.Value.Get(), (*Prior)->InlineLength);
+							ObjectInlineDepthCache.Add(Task.Value.Get(), (*Prior)->InlineDepth);
+							AnalyzedFragments.Add(Task.JsonPointer, *Prior);
+							continue;
+						}
+						FPendingFragment Pending;
+						Pending.Proof = MakeShared<FCanonicalFragmentProof>();
+						Pending.Proof->Value = *Candidate;
+						Pending.Proof->Level = CandidateLevel;
+						Pending.AnalysisBefore = ResourceTracker.GetUsage();
+						PendingFragments.Add(Task.JsonPointer, MoveTemp(Pending));
+						FAnalysisTask Exit = Task;
+						Exit.Type = EAnalysisTaskType::FragmentExit;
+						Stack.Add(MoveTemp(Exit));
+					}
+				}
 				switch (Task.Type)
 				{
 				case EAnalysisTaskType::ValueEnter:
@@ -842,6 +984,8 @@ namespace
 				case EAnalysisTaskType::ArrayExit:
 					AnalyzeArrayExit(Task.Value, Task.JsonPointer);
 					break;
+				case EAnalysisTaskType::FragmentExit:
+					break; // Consumed before dispatch.
 				}
 			}
 			return Error.IsEmpty()
@@ -860,15 +1004,20 @@ namespace
 			const FWriterNodeView& Input,
 			const FString& JsonPointer) const
 		{
-			if (Input.Canonical && Options && Options->CanonicalLeafProjection && !LeafProjections.Contains(Input.Canonical))
+			if (Input.Canonical && Options && (Options->CanonicalLeafProjection || Options->StableCanonicalLeafProjection)
+				&& !LeafProjections.Contains(Input.Canonical))
 			{
 				TSharedPtr<FJsonValue> Projected;
 				UE::UAI::Contract::FDiagnostic ProjectionError;
-				if (!Options->CanonicalLeafProjection(*Input.Canonical, [&](int64 Bytes) {
+				const auto ChargeProjection = [&](int64 Bytes) {
 					return ResourceTracker.ChargeEstimatedMemoryBytes(Bytes, JsonPointer, Error)
 						&& ResourceTracker.ChargeWorkUnits(1, JsonPointer, Error)
 						&& ResourceTracker.Checkpoint(JsonPointer, Error);
-				}, Projected, ProjectionError))
+				};
+				const bool bProjected = Options->CanonicalLeafProjection
+					? Options->CanonicalLeafProjection(*Input.Canonical, ChargeProjection, Projected, ProjectionError)
+					: Options->StableCanonicalLeafProjection(*Input.Canonical, ChargeProjection, Projected, ProjectionError);
+				if (!bProjected)
 				{
 					if (Error.IsEmpty())
 					{
@@ -1397,11 +1546,69 @@ namespace
 			return InlineObjectFieldLimit + 1;
 		}
 
-		bool PreflightRender(TArray<FWriteTask>& Stack) const
+		bool RenderChecked(TArray<FWriteTask>& Stack, FString& Out) const
 		{
+			// AnalyzeRootValue has already validated the complete tree. Keep every
+			// render check and resource charge, then consume each charged text token
+			// directly instead of discarding it and formatting the tree a second time.
+			// Callers clear the private partial result on any failure.
+			Out.Reset();
+			int32 TasksUntilCheckpoint = 1024;
 			while (Stack.Num() > 0 && Error.IsEmpty())
 			{
 				FWriteTask Task = Stack.Pop(EAllowShrinking::No);
+				if (Task.Type == EWriteTaskType::FragmentExit)
+				{
+					if (auto* Pending = PendingFragments.Find(Task.JsonPointer))
+					{
+						if (UsageDelta(Pending->RenderBefore, ResourceTracker.GetUsage(), Pending->Proof->RenderCharges))
+						{
+							Pending->Proof->Text = Out.Mid(Pending->OutputStart);
+							KeepFragment(Task.JsonPointer, Pending->Proof);
+						}
+						PendingFragments.Remove(Task.JsonPointer);
+					}
+					continue;
+				}
+				if (Task.Type == EWriteTaskType::Value)
+				{
+					if (const auto* Prior = AnalyzedFragments.Find(Task.JsonPointer))
+					{
+						if ((*Prior)->Value.Get() == Task.Value.Canonical && (*Prior)->Level == Task.Level
+							&& Task.FieldName.IsEmpty() && !Task.bInlineContext)
+						{
+							if (!ReplayUsage((*Prior)->RenderCharges, Task.JsonPointer)) return false;
+							Out += (*Prior)->Text;
+							KeepFragment(Task.JsonPointer, *Prior);
+							++ReusedFragmentCount;
+							continue;
+						}
+						// A future writer layout change may invalidate the predicted
+						// context. Rebuild that subtree's summaries before normal render.
+						FragmentCandidates.Remove(Task.JsonPointer);
+						AnalyzedFragments.Remove(Task.JsonPointer);
+						TArray<FAnalysisTask> Analysis;
+						Analysis.Add(FAnalysisTask::ValueEnter(Task.Value, Task.JsonPointer));
+						if (!AnalyzeTasks(Analysis)) return false;
+					}
+					if (auto* Pending = PendingFragments.Find(Task.JsonPointer))
+					{
+						if (Pending->Proof->Level == Task.Level && Task.FieldName.IsEmpty() && !Task.bInlineContext)
+						{
+							Pending->RenderBefore = ResourceTracker.GetUsage();
+							Pending->OutputStart = Out.Len();
+							FWriteTask Exit = Task;
+							Exit.Type = EWriteTaskType::FragmentExit;
+							Stack.Add(MoveTemp(Exit));
+						}
+						else PendingFragments.Remove(Task.JsonPointer);
+					}
+				}
+				if (--TasksUntilCheckpoint == 0)
+				{
+					TasksUntilCheckpoint = 1024;
+					if (!ResourceTracker.Checkpoint(Task.JsonPointer, Error)) break;
+				}
 				if (Task.Type == EWriteTaskType::Text)
 				{
 					if (!Task.bTextResourcesPrecharged
@@ -1422,57 +1629,6 @@ namespace
 				switch (Task.Type)
 				{
 				case EWriteTaskType::Text:
-					break;
-				case EWriteTaskType::ObjectBody:
-					PushObjectBody(
-						Stack,
-						Task.Object,
-						Task.Level,
-						Task.JsonPointer,
-						true);
-					break;
-				case EWriteTaskType::Value:
-					PushValue(
-						Stack,
-						Task.Value,
-						Task.Level,
-						Task.FieldName,
-						Task.JsonPointer,
-						Task.bInlineContext,
-						true);
-					break;
-				}
-			}
-			return Error.IsEmpty()
-				&& ResourceTracker.Checkpoint(TEXT("/"), Error);
-		}
-
-		FString Render(TArray<FWriteTask>& Stack) const
-		{
-			FString Out;
-			const int64 ExpectedOutputChars =
-				ResourceTracker.GetUsage().OutputChars;
-			if (ExpectedOutputChars > 0 && ExpectedOutputChars <= MAX_int32)
-			{
-				Out.Reserve(static_cast<int32>(ExpectedOutputChars));
-			}
-			int32 TasksUntilCheckpoint = 1024;
-			while (Stack.Num() > 0 && Error.IsEmpty())
-			{
-				FWriteTask Task = Stack.Pop(EAllowShrinking::No);
-				if (--TasksUntilCheckpoint == 0)
-				{
-					TasksUntilCheckpoint = 1024;
-					if (!ResourceTracker.Checkpoint(
-							Task.JsonPointer,
-							Error))
-					{
-						break;
-					}
-				}
-				switch (Task.Type)
-				{
-				case EWriteTaskType::Text:
 					Out += Task.Text;
 					break;
 				case EWriteTaskType::ObjectBody:
@@ -1481,7 +1637,7 @@ namespace
 						Task.Object,
 						Task.Level,
 						Task.JsonPointer,
-						false);
+						true);
 					break;
 				case EWriteTaskType::Value:
 					PushValue(
@@ -1491,11 +1647,14 @@ namespace
 						Task.FieldName,
 						Task.JsonPointer,
 						Task.bInlineContext,
-						false);
+						true);
 					break;
+				case EWriteTaskType::FragmentExit:
+					break; // Consumed before dispatch.
 				}
 			}
-			return Out;
+			return Error.IsEmpty()
+				&& ResourceTracker.Checkpoint(TEXT("/"), Error);
 		}
 
 		void PushValue(
@@ -1897,6 +2056,14 @@ namespace
 		mutable TSet<const void*> VisitingArrays;
 		mutable UE::UAI::Contract::FDiagnostic Error;
 		mutable TMap<const FWriterNodeView::FCanonical*, TSharedPtr<FJsonValue>> LeafProjections;
+		mutable TMap<FString, TSharedPtr<const FWriterNodeView::FCanonical>> FragmentCandidates;
+		mutable TSharedPtr<const FCanonicalFragmentCache> PriorFragments;
+		mutable TSharedPtr<FCanonicalFragmentCache> NextFragments;
+		mutable TMap<FString, FPendingFragment> PendingFragments;
+		mutable TMap<FString, TSharedPtr<const FCanonicalFragmentProof>> AnalyzedFragments;
+		mutable int32 CandidateLevel = 0;
+		mutable int32 ReusedFragmentCount = 0;
+		mutable int64 CachedFragmentChars = 0;
 	};
 
 }

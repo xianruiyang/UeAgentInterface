@@ -4,6 +4,7 @@
 #include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "AssetRegistry/AssetData.h"
+#include "AssetCompilingManager.h"
 #include "Core/OriginResolve/UeAgentOriginResolveTypes.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
@@ -17,11 +18,13 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "MeshDescription.h"
+#include "Materials/MaterialInterface.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/ScopeExit.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshResources.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
@@ -1481,9 +1484,47 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					Entries,
 					OutError);
 			}
+			if (SampleKind == TEXT("section"))
+			{
+				auto* StaticMesh = Cast<UStaticMesh>(Asset);
+				if (!StaticMesh)
+					return Fail(OutError, ReadFailure(TEXT("asset_project_read_sample_target_unsupported"),
+						TEXT("Section sampling requires a static mesh asset."), TEXT("/asset/type"),
+						MakeShared<FJsonValueString>(Asset->GetClass()->GetPathName()),
+						MakeShared<FJsonValueString>(TEXT("StaticMesh")), Asset->GetPathName()));
+				TArray<UObject*> Objects{StaticMesh};
+				FAssetCompilingManager::Get().FinishCompilationForObjects(Objects);
+				const auto* RenderData = StaticMesh->GetRenderData();
+				if (!RenderData || RenderData->LODResources.Num() == 0)
+					return Fail(OutError, ReadCondition(TEXT("asset_project_read_sample_target_unsupported"),
+						TEXT("The static mesh has no LOD 0 render data for section sampling."),
+						TEXT("/mesh/lods/0/render_data_available"), Asset->GetPathName()));
+				const int32 Index = Input->HasField(TEXT("index")) ? Input->GetIntegerField(TEXT("index")) : 0;
+				const auto& Sections = RenderData->LODResources[0].Sections;
+				if (!Sections.IsValidIndex(Index))
+					return Fail(OutError, ReadFailure(TEXT("asset_project_read_sample_index_out_of_range"),
+						TEXT("The requested section index is not valid in LOD 0."), TEXT("/index"),
+						MakeShared<FJsonValueNumber>(Index), MakeShared<FJsonValueString>(TEXT("existing LOD 0 section index")), Asset->GetPathName()));
+				const auto& Section = Sections[Index];
+				const bool bValidMaterialIndex = StaticMesh->GetStaticMaterials().IsValidIndex(Section.MaterialIndex);
+				const auto* Material = bValidMaterialIndex ? StaticMesh->GetMaterial(Section.MaterialIndex) : nullptr;
+				const auto Sample = MakeShared<FJsonObject>();
+				Sample->SetStringField(TEXT("kind"), SampleKind);
+				Sample->SetNumberField(TEXT("index"), Index);
+				Sample->SetNumberField(TEXT("section_count"), Sections.Num());
+				Sample->SetNumberField(TEXT("material_slot_count"), StaticMesh->GetStaticMaterials().Num());
+				Sample->SetNumberField(TEXT("material_index"), Section.MaterialIndex);
+				Sample->SetBoolField(TEXT("material_index_valid"), bValidMaterialIndex);
+				Sample->SetStringField(TEXT("material_path"), Material ? Material->GetPathName() : FString());
+				Sample->SetNumberField(TEXT("triangle_count"), Section.NumTriangles);
+				Sample->SetNumberField(TEXT("section_info_material_index"), StaticMesh->GetSectionInfoMap().Get(0, Index).MaterialIndex);
+				Sample->SetNumberField(TEXT("original_section_info_material_index"), StaticMesh->GetOriginalSectionInfoMap().Get(0, Index).MaterialIndex);
+				return AddCanonicalObjectEntry(TEXT("asset.sample:result"), Asset->GetPathName(),
+					TEXT("sample"), TEXT("asset.sample"), Sample, Context, Entries, OutError);
+			}
 			return Fail(OutError, ReadFailure(TEXT("asset_project_read_sample_kind_unsupported"),
 				TEXT("The requested asset sample kind is not supported."), TEXT("/sample_kind"),
-				MakeShared<FJsonValueString>(SampleKind), MakeShared<FJsonValueString>(TEXT("bounds or vertex")),
+				MakeShared<FJsonValueString>(SampleKind), MakeShared<FJsonValueString>(TEXT("bounds, vertex or section")),
 				Asset->GetPathName(), TEXT("command_input")));
 		}
 

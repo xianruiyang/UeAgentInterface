@@ -1,23 +1,51 @@
 # T44 Capture/media operation authority
 
-The only current capture entries are `capture.image.execute`,
-`capture.media.execute`, and `capture.render.execute`. They are discovered with
+The general capture entries are `capture.image.execute`,
+`capture.media.execute`, and `capture.render.execute`. The folder-learning entry
+`asset.folder.preview` shares their image Operation and artifact owner. They are discovered with
 `client.query.command_search(...)` and `client.query.command_usage([...])` using
 exact command IDs; the same public command contract is used
 by `client.capture.image_execute(...)`, `client.capture.media_execute(...)`,
 `client.capture.render_execute(...)`, and `ueagentinterfacecmd exec`. Historical screenshot
 IDs are non-executable mechanics identities, not aliases or alternate routes.
 
-Every request has the same envelope:
+The three general capture requests use the same envelope:
 
 - `subject_ref` is the exact viewport, asset, actor, media source, or render
   resource identity.
-- `policy_id` chooses one catalogued behavior. It is never inferred from the
-  subject, old command name, or current Editor state.
+- `policy_id` chooses one catalogued behavior. For `capture.image.execute` only,
+  omission selects the default observation below. An explicit value always wins;
+  null, empty, whitespace and unknown values remain errors. Media/render operations
+  still require an explicit policy.
 - `parameters` carries the selected policy's documented fields.
   `output_file`, when supported, is the requested final
   artifact path; native capture first writes to operation-owned staging and the
   artifact publisher refuses to overwrite a file not owned by the same owner.
+
+Image defaults are resolved once by the Capture Media policy owner, without
+loading an asset or opening an editor to guess intent:
+
+| Subject with omitted `policy_id` | Selected policy and boundary |
+| --- | --- |
+| `capture-subject:viewport:active` | `policy:image-capture:viewport/v1`; current Level camera/display state, with the existing capture/warmup restoration contract |
+| `capture-subject:asset:<object-path>` | `policy:image-capture:asset-preview/v1`; the asset preview owner resolves the actual class/target and its applied `preview/` configuration |
+| Actor, folder or other subject | `capture_image_default_policy_unavailable`; choose an explicit policy for framing, candidate comparisons or the other observation |
+
+An asset reference is not a promise of a renderable preview. Unsupported classes
+or targets retain the native preview diagnostic; no SceneCapture or graph fallback
+is attempted. In particular a UWorld/map asset is not an instruction to open or
+switch Levels: use `viewport:active` for the currently open Level. Blueprint
+component preview requires the native components-capable editor; graph/window
+capture requires its explicit policy. A Level Sequence asset preview uses its
+native preview configuration; independent sequence-camera/time rendering still
+requires `level-sequence/v1` explicitly. Parameters incompatible with the selected
+default fail as `capture_image_default_parameters_invalid` before opening a
+preview, rather than guessing a different observation. `parameters` remains
+required, and `{}` uses that policy's existing defaults.
+
+The terminal `capture_receipt.policy_id` is always the actual selected policy;
+`policy_defaulted` distinguishes omission from explicit selection. Policy variants
+describe explicit requests and retain their constant `policy_id` requirement.
 
 For `capture.image.execute`, use
 `ueagentinterfacecmd describe capture.image.execute --parameter policy_id`
@@ -28,15 +56,106 @@ Use the policy contract below and, for native asset preview, the exported `previ
 fields. SDK invocation and operation examples live in the
 [CMD guide](../../../../UeAgentInterfaceCMD/docs/active/t44_capture_media_operation.md).
 
+## Asset folder contact sheets
+
+`asset.folder.preview(folder, options?)` creates readable PNG sheets containing
+asset names and native thumbnails. `folder` is a UE content folder such as
+`/Game/RuinedCrypt`. `options` supports:
+
+- `recursive` (default `true`).
+- `class_paths`: exact class paths such as `/Script/Engine.StaticMesh`; derived classes are included.
+- `page_size` (default `24`, positive integer): assets returned by this call. Larger pages split into sheets of at most 24 tiles; there is no fixed upper page limit.
+- `generate_missing` (default `true`): load and render only current-page assets without a valid cached thumbnail. Set `false` for cache-only inspection.
+- `after`: the preceding result's `asset_catalog.next_after`, with the same folder and filters.
+
+The registry results are sorted by exact object path. The receipt's `asset_catalog`
+contains `total_assets`, `page_start`, `returned_assets`, `available_thumbnails`, `cached_thumbnails`, `generated_thumbnails`,
+`has_more`, optional `next_after`, and `items`. Each item retains `name`,
+`object_path`, `class_path`, `thumbnail_status` (`cached`, `generated`, `missing`, `invalid`, `load_failed`, `unsupported`, or `render_failed`),
+and zero-based `sheet_index`/`tile_index`. `sheets` records image dimensions and item
+ranges. Sheet 0 declares `uses_primary_artifact=true`; other sheets declare `raw_artifact_index` into the ordered `additional_artifact_refs`, matching the existing capture sheet contract. SDK consumers use `receipt.primary_artifact` and `receipt.additional_artifacts`; `receipt.artifacts` traversal order is not page order. An empty page produces an explanatory sheet rather than inventing an asset.
+Pagination is over the current registry; imports/deletions between calls can change
+the total. Exact `object_path` values remain usable in subsequent asset calls.
+
+The native mechanics first read memory, package and external thumbnail caches without loading asset UObjects. With `generate_missing=true`, only missing current-page assets are loaded one at a time and passed to UE's native thumbnail renderer, without opening asset editors. Generated previews are reused in the native in-memory thumbnail cache; this command does not save or dirty packages. It does not flush all asset compilation or texture streaming; assets without a usable renderer retain an explicit status and identity. A thumbnail is not proof of current scene lighting or unsaved asset appearance. Names use native font rendering on an offscreen target; the world and the user's windows are untouched.
+
+The dedicated command maps to the single image policy
+`policy:image-capture:asset-folder-thumbnail/v1`, with subject
+`capture-subject:asset-folder:<folder>`. It uses the ordinary finite Operation and
+verified image artifact publisher. Finish it, inspect the native receipt, then
+materialize the images. `asset_catalog.timings` reports registry, thumbnail and
+sheet production seconds, with `generation_seconds` as a subset of thumbnail time; transport and Operation polling are outside those phases.
+
 Level viewport policies (`viewport`, `pcg-viewport`, `viewport-buffer`,
-`viewport-sequence`, and `transform-candidates`) prepare the selected viewport's
-existing native window and layout before framing or reading pixels. A minimized
-or hidden window may be restored or shown. Callers do not need a separate window
-preparation command. Preparation preserves the viewport selection and does not
-invent capture dimensions; a viewport that remains non-positive reports its
-actual size. Once the window and viewport are ready, later sequence samples do
-not repeat window activation or layout warmup. Asset-editor policies retain
-their own documented window-mutation permissions.
+`viewport-sequence`, and `transform-candidates`) draw and read the selected
+viewport's existing render target without restoring, showing, activating or
+resizing its native window. `viewport/v1` also supports an Editor launched
+minimized before its viewport has a drawable extent. It initializes that same
+selected Editor `FSceneViewport`; it does not substitute a SceneCapture or a
+different camera.
+
+For `viewport/v1`, optional `cold_start_render_size: {"width":1280,"height":720}`
+specifies render pixels, with integer dimensions from 1 to 4096. At zero native
+extent, omission uses the viewport window's single-monitor work area; unavailable
+window/display information falls back to the primary monitor, then 1280×720.
+Automatic sizing preserves that aspect ratio and caps the longest edge at 4096.
+It never uses the combined virtual-desktop width. An existing positive native extent always takes
+precedence, so this parameter is not a general viewport resize command. Only a
+zero/nonpositive native extent uses the requested/default size and its aspect
+ratio. This size is an explicit offscreen capture policy, not a measurement or
+restoration of the user's window. `max_size` remains an output downscale limit;
+`viewport.state.restore` does not restore window or render-target dimensions.
+
+Initialization temporarily fixes the existing viewport's render extent and
+releases that fixed-size constraint on success and failure. The initialized RHI
+resource remains usable while minimized; subsequent normal Slate layout can
+resize it to the displayed viewport. No window geometry or persisted layout is
+written. The native allocation can issue an initial draw. Only this cold path
+then schedules two initialization draws in distinct Editor engine frames and
+captures on a later frame, so the renderer can process the first native view
+before readback. It shares the sequence capture's ticker/cancel/cleanup owner;
+it neither recursively ticks the world nor produces an intermediate image.
+An already initialized viewport retains immediate capture. Requested single-image
+warmup draws remain additional draws, not a promise of full world simulation or
+convergence of every temporal rendering effect.
+
+`capture.viewport_initialization` reports `performed`, `extent_source`
+(`existing_viewport`, `cold_start_request`, `zero_extent_window_display_work_area`,
+`zero_extent_primary_display_work_area`, or `zero_extent_fallback_1280x720`),
+`reason=zero_native_extent` when initialized,
+`native_width_before`/`native_height_before`, `render_width`/`render_height`, and
+`fixed_size_before`/`fixed_size_restored`, `engine_frames_observed` and
+`initialization_draws`. Native capture dimensions and final
+artifact dimensions remain separate. An unavailable viewport, invalid request,
+or failed native initialization returns a diagnostic without activating the
+window. The other policies listed above retain their existing preparation
+contracts; this cold-start size parameter is specific to `viewport/v1`.
+Warmup keeps the requested number of draws. Pixel readback synchronizes the
+queued rendering; capture does not present the window or flush after each draw.
+Configured/effective realtime state is restored after the temporary capture
+override. Explicit editor opening/focus and asset-editor policies with their own
+documented window-mutation permissions remain separate operations.
+
+For ordinary scene, in-scene material and lighting evaluation, select the native
+`viewport/v1` policy (or `viewport-sequence/v1` for temporal observation). A size
+limit or native failure is not a request to substitute an independent render;
+there is no automatic SceneCapture/Level Sequence fallback. Explicit sequence
+rendering remains available for its own camera and sequence tasks.
+
+The native `capture` object records `display_state`: `game_view`,
+`exposure_override_enabled`, `fixed_ev100` when that override is enabled, and the
+actual `lighting`, `post_processing`, `eye_adaptation`, and `tonemapper` show flags
+at capture. `display_state_unchanged` compares those controls before and after
+the draw; capture observes them without setting exposure or Game View. For
+viewport sequences the existing `capture.first_frame` contains this first-frame
+observation. These fields are not a complete show-flag snapshot, resolved scene
+post-processing settings, or a measurement of adapted exposure.
+`display_gamma` and `scene_hdr_enabled` describe the native render target, not
+the OS/display color pipeline. The existing realtime, requested view-mode and
+extent restoration fields retain their separate meanings. Restoring controls
+does not roll back temporal rendering history. To investigate a mismatch with
+the user's foreground Editor, compare the same camera and display conditions;
+a backbuffer artifact alone does not verify the displayed screen pixels.
 
 ## Transform-candidate visual preview
 
@@ -79,8 +198,15 @@ restoration completes native play/pause before restoring the prior rate; an inde
 rate change made during capture is retained. Explicit user playback actions keep UE's
 native semantics.
 `capture.RenderWidth/RenderHeight` temporarily set the same native scene viewport's
-render extent. Both zero retain native sizing; one zero preserves its current aspect
-ratio. Capture restores the original extent and fixed-size flag without resizing the
+render extent. Both zero retain a positive native size; when the native extent is
+zero, capture automatically initializes the same viewport from its window's monitor
+work area (primary-monitor/1280×720 fallback and 4096-edge automatic bound as above).
+One zero infers that axis from the native or, if unavailable, selected monitor aspect;
+explicit positive dimensions retain priority. `capture.viewport_initialization`
+reports the zero-size reason, size source, original/render dimensions and fixed-size
+restoration. This is native viewport initialization, not an independent SceneCapture,
+and does not promise matching prior exposure history or foreground pixels.
+Capture restores the original extent and fixed-size flag without resizing the
 Editor window. Native GPU dimension limits still apply, so use `native_width/height`
 in the frame receipt as the actual sample size. These fields are not exported for
 Widget Designer previews; those use their native `widget` size settings.

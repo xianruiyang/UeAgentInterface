@@ -13,6 +13,36 @@ class AActor;
 namespace UeAgentBlueprintAssetLifecycle
 {
     using UE::UAI::Contract::FDiagnostic;
+	// Native node actions may open nested transactions. Keep scratch-only records
+	// out of the user's undo history, without ever cancelling an existing transaction.
+	class FScratchBlueprintPreflightTransaction
+	{
+	public:
+		FScratchBlueprintPreflightTransaction();
+		~FScratchBlueprintPreflightTransaction();
+		bool Begin(const FString& TargetPath, FDiagnostic& OutError);
+	private:
+		struct FImpl;
+		TUniquePtr<FImpl> Impl;
+	};
+
+	// Own only packages created for this authoring operation. Retire every object
+	// in those packages on every exit, including preflight failures before a state exists.
+	// Only Blueprint roots are marked garbage; native GC owns class/function/frame order.
+	class FScratchBlueprintPackages
+	{
+	public:
+		FScratchBlueprintPackages();
+		~FScratchBlueprintPackages();
+		UPackage* Create(const TCHAR* Purpose);
+		void Reset();
+	private:
+		struct FImpl;
+		TUniquePtr<FImpl> Impl;
+	};
+	// Flush retired authoring objects at a safe boundary before native PIE scans
+	// loaded Blueprints; its error list can still include garbage awaiting GC.
+	void CollectRetiredScratchBlueprints();
 	// Native component instance data survives template deletion and package reload.
 	class FComponentInstanceRollback
 	{

@@ -55,6 +55,10 @@ namespace UE::UAI::BindingGateway::Query
 		// SDK Result owns the model projection of protocol custody.
 		bool bStructuredValue = false;
 
+		// Preserve an explicitly observed null without treating a missing field
+		// as present. Opt-in leaves existing optional-field omission unchanged.
+		bool bNullable = false;
+
 		bool IsValid() const;
 		bool TryValidate(Contract::FDiagnostic& OutDiagnostic, const FString& Path = FString()) const;
 	};
@@ -65,6 +69,7 @@ namespace UE::UAI::BindingGateway::Query
 		FString WireType;
 		bool bRequired = false;
 		FString Description;
+		bool bNullable = false;
 
 		bool IsValid() const;
 		bool TryValidate(Contract::FDiagnostic& OutDiagnostic, const FString& Path = FString()) const;

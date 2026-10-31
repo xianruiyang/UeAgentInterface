@@ -17,9 +17,10 @@ is terminal only after native mechanics, persistence, independent readback,
 and cleanup are complete. The SDK and CLI contain no selection,
 Unreal mutation, rollback, retry, or cleanup business logic.
 
-Clone, asset move, and cross-level actor move execute directly when `confirm` is
-omitted; `confirm=False` requests an optional preview and `confirm=True` does not
-require a preceding matching preview for those operations.
+Active clone and asset move execute directly when `confirm` is omitted;
+`confirm=False` requests an optional preview and `confirm=True` does not require
+a preceding matching preview. The dormant cross-level Actor move handler retains
+the same confirmation behavior, but is not a normal authoring entry.
 
 Move/rename changes the asset's path, not the bindings of an already exported
 workspace. Preserve any unapplied edits, export the destination to a new
@@ -87,7 +88,13 @@ state. A recovery that cannot verify the asset/registration terminal state remai
 `world.level_streaming.remove`, `modeling.actor.mesh.replace`, and
 `modeling.asset.material_slot.remove` are dormant compatibility identities. Their
 persisted structure/removal intent belongs to the common HJSON desired-state diff
-and import transaction. They do not appear in ordinary search or named SDK methods;
+and import transaction. This assigns ownership; it is not a claim that every
+successor is implemented. On applicable partitioned-World import paths, Level
+HJSON provides Data Layer creation, initial state and membership addition. This
+is not unconditional coverage for ordinary updates to any existing Level, nor
+a complete existing-layer unload/restore workflow. Streaming relations, cross-Level Actor migration and
+their initial-state round trip remain an incomplete HJSON capability.
+The dormant identities do not appear in ordinary search or named SDK methods;
 their exact native mechanics remain available only through the central dormant
 compatibility path and ordinary exact dispatch. Destructive
 removal still follows the content-removal confirmation described above.

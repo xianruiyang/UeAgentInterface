@@ -5,6 +5,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationContract.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentAssetFolderThumbnailCapture.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
@@ -41,6 +42,9 @@ namespace UE::UAI::Composition::LongRunningSession
 				{TEXT("capture.image.execute"), TEXT("capture"), TEXT("image_execute"),
 					TEXT("uai.long_running.capture.image/v1"),
 					TEXT("long-running-session.capture.image.v1"), TEXT("start")},
+				{TEXT("asset.folder.preview"), TEXT("asset"), TEXT("folder_preview"),
+					TEXT("uai.long_running.asset.folder_preview/v1"),
+					TEXT("long-running-session.asset.folder-preview.v1"), TEXT("start")},
 				{TEXT("capture.media.execute"), TEXT("capture"), TEXT("media_execute"),
 					TEXT("uai.long_running.capture.media/v1"),
 					TEXT("long-running-session.capture.media.v1"), TEXT("start")},
@@ -108,6 +112,11 @@ namespace UE::UAI::Composition::LongRunningSession
 
 		FString StartSchema(const FProfileSpec& Spec)
 		{
+			if (FString(Spec.CommandId) == TEXT("asset.folder.preview"))
+			{
+				return FString(TEXT("{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"folder\"],\"properties\":{\"folder\":{\"type\":\"string\",\"minLength\":1},\"options\":"))
+					+ DomainAdapters::CaptureMediaLongJob::GetAssetFolderPreviewOptionsSchema() + TEXT("}}");
+			}
 			if (FString(Spec.CommandId) == TEXT("job.compile_build"))
 			{
 				return TEXT(
@@ -163,13 +172,15 @@ namespace UE::UAI::Composition::LongRunningSession
 				// The domain parser owns per-operation semantics; this schema exposes transport shapes.
 				return TEXT(R"json({"additionalProperties":false,"properties":{"parameters":{"additionalProperties":false,"properties":{"expected_pause_epoch":{"minimum":1,"type":"integer"},"expected_workspace_revision":{"minimum":1,"type":"integer"},"limits":{"additionalProperties":false,"properties":{"frame_count":{"minimum":0,"type":"integer"},"game_seconds":{"minimum":0,"type":"number"},"wall_seconds":{"minimum":0,"type":"number"}},"type":"object"},"observation_fields":{"items":{"type":"object"},"type":"array"},"steps":{"items":{"additionalProperties":false,"properties":{"action_ref":{"type":"string"},"alias":{"type":"string"},"amount":{"type":"number"},"at_seconds":{"minimum":0,"type":"number"},"camera":{"type":"string"},"delta":{},"duration":{"minimum":0,"type":"number"},"duration_ms":{"minimum":0,"type":"number"},"event":{"type":"string"},"format":{"type":"string"},"fov_degrees":{"type":"number"},"interval":{"minimum":0,"type":"number"},"key":{"type":"string"},"name":{"type":"string"},"position":{"items":{"type":"number"},"maxItems":2,"minItems":2,"type":"array"},"property":{"type":"string"},"ref":{"type":"object"},"source":{"type":"string"},"text":{"type":"string"},"transform":{"type":"object"},"type":{"enum":["wait","input_key","input_pointer","input_scroll","input_text","input_action","actor_transform","property_write","property_get","property_set","capture","capture_start","capture_stop"],"type":"string"},"value":{},"view_transform":{"type":"object"}},"required":["type"],"type":"object"},"type":"array"},"unwatch_refs":{"items":{"type":"object"},"type":"array"},"watch_refs":{"items":{"type":"object"},"type":"array"}},"required":["expected_pause_epoch","expected_workspace_revision","steps"],"type":"object"},"policy_id":{"const":"policy:runtime-scenario:bounded/v2"},"subject_ref":{"minLength":1,"type":"string"}},"required":["subject_ref","policy_id","parameters"],"type":"object"})json");
 			}
-			return TEXT(
+			return FString(TEXT(
 				"{\"additionalProperties\":false,\"properties\":{"
 				"\"parameters\":{\"type\":\"object\"},"
 				"\"policy_id\":{\"minLength\":1,\"type\":\"string\"},"
-				"\"subject_ref\":{\"minLength\":1,\"type\":\"string\"}},"
-				"\"required\":[\"subject_ref\",\"policy_id\",\"parameters\"],"
-				"\"type\":\"object\"}");
+				"\"subject_ref\":{\"minLength\":1,\"type\":\"string\"}},"))
+				+ (FString(Spec.CommandId) == TEXT("capture.image.execute")
+					? TEXT("\"required\":[\"subject_ref\",\"parameters\"],")
+					: TEXT("\"required\":[\"subject_ref\",\"policy_id\",\"parameters\"],"))
+				+ TEXT("\"type\":\"object\"}");
 		}
 
 		FString LifecycleSchema(const FProfileSpec& Spec)
@@ -328,7 +339,12 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				Parameters.Emplace(Name, Type, true, false);
 			};
-			if (CommandId == TEXT("job.compile_build")
+			if (CommandId == TEXT("asset.folder.preview"))
+			{
+				Add(TEXT("folder"), EUeAgentCommandWireType::String);
+				Parameters.Emplace(TEXT("options"), EUeAgentCommandWireType::Object, false, false);
+			}
+			else if (CommandId == TEXT("job.compile_build")
 				|| CommandId == TEXT("editor.session"))
 			{
 				Add(TEXT("family_id"), EUeAgentCommandWireType::String);
@@ -340,7 +356,8 @@ namespace UE::UAI::Composition::LongRunningSession
 				|| CommandId == TEXT("runtime.scenario.execute"))
 			{
 				Add(TEXT("subject_ref"), EUeAgentCommandWireType::String);
-				Add(TEXT("policy_id"), EUeAgentCommandWireType::String);
+				Parameters.Emplace(TEXT("policy_id"), EUeAgentCommandWireType::String,
+					CommandId != TEXT("capture.image.execute"), false);
 				Add(TEXT("parameters"), EUeAgentCommandWireType::Object);
 			}
 			else if (CommandId == TEXT("editor.safe_exit"))

@@ -1,6 +1,7 @@
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionProduction.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
+#include "DomainAdapters/EditorSessionOperation/UeAgentPieLaunchPolicy.h"
 #include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
 
 #include "Async/Async.h"
@@ -25,6 +26,7 @@
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureImageArtifactService.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaLongJobProduction.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentLevelViewportSequenceCapture.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentLevelViewportImageCapture.h"
 #include "DomainAdapters/CompileBuildJob/UeAgentCompileBuildJobProduction.h"
 #include "DomainAdapters/CompileBuildJob/UeAgentBlueprintCompilePolicy.h"
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationProduction.h"
@@ -33,6 +35,7 @@
 #include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeScenarioProduction.h"
 #include "Domains/PCG/UeAgentPcgGenerationWork.h"
 #include "Editor.h"
+#include "DataLayer/DataLayerEditorSubsystem.h"
 #include "EditorViewportClient.h"
 #include "Editor/UnrealEdEngine.h"
 #include "EditorBuildUtils.h"
@@ -87,6 +90,9 @@
 #include "WorldPartition/LoaderAdapter/LoaderAdapterShape.h"
 #include "WorldPartition/WorldPartition.h"
 #include "WorldPartition/WorldPartitionActorLoaderInterface.h"
+#include "WorldPartition/DataLayer/DataLayerAsset.h"
+#include "WorldPartition/DataLayer/DataLayerInstance.h"
+#include "WorldPartition/DataLayer/WorldDataLayers.h"
 
 namespace UE::UAI::Composition::LongRunningSession
 {
@@ -2189,6 +2195,29 @@ namespace UE::UAI::Composition::LongRunningSession
 					}
 					FString BuilderArguments;
 					if (Request.GetPolicyId()
+						== TEXT("policy:world-build:partition-convert/v1"))
+					{
+						if (!TryOnlyFields(*Request.GetParameters(), {TEXT("enable_streaming"), TEXT("report_only")}, OutError,
+							TEXT("world_partition_convert_input_invalid"))) return false;
+						bool bEnableStreaming = true;
+						bool bReportOnly = false;
+						for (const TCHAR* Field : {TEXT("enable_streaming"), TEXT("report_only")})
+						{
+							bool& Value = FString(Field) == TEXT("enable_streaming") ? bEnableStreaming : bReportOnly;
+							if (Parameters->HasField(Field) && !Parameters->TryGetBoolField(Field, Value))
+								return Fail(OutError, InputFailure(TEXT("world_partition_convert_input_invalid"),
+									TEXT("Conversion options must be booleans."), FString(TEXT("/parameters/")) + Field,
+									FindField(*Request.GetParameters(), Field), TEXT("boolean")));
+						}
+						const FString AssetRoot = WorldPackage + TEXT("_WP_Assets");
+						BuilderArguments = FString::Printf(
+							TEXT("-run=UeAgentWorldPartitionConvertCommandlet -ConversionSuffix -SCCProvider=None ")
+							TEXT("-AllowCommandletRendering -RunningFromUnrealEd -DataLayerAssetFolder=\"%s/DataLayers\" -FoliageTypePath=\"%s/Foliage\""),
+							*AssetRoot, *AssetRoot);
+						if (!bEnableStreaming) BuilderArguments += TEXT(" -DisableStreaming");
+						if (bReportOnly) BuilderArguments += TEXT(" -ReportOnly");
+					}
+					else if (Request.GetPolicyId()
 						== TEXT("policy:world-build:hlod-run/v1"))
 					{
 						FString Step(TEXT("build"));
@@ -2493,7 +2522,8 @@ namespace UE::UAI::Composition::LongRunningSession
 				FString Phase = TEXT("scheduled");
 				if (State == EEditorNativeState::Running)
 				{
-					Phase = bAssetEditorCleanupPending ? TEXT("cleanup_pending") : TEXT("active");
+					Phase = bAssetEditorCleanupPending ? TEXT("cleanup_pending")
+						: bRuntimePreviewLaunching ? TEXT("launching") : TEXT("active");
 				}
 				else if (State == EEditorNativeState::ExitedSuccess)
 				{
@@ -2723,6 +2753,39 @@ namespace UE::UAI::Composition::LongRunningSession
 					OutError.ActualValuePresent = ExplicitWorld && ExplicitWorld->GetPackage();
 					OutError.ExpectedValuePresent = true;
 					return false;
+				}
+				if (PolicyId == TEXT("policy:world-context:data-layer-editor-state/v1"))
+				{
+					if (!TryOnlyFields(*Request.GetParameters(), {TEXT("asset_path"), TEXT("loaded_in_editor"), TEXT("visible")},
+						OutError, TEXT("world_data_layer_session_input_invalid"))) return false;
+					FString AssetPath;
+					if (!Parameters->TryGetStringField(TEXT("asset_path"), AssetPath)
+						|| (!Parameters->HasField(TEXT("loaded_in_editor")) && !Parameters->HasField(TEXT("visible"))))
+						return Fail(OutError, FactFailure(TEXT("world_data_layer_session_input_invalid"),
+							TEXT("Supply an exact DataLayerAsset object path and loaded_in_editor or visible."), TEXT("/parameters"),
+							FieldNames(*Parameters), StringValues({TEXT("asset_path"), TEXT("loaded_in_editor"), TEXT("visible")})));
+					UDataLayerInstance* Layer = nullptr;
+					if (AWorldDataLayers* Layers = ExplicitWorld->GetWorldDataLayers())
+						Layers->ForEachDataLayerInstance([&](UDataLayerInstance* Candidate) {
+							if (Candidate->GetAsset() && Candidate->GetAsset()->GetPathName() == AssetPath) Layer = Candidate;
+							return Layer == nullptr;
+						});
+					if (!Layer || Layer->IsReadOnly())
+						return Fail(OutError, NativeFailure(TEXT("world_data_layer_session_layer_unavailable"),
+							TEXT("The current world must contain the editable Data Layer instance."), TEXT("/data_layer/available"), AssetPath,
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+					bool Loaded = Layer->IsLoadedInEditor(), Visible = Layer->IsVisible();
+					if ((Parameters->HasField(TEXT("loaded_in_editor")) && !Parameters->TryGetBoolField(TEXT("loaded_in_editor"), Loaded))
+						|| (Parameters->HasField(TEXT("visible")) && !Parameters->TryGetBoolField(TEXT("visible"), Visible)))
+						return Fail(OutError, FactFailure(TEXT("world_data_layer_session_input_invalid"),
+							TEXT("Editor Data Layer states must be booleans."), TEXT("/parameters"), FieldNames(*Parameters), StringValues({TEXT("boolean")})));
+					SessionDataLayer = Layer;
+					bPreviousDataLayerLoaded = Layer->IsLoadedInEditor();
+					bPreviousDataLayerVisible = Layer->IsVisible();
+					SetTemporaryDataLayerState(*Layer, Loaded, Visible);
+					OutSessionRef = TEXT("data-layer-editor-state:") + NativeResourceId;
+					bOutKeepRunning = true;
+					return true;
 				}
 								if (!ExplicitWorld->GetWorldPartition()) {
                                   OutError = NativeFailure(TEXT("world_partition_not_enabled"),
@@ -3023,6 +3086,11 @@ namespace UE::UAI::Composition::LongRunningSession
 				bool bKeepRunning = false;
 				bool bSuccess = false;
 				const auto Family = Request.GetFamily();
+				if (Family == EditorSessionOperation::EUeAgentEditorSessionOperationFamily::RuntimePreview)
+				{
+					FScopeLock Lock(&Mutex);
+					if (bStopRequested) { State = EEditorNativeState::ExitedSuccess; return; }
+				}
 				if (Family == EditorSessionOperation::
 					EUeAgentEditorSessionOperationFamily::AssetEditor)
 				{
@@ -3147,22 +3215,35 @@ namespace UE::UAI::Composition::LongRunningSession
 								bRestoreAfter ? TEXT("true") : TEXT("false"));
 						}
 					}
-					else if (GUnrealEd && !GEditor->PlayWorld)
+					else if (GUnrealEd && GEditor && !GEditor->PlayWorld && !GUnrealEd->IsPlaySessionRequestQueued())
 					{
 						FRequestPlaySessionParams Params;
 						Params.SessionDestination = EPlaySessionDestinationType::InProcess;
 						Params.WorldType = EPlaySessionWorldType::PlayInEditor;
-						GUnrealEd->RequestPlaySession(Params);
-						bSuccess = true;
-						bKeepRunning = true;
+						const TWeakPtr<FEditorNativeSession, ESPMode::ThreadSafe> WeakSelf = AsShared();
+						bSuccess = PieLaunchPolicy.RequestPlaySession(Params, [WeakSelf](bool bStarted, const UE::UAI::Contract::FDiagnostic& Error) {
+							if (const auto Self = WeakSelf.Pin())
+							{
+								FScopeLock Lock(&Self->Mutex);
+								if (Self->bStopRequested) return;
+								Self->bRuntimePreviewLaunching = false;
+								Self->StateDiagnostic = Error;
+								Self->State = bStarted ? EEditorNativeState::Running : EEditorNativeState::ExitedFailure;
+							}
+						}, LocalError);
+						if (bSuccess)
+						{
+							bRuntimePreviewLaunching = true;
+							bKeepRunning = true;
+						}
 						LocalSessionRef = Request.GetSubjectRef();
 					}
 					else
 					{
 						LocalError = NativeFailure(TEXT("runtime_preview_already_active_or_unavailable"),
-							!GUnrealEd ? TEXT("The editor is unavailable for runtime preview.") : TEXT("A play world is already active."),
-							!GUnrealEd ? TEXT("/editor/available") : TEXT("/play_world/active"), Request.GetSubjectRef(),
-							MakeShared<FJsonValueBoolean>(GUnrealEd != nullptr), MakeShared<FJsonValueBoolean>(GUnrealEd == nullptr));
+							!GUnrealEd || !GEditor ? TEXT("The editor is unavailable for runtime preview.") : TEXT("A play session is already active or queued."),
+							!GUnrealEd || !GEditor ? TEXT("/editor/available") : TEXT("/play_session/active_or_queued"), Request.GetSubjectRef(),
+							MakeShared<FJsonValueBoolean>(GUnrealEd && GEditor), MakeShared<FJsonValueBoolean>(!GUnrealEd || !GEditor));
 					}
 				}
 				else if (Family == EditorSessionOperation::
@@ -3268,8 +3349,21 @@ namespace UE::UAI::Composition::LongRunningSession
 				return bClosed;
 			}
 
+			static void SetTemporaryDataLayerState(UDataLayerInstance& Layer, bool Loaded, bool Visible)
+			{
+				// The subsystem's loaded-state setter also saves per-project user
+				// settings. A session is temporary: use native flags and loader refresh
+				// without marking a user preference or writing that settings file.
+				Layer.SetIsLoadedInEditor(Loaded, false);
+				Layer.SetVisible(Visible);
+				IWorldPartitionActorLoaderInterface::RefreshLoadedState(false);
+				if (auto* Layers = GEditor ? GEditor->GetEditorSubsystem<UDataLayerEditorSubsystem>() : nullptr)
+					Layers->UpdateAllActorsVisibility(true, true);
+			}
+
 			void StopOnGameThread()
 			{
+				PieLaunchPolicy.Disarm();
 				const auto Family = Request.GetFamily();
 				if (Family == EditorSessionOperation::EUeAgentEditorSessionOperationFamily::PcgGeneration)
 				{
@@ -3337,7 +3431,8 @@ namespace UE::UAI::Composition::LongRunningSession
 							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 						return;
 					}
-					GUnrealEd->RequestEndPlayMap();
+					if (GUnrealEd->IsPlaySessionRequestQueued()) GUnrealEd->CancelRequestPlaySession();
+					if (GEditor && GEditor->PlayWorld) GUnrealEd->RequestEndPlayMap();
 					const TWeakPtr<FEditorNativeSession, ESPMode::ThreadSafe>
 						WeakSelf = AsShared();
 					const FTSTicker::FDelegateHandle Handle =
@@ -3379,6 +3474,11 @@ namespace UE::UAI::Composition::LongRunningSession
 				else if (Family == EditorSessionOperation::
 					EUeAgentEditorSessionOperationFamily::WorldContext)
 				{
+					if (SessionDataLayer.IsValid())
+					{
+						SetTemporaryDataLayerState(*SessionDataLayer.Get(), bPreviousDataLayerLoaded, bPreviousDataLayerVisible);
+						SessionDataLayer.Reset();
+					}
 					if (WorldPartitionLoader.IsValid())
 					{
 						WorldPartitionLoader->Unload();
@@ -3394,6 +3494,9 @@ namespace UE::UAI::Composition::LongRunningSession
 			TSharedPtr<UE::UAI::AssetPreview::IAssetEditorLease, ESPMode::ThreadSafe> AssetEditorLease;
 			TSharedPtr<PcgGeneration::IGenerationWork, ESPMode::ThreadSafe> PcgWork;
 			TWeakObjectPtr<ADynamicMeshActor> OwnedActor;
+			TWeakObjectPtr<UDataLayerInstance> SessionDataLayer;
+			bool bPreviousDataLayerLoaded = false;
+			bool bPreviousDataLayerVisible = false;
 			TUniquePtr<IWorldPartitionActorLoaderInterface::ILoaderAdapter>
 				WorldPartitionLoader;
 			FCriticalSection Mutex;
@@ -3402,6 +3505,8 @@ namespace UE::UAI::Composition::LongRunningSession
 			TSharedPtr<FJsonObject> Details;
 			UE::UAI::Contract::FDiagnostic StateDiagnostic;
 			FString PreviousCulture;
+			EditorSessionOperation::FPieLaunchPolicy PieLaunchPolicy;
+			bool bRuntimePreviewLaunching = false;
 			FTSTicker::FDelegateHandle StopPollTicker;
 			EEditorNativeState State = EEditorNativeState::Scheduled;
 			bool bStarted = false;
@@ -3634,7 +3739,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				FTSTicker::FDelegateHandle StopHandle;
 				FTSTicker::FDelegateHandle ExportHandle;
 				FTSTicker::FDelegateHandle SequenceHandle;
-				TSharedPtr<CaptureMediaLongJob::FLevelViewportSequenceCapture>
+				TSharedPtr<CaptureMediaLongJob::IViewportFrameCapture>
 					SequenceCapture;
 				{
 					FScopeLock Lock(&Mutex);
@@ -3642,9 +3747,9 @@ namespace UE::UAI::Composition::LongRunningSession
 					MediaStopTicker.Reset();
 					ExportHandle = MediaWriteTicker;
 					MediaWriteTicker.Reset();
-					SequenceHandle = ViewportSequenceTicker;
-					ViewportSequenceTicker.Reset();
-					SequenceCapture = MoveTemp(ViewportSequenceCapture);
+					SequenceHandle = ViewportFrameTicker;
+					ViewportFrameTicker.Reset();
+					SequenceCapture = MoveTemp(ViewportFrameCapture);
 				}
 				if (StopHandle.IsValid())
 				{
@@ -3710,7 +3815,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				{
 					return Fail(OutError, NativeFailure(TEXT("capture_native_session_not_started"), TEXT("The capture session cannot be observed before it is started."), TEXT("started"), Request.GetSubjectRef(), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("execution")));
 				}
-				if (bSequenceCleanupPending)
+				if (bViewportCleanupPending)
 				{
 					OutObservation = CaptureMediaLongJob::FUeAgentCaptureMediaNativeObservation(ELongRunningWorkState::Running,
 		TEXT("stopping"),
@@ -3836,19 +3941,19 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				FTSTicker::FDelegateHandle Handle;
 				FTSTicker::FDelegateHandle SequenceHandle;
-				TSharedPtr<CaptureMediaLongJob::FLevelViewportSequenceCapture>
+				TSharedPtr<CaptureMediaLongJob::IViewportFrameCapture>
 					SequenceCapture;
 				{
 					FScopeLock Lock(&Mutex);
 					bStopRequested = true;
 					Handle = MediaStopTicker;
 					MediaStopTicker.Reset();
-					SequenceHandle = ViewportSequenceTicker;
-					ViewportSequenceTicker.Reset();
-					SequenceCapture = MoveTemp(ViewportSequenceCapture);
+					SequenceHandle = ViewportFrameTicker;
+					ViewportFrameTicker.Reset();
+					SequenceCapture = MoveTemp(ViewportFrameCapture);
 					if (SequenceCapture.IsValid())
 					{
-						bSequenceCleanupPending = true;
+						bViewportCleanupPending = true;
 					}
 				}
 				if (Handle.IsValid())
@@ -3868,8 +3973,8 @@ namespace UE::UAI::Composition::LongRunningSession
 						{
 							SequenceCapture->Cancel();
 							FScopeLock Lock(&Self->Mutex);
-							Self->bSequenceCleanupPending = false;
-							Self->StateDiagnostic.Append(NativeFailure(TEXT("capture_cancelled"), TEXT("The viewport sequence capture was cancelled."), TEXT("stop_requested"), Self->Request.GetSubjectRef(), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), TEXT("native_session")));
+							Self->bViewportCleanupPending = false;
+							Self->StateDiagnostic.Append(NativeFailure(TEXT("capture_cancelled"), TEXT("The viewport capture was cancelled."), TEXT("stop_requested"), Self->Request.GetSubjectRef(), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), TEXT("native_session")));
 							Self->State = ECaptureNativeState::ExitedFailure;
 						});
 				}
@@ -3899,13 +4004,13 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				FTSTicker::FDelegateHandle SequenceHandle;
 				TArray<FString> FailedPaths;
-				TSharedPtr<CaptureMediaLongJob::FLevelViewportSequenceCapture>
+				TSharedPtr<CaptureMediaLongJob::IViewportFrameCapture>
 					SequenceCapture;
 				{
 					FScopeLock Lock(&Mutex);
-					SequenceHandle = ViewportSequenceTicker;
-					ViewportSequenceTicker.Reset();
-					SequenceCapture = MoveTemp(ViewportSequenceCapture);
+					SequenceHandle = ViewportFrameTicker;
+					ViewportFrameTicker.Reset();
+					SequenceCapture = MoveTemp(ViewportFrameCapture);
 				}
 				if (SequenceHandle.IsValid())
 				{
@@ -4021,9 +4126,9 @@ namespace UE::UAI::Composition::LongRunningSession
 				return true;
 			}
 
-			bool TickViewportSequenceOnGameThread()
+			bool TickViewportFrameCaptureOnGameThread()
 			{
-				TSharedPtr<CaptureMediaLongJob::FLevelViewportSequenceCapture>
+				TSharedPtr<CaptureMediaLongJob::IViewportFrameCapture>
 					Capture;
 				bool bCancelled = false;
 				{
@@ -4031,12 +4136,12 @@ namespace UE::UAI::Composition::LongRunningSession
 					if (bStopRequested)
 					{
 						bCancelled = true;
-						ViewportSequenceTicker.Reset();
-						Capture = MoveTemp(ViewportSequenceCapture);
+						ViewportFrameTicker.Reset();
+						Capture = MoveTemp(ViewportFrameCapture);
 					}
 					else
 					{
-						Capture = ViewportSequenceCapture;
+						Capture = ViewportFrameCapture;
 					}
 				}
 				if (!Capture.IsValid())
@@ -4046,7 +4151,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				if (bCancelled)
 				{
 					Capture->Cancel();
-					FailOnGameThread(NativeFailure(TEXT("capture_cancelled"), TEXT("The viewport sequence capture was cancelled."), TEXT("stop_requested"), Request.GetSubjectRef(), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), TEXT("capture_native")));
+					FailOnGameThread(NativeFailure(TEXT("capture_cancelled"), TEXT("The viewport capture was cancelled."), TEXT("stop_requested"), Request.GetSubjectRef(), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), TEXT("capture_native")));
 					return false;
 				}
 
@@ -4059,8 +4164,8 @@ namespace UE::UAI::Composition::LongRunningSession
 					Capture->Cancel();
 					{
 						FScopeLock Lock(&Mutex);
-						ViewportSequenceCapture.Reset();
-						ViewportSequenceTicker.Reset();
+						ViewportFrameCapture.Reset();
+						ViewportFrameTicker.Reset();
 					}
 					FailOnGameThread(MoveTemp(LocalError));
 					return false;
@@ -4082,79 +4187,90 @@ namespace UE::UAI::Composition::LongRunningSession
 					Capture->Cancel();
 					{
 						FScopeLock Lock(&Mutex);
-						ViewportSequenceCapture.Reset();
-						ViewportSequenceTicker.Reset();
+						ViewportFrameCapture.Reset();
+						ViewportFrameTicker.Reset();
 					}
 					FailOnGameThread(MoveTemp(LocalError));
 					return false;
 				}
 				{
 					FScopeLock Lock(&Mutex);
-					ViewportSequenceCapture.Reset();
-					ViewportSequenceTicker.Reset();
+					ViewportFrameCapture.Reset();
+					ViewportFrameTicker.Reset();
 				}
 				AdoptImageExecutionResultOnGameThread(MoveTemp(ExecutionResult));
 				return false;
 			}
 
-			bool StartViewportSequenceOnGameThread(const FString& Root)
+			bool StartViewportFrameCaptureOnGameThread(const FString& Root)
 			{
 				UE::UAI::Contract::FDiagnostic LocalError;
 				const FString PreferredPath = Root / TEXT("capture.png");
 				if (!CaptureMediaLongJob::TryPrepareCaptureMediaImagePolicyExecution(
-						Request,
-						PreferredPath,
-						PreparedImageExecution,
-						LocalError))
+						Request, PreferredPath, PreparedImageExecution, LocalError))
 				{
 					FailOnGameThread(MoveTemp(LocalError));
 					return false;
 				}
-				TSharedPtr<CaptureMediaLongJob::FLevelViewportSequenceCapture>
-					Capture;
-				if (!CaptureMediaLongJob::FLevelViewportSequenceCapture::TryCreate(
-						PreparedImageExecution.Context, Capture, LocalError)
-					|| !Capture.IsValid())
+				TSharedPtr<CaptureMediaLongJob::IViewportFrameCapture> Capture;
+				bool bCreated = false;
+				if (CaptureMediaLongJob::IsViewportSequenceCapturePolicy(Request.GetPolicyId()))
+				{
+					TSharedPtr<CaptureMediaLongJob::FLevelViewportSequenceCapture> Sequence;
+					bCreated = CaptureMediaLongJob::FLevelViewportSequenceCapture::TryCreate(
+						PreparedImageExecution.Context, Sequence, LocalError);
+					Capture = MoveTemp(Sequence);
+				}
+				else
+				{
+					bCreated = CaptureMediaLongJob::FLevelViewportImageCapture::TryCreate(
+						PreparedImageExecution.Context, Capture, LocalError);
+				}
+				if (!bCreated || !Capture.IsValid())
 				{
 					PreparedImageExecution.LocateDiagnosticSources(LocalError);
 					if (LocalError.IsEmpty())
-					{
-						LocalError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("capture_viewport_sequence_create_failed"),
-							TEXT("The viewport sequence factory returned no capture session."), TEXT("capture_native"));
-						LocalError.SourceKind = TEXT("native_result");
-						LocalError.PropertyPath = TEXT("capture_session_available");
-						LocalError.ActualValue = MakeShared<FJsonValueBoolean>(false);
-						LocalError.ActualValuePresent = true;
-						LocalError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
-					}
+						LocalError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("capture_viewport_create_failed"),
+							TEXT("The viewport factory returned no capture session."), TEXT("capture_native"));
 					FailOnGameThread(MoveTemp(LocalError));
 					return false;
 				}
-				const TWeakPtr<FCaptureNativeSession, ESPMode::ThreadSafe> WeakSelf =
-					AsShared();
-				const FTSTicker::FDelegateHandle Handle =
-					FTSTicker::GetCoreTicker().AddTicker(
-						FTickerDelegate::CreateLambda(
-							[WeakSelf](float)
-							{
-								const TSharedPtr<FCaptureNativeSession,
-									ESPMode::ThreadSafe> Self = WeakSelf.Pin();
-								return Self.IsValid()
-									? Self->TickViewportSequenceOnGameThread()
-									: false;
-							}),
-						0.0f);
-				if (!Handle.IsValid())
+				const bool bImmediate = Capture->CanExecuteImmediately();
+				bool bCancelled = false;
+				FTSTicker::FDelegateHandle Handle;
+				{
+					// Publish capture and ticker atomically with respect to RequestStop.
+					// A stop during prepare must never leave a newly registered scope alive.
+					FScopeLock Lock(&Mutex);
+					bCancelled = bStopRequested;
+					if (!bCancelled)
+					{
+						if (!bImmediate)
+						{
+							const TWeakPtr<FCaptureNativeSession, ESPMode::ThreadSafe> WeakSelf = AsShared();
+							Handle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+								[WeakSelf](float)
+								{
+									const auto Self = WeakSelf.Pin();
+									return Self.IsValid() ? Self->TickViewportFrameCaptureOnGameThread() : false;
+								}), 0.0f);
+						}
+						if (bImmediate || Handle.IsValid())
+						{
+							ViewportFrameCapture = Capture;
+							ViewportFrameTicker = Handle;
+						}
+					}
+				}
+				if (bCancelled || (!bImmediate && !Handle.IsValid()))
 				{
 					Capture->Cancel();
-					FailOnGameThread(NativeFailure(TEXT("capture_viewport_sequence_schedule_failed"), TEXT("The viewport sequence capture ticker could not be registered."), TEXT("viewport_sequence_ticker_available"), Request.GetSubjectRef(), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("capture_native")));
+					FailOnGameThread(NativeFailure(bCancelled ? TEXT("capture_cancelled") : TEXT("capture_viewport_schedule_failed"),
+						bCancelled ? TEXT("The viewport capture was cancelled during preparation.") : TEXT("The viewport capture ticker could not be registered."),
+						TEXT("viewport_capture_scheduled"), Request.GetSubjectRef(), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("capture_native")));
 					return false;
 				}
-				{
-					FScopeLock Lock(&Mutex);
-					ViewportSequenceCapture = MoveTemp(Capture);
-					ViewportSequenceTicker = Handle;
-				}
+				if (bImmediate) TickViewportFrameCaptureOnGameThread();
 				return true;
 			}
 
@@ -4176,10 +4292,10 @@ namespace UE::UAI::Composition::LongRunningSession
 				if (Request.GetFamily()
 						== CaptureMediaLongJob::EUeAgentCaptureMediaLongJobFamily::
 							ImageCapture
-					&& CaptureMediaLongJob::IsViewportSequenceCapturePolicy(
-						Request.GetPolicyId()))
+					&& (CaptureMediaLongJob::IsViewportSequenceCapturePolicy(Request.GetPolicyId())
+						|| Request.GetPolicyId() == TEXT("policy:image-capture:viewport/v1")))
 				{
-					StartViewportSequenceOnGameThread(Root);
+					StartViewportFrameCaptureOnGameThread(Root);
 					return;
 				}
 				if (Request.GetFamily()
@@ -4559,7 +4675,7 @@ namespace UE::UAI::Composition::LongRunningSession
 			UE::UAI::Contract::FDiagnostic StateDiagnostic;
 			FTSTicker::FDelegateHandle MediaStopTicker;
 			FTSTicker::FDelegateHandle MediaWriteTicker;
-			FTSTicker::FDelegateHandle ViewportSequenceTicker;
+			FTSTicker::FDelegateHandle ViewportFrameTicker;
 			FUeAgentResourceTracker* Resources = nullptr;
 			TOptional<FFileArtifactReference> Artifact;
 			TArray<FFileArtifactReference> AdditionalArtifacts;
@@ -4570,12 +4686,12 @@ namespace UE::UAI::Composition::LongRunningSession
 			TSharedPtr<FJsonObject> CaptureReceipt;
 			CaptureMediaLongJob::FUeAgentPreparedCaptureMediaImageExecution
 				PreparedImageExecution;
-			TSharedPtr<CaptureMediaLongJob::FLevelViewportSequenceCapture>
-				ViewportSequenceCapture;
+			TSharedPtr<CaptureMediaLongJob::IViewportFrameCapture>
+				ViewportFrameCapture;
 			ECaptureNativeState State = ECaptureNativeState::Scheduled;
 			bool bStarted = false;
 			bool bStopRequested = false;
-			bool bSequenceCleanupPending = false;
+			bool bViewportCleanupPending = false;
 			bool bReleased = false;
 		};
 
@@ -4863,6 +4979,18 @@ namespace UE::UAI::Composition::LongRunningSession
 				TEXT("client.editor.session(family_id='world_context', subject_ref='world:/Game/Maps/L_New', policy_id='policy:world-context:create-blank/v1', parameters={'overwrite_policy': 'fail', 'save_existing_map': True})")),
 			EditorPolicy(
 				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
+				TEXT("policy:world-context:data-layer-editor-state/v1"),
+				TEXT("native_session_resource"),
+				TEXT("uai.readback.world_partition.data_layer_editor_state/v1"),
+				EUeAgentStatePlane::AuthoringMemory,
+				{EUeAgentExecutionWorldType::Editor},
+				ExistingWorldSubjectSchema(),
+				TEXT(R"schema({"type":"object","required":["asset_path"],"properties":{"asset_path":{"type":"string","minLength":1},"loaded_in_editor":{"type":"boolean"},"visible":{"type":"boolean"}},"additionalProperties":false})schema"),
+				TEXT("Use the current partitioned world and an existing DataLayerAsset instance. Supply loaded_in_editor and/or visible. This temporary session does not change initial runtime state or saved user loading preferences."),
+				TEXT("Wait for active, inspect Data Layer flags and Actor descriptors, then close to restore both original Editor flags and refresh loaders. Close before switching maps or editing the same layer elsewhere."),
+				TEXT("client.editor.session('world_context', 'world:/Game/Maps/L_WP', 'policy:world-context:data-layer-editor-state/v1', {'asset_path': '/Game/Layers/DL_Stage.DL_Stage', 'loaded_in_editor': False})")),
+			EditorPolicy(
+				EditorSessionOperation::EUeAgentEditorSessionOperationFamily::WorldContext,
 				TEXT("policy:world-context:partition-region-loader/v1"),
 				TEXT("native_session_resource"),
 				TEXT("uai.readback.world_partition.region_loader/v1"),
@@ -5069,6 +5197,9 @@ namespace UE::UAI::Composition::LongRunningSession
 					{CompilePolicy(CompileBuildJob::EUeAgentCompileBuildJobFamily::WorldBuild,
 						TEXT("policy:world-build:navigation/v1"), TEXT("game_thread_stage"),
 						TEXT("uai.readback.world.navigation/v1")), CompileBuilder},
+					{CompilePolicy(CompileBuildJob::EUeAgentCompileBuildJobFamily::WorldBuild,
+						TEXT("policy:world-build:partition-convert/v1"), TEXT("owned_process"),
+						TEXT("uai.readback.world_partition.conversion_log/v1")), CompileBuilder},
 					{CompilePolicy(CompileBuildJob::EUeAgentCompileBuildJobFamily::WorldBuild,
 						TEXT("policy:world-build:hlod-plan/v1"), TEXT("game_thread_stage"),
 						TEXT("uai.readback.world_hlod.plan/v1")), CompileBuilder},

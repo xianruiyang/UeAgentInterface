@@ -10,6 +10,7 @@
 #include "Core/ExecutionMutation/UeAgentLongRunningOperation.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaImagePolicy.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/PlatformTime.h"
@@ -635,7 +636,7 @@ namespace UE::UAI::Composition::LongRunningSession
 		CaptureMediaLongJob::EUeAgentCaptureMediaLongJobFamily CaptureFamily(
 			const FString& CommandId)
 		{
-			if (CommandId == TEXT("capture.image.execute"))
+			if (CommandId == TEXT("capture.image.execute") || CommandId == TEXT("asset.folder.preview"))
 			{
 				return CaptureMediaLongJob::EUeAgentCaptureMediaLongJobFamily::
 					ImageCapture;
@@ -715,6 +716,31 @@ namespace UE::UAI::Composition::LongRunningSession
 
 	namespace
 	{
+		FUeAgentContractSchemaCheckpoint MakeSchemaCheckpoint(
+			const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>& Resources,
+			const TSharedRef<IUeAgentCancellationSignal>& Cancellation)
+		{
+			return [Resources, Cancellation](const int64 WorkUnits, const FString& InstancePath,
+				FUeAgentContractSchemaError& Error)
+			{
+				if (Cancellation->IsCancelled())
+				{
+					Error = FDiagnostic::Failure(TEXT("operation_cancelled"), TEXT("The operation was cancelled."), TEXT("cancellation"));
+					if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = InstancePath;
+					return false;
+				}
+				FUeAgentResourceChargeError ResourceError;
+				if (!Resources->TryCharge(EUeAgentResourceDimension::WorkUnits, WorkUnits,
+					TEXT("long_running_session.c0.schema"), ResourceError))
+				{
+					Error = ResourceError;
+					if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = InstancePath;
+					return false;
+				}
+				return true;
+			};
+		}
+
 		bool TryCanonicalRequest(
 			const TSharedRef<FUeAgentLongRunningSessionRuntime::FState,
 				ESPMode::ThreadSafe>& State,
@@ -748,36 +774,8 @@ namespace UE::UAI::Composition::LongRunningSession
 					TEXT("No compiled input schema is registered for the requested descriptor identity."), Request.GetDescriptorIdentity());
 				return false;
 			}
-			const FUeAgentContractSchemaCheckpoint Checkpoint = [
-				Resources = OutResources,
-				Deadline = OutDeadline,
-				Cancellation
-			](
-				const int64 WorkUnits,
-				const FString& InstancePath,
-				FUeAgentContractSchemaError& Error)
-			{
-				if (Cancellation->IsCancelled())
-				{
-					Error = FDiagnostic::Failure(TEXT("operation_cancelled"), TEXT("The operation was cancelled."), TEXT("cancellation"));
-					if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = InstancePath;
-					return false;
-				}
-				FUeAgentResourceChargeError ResourceError;
-				if (!Resources->TryCharge(
-						EUeAgentResourceDimension::WorkUnits,
-						WorkUnits,
-						TEXT("long_running_session.c0.schema"),
-						ResourceError))
-				{
-					Error = ResourceError;
-				if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = InstancePath;
-					return false;
-				}
-				return true;
-			};
 			return Schema->TryValidateAndCanonicalize(
-				Request.GetPayload(), Checkpoint, OutCanonical, OutError);
+				Request.GetPayload(), MakeSchemaCheckpoint(OutResources, Cancellation), OutCanonical, OutError);
 		}
 
 		bool TryContext(
@@ -840,6 +838,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				Input.WorldIdentity = SubjectRef;
 			}
 			else if (Profile.CommandId == TEXT("capture.image.execute")
+				|| Profile.CommandId == TEXT("asset.folder.preview")
 				|| Profile.CommandId == TEXT("capture.media.execute")
 				|| Profile.CommandId == TEXT("capture.render.execute")
 				|| FamilyId == TEXT("world_context")
@@ -1013,7 +1012,8 @@ namespace UE::UAI::Composition::LongRunningSession
 			const FUeAgentCallerContext& CallerContext,
 			const FUeAgentContractValue& CanonicalPayload,
 			const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>& Resources,
-			const FUeAgentOperationDeadline& Deadline)
+			const FUeAgentOperationDeadline& Deadline,
+			const TSharedRef<IUeAgentCancellationSignal>& Cancellation)
 		{
 			if (State->bShutdownRequested.Load())
 				return Failure(Request, RuntimeFailure(TEXT("operation_runtime_shutting_down"),
@@ -1053,6 +1053,7 @@ namespace UE::UAI::Composition::LongRunningSession
 
 			FString SubjectRef;
 			FString PolicyId;
+			bool bPolicyDefaulted = false;
 			FString FamilyId;
 			TSharedPtr<FJsonValue> Parameters;
 			if (Profile.CommandId == TEXT("editor.safe_exit"))
@@ -1062,12 +1063,28 @@ namespace UE::UAI::Composition::LongRunningSession
 				FamilyId = TEXT("host_lifecycle");
 				Parameters = MakeShared<FJsonValueObject>(Root);
 			}
+			else if (Profile.CommandId == TEXT("asset.folder.preview"))
+			{
+				FString Folder;
+				Root->TryGetStringField(TEXT("folder"), Folder);
+				SubjectRef = TEXT("capture-subject:asset-folder:") + Folder;
+				PolicyId = TEXT("policy:image-capture:asset-folder-thumbnail/v1");
+				Parameters = Root->TryGetField(TEXT("options"));
+				if (!Parameters.IsValid()) Parameters = MakeShared<FJsonValueObject>(MakeShared<FJsonObject>());
+			}
 			else
 			{
 				Root->TryGetStringField(TEXT("subject_ref"), SubjectRef);
 				Root->TryGetStringField(TEXT("policy_id"), PolicyId);
 				Root->TryGetStringField(TEXT("family_id"), FamilyId);
 				Parameters = Root->TryGetField(TEXT("parameters"));
+			}
+			if (Profile.CommandId == TEXT("capture.image.execute") && !Root->HasField(TEXT("policy_id")))
+			{
+				if (!CaptureMediaLongJob::TryResolveDefaultCaptureImagePolicy(SubjectRef, Parameters,
+					MakeSchemaCheckpoint(Resources, Cancellation), PolicyId, OwnerError))
+					return Failure(Request, OwnerError, OperationId);
+				bPolicyDefaulted = true;
 			}
 			FUeAgentExecutionContextRefPtr Context;
 			if (!TryContext(
@@ -1093,7 +1110,8 @@ namespace UE::UAI::Composition::LongRunningSession
 					FamilyId == TEXT("host_lifecycle")});
 			FUeAgentCanonicalValuePtr CanonicalParameters;
 			if (!TryCanonicalStateValue(Parameters, *Resources, CanonicalParameters, OwnerError,
-					Profile.CommandId == TEXT("editor.safe_exit") ? FString() : TEXT("/parameters"), TEXT("command_input")))
+					Profile.CommandId == TEXT("editor.safe_exit") ? FString() :
+					Profile.CommandId == TEXT("asset.folder.preview") ? TEXT("/options") : TEXT("/parameters"), TEXT("command_input")))
 			{
 				return Failure(Request, OwnerError, Request.GetRequestId());
 			}
@@ -1177,7 +1195,8 @@ namespace UE::UAI::Composition::LongRunningSession
 						CaptureFamily(Profile.CommandId),
 						MoveTemp(SubjectRef),
 						MoveTemp(PolicyId),
-						CanonicalParameters.ToSharedRef()),
+						CanonicalParameters.ToSharedRef(),
+						bPolicyDefaulted),
 					OperationRequest,
 					*State->CaptureMediaFactory,
 					State->Owner,
@@ -1411,7 +1430,8 @@ namespace UE::UAI::Composition::LongRunningSession
 					CallerContext,
 					CanonicalPayload.GetValue(),
 					Resources,
-					Deadline)
+					Deadline,
+					Cancellation)
 				: ExecuteLifecycle(
 					State,
 					*Profile,

@@ -24,6 +24,13 @@ also requires `parent_material_ref` in `root.create`, pointing to its existing
 parent Material or Material Instance. This native creation route requires the
 name and package fields to agree with the independent destination argument.
 
+Material authoring additionally supports the mounted
+`/UeAgentInterface/Materials/` namespace for plugin-owned bundled materials.
+The Material runtime adds only this plugin's `Content/Materials` to its package
+durability roots, retaining `/Game` and its normal save/readback behavior.
+Other domains keep their existing directory policy. Ordinary scene assets
+remain under `/Game`; `/Engine` and arbitrary plugin roots are not writable.
+
 Layer and Blend do not have this inline creation branch; use the public
 `asset.object.create` factory candidate instead. A registered readable root
 does not by itself establish a missing-root creation route. Export a created

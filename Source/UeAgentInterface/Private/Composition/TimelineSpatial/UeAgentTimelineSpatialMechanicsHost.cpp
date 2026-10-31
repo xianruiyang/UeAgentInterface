@@ -21,6 +21,7 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
 #include "MovieScene.h"
+#include "MovieSceneBinding.h"
 #include "RetargetEditor/IKRetargeterController.h"
 #include "Retargeter/IKRetargeter.h"
 #include "Rig/IKRigDefinition.h"
@@ -509,7 +510,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 			const FString& BindingIdentity,
 			const FString& ClockId,
 			UE::UAI::Contract::FDiagnostic& OutError,
-			const FString& SequencePointer)
+			const FString& SequencePointer,
+			const FString& PublicIdentity = FString())
 		{
 			UObject* Object = nullptr;
 			if (!AddRigObject(Config, SequenceIdentity, Object, OutError, SequencePointer)) return false;
@@ -547,7 +549,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 				return false;
 			}
 			RigSpatial::FUeAgentRigSimulationSpatialRigBakeBinding Binding;
-			Binding.Identity = BindingIdentity;
+			Binding.Identity = PublicIdentity.IsEmpty() ? BindingIdentity : PublicIdentity;
 			Binding.World = &World;
 			Binding.Sequence = Sequence;
 			Binding.SkeletalMeshComponent = Component;
@@ -783,6 +785,53 @@ namespace UE::UAI::Composition::TimelineSpatial
 					return false;
 				}
 				Config.RigSocketBindings.Add(MoveTemp(SocketBinding));
+				return true;
+			}
+
+			if (CommandId == TEXT("rig.control.bake.context"))
+			{
+				FString SequenceRef, BindingName, RigRef;
+				UObject* SequenceObject = nullptr;
+				UObject* RigObject = nullptr;
+				if (!RequiredString(Input, TEXT("/input"), TEXT("sequence_ref"), SequenceRef, OutError)
+					|| !RequiredString(Input, TEXT("/input"), TEXT("binding_name"), BindingName, OutError)
+					|| !RequiredString(Input, TEXT("/input"), TEXT("rig_ref"), RigRef, OutError)
+					|| !AddRigObject(Config, SequenceRef, SequenceObject, OutError, TEXT("/input/sequence_ref"))
+					|| !RequireObjectClass(SequenceObject, ULevelSequence::StaticClass(), SequenceRef, TEXT("/input/sequence_ref"), OutError)
+					|| !AddRigObject(Config, RigRef, RigObject, OutError, TEXT("/input/rig_ref"))
+					|| !RequireObjectClass(RigObject, UClass::StaticClass(), RigRef, TEXT("/input/rig_ref"), OutError)) return false;
+				ULevelSequence* Sequence = CastChecked<ULevelSequence>(SequenceObject);
+				UMovieScene* MovieScene = Sequence->GetMovieScene();
+				FGuid BindingGuid;
+				int32 Matches = 0;
+				if (MovieScene)
+				{
+					for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
+					{
+						if (Binding.GetName() == BindingName)
+						{
+							BindingGuid = Binding.GetObjectGuid();
+							++Matches;
+						}
+					}
+				}
+				if (Matches != 1)
+				{
+					OutError = BindingFailure(TEXT("timeline_spatial_rig_bake_binding_name_unresolved"),
+						TEXT("The binding name must identify exactly one native MovieScene binding."),
+						TEXT("/input/binding_name"), MakeShared<FJsonValueNumber>(Matches),
+						TEXT("one binding with the exact readable name"), SequenceRef);
+					return false;
+				}
+				if (!AddRigBakeBinding(Config, World, SequenceRef, BindingGuid.ToString(),
+					TEXT("level_sequence:") + SequenceRef, OutError, TEXT("/input/sequence_ref"), BindingName)) return false;
+				if (Input->HasField(TEXT("target_animation_ref")))
+				{
+					FString AnimationRef;
+					UObject* Animation = nullptr;
+					if (!RequiredString(Input, TEXT("/input"), TEXT("target_animation_ref"), AnimationRef, OutError)
+						|| !AddRigObject(Config, AnimationRef, Animation, OutError, TEXT("/input/target_animation_ref"))) return false;
+				}
 				return true;
 			}
 
@@ -1134,6 +1183,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 				TEXT("animation.ik_probe_candidate.apply"),
 				TEXT("animation.subject.morph_weights.update"),
 				TEXT("animation.subject.pose.update"),
+				TEXT("rig.control.bake.context"),
 				TEXT("rig.control.bake.animation"),
 				TEXT("rig.control.bake.controls"),
 				TEXT("rig.ik.definition.update"),

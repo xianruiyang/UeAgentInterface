@@ -38,6 +38,8 @@ namespace UE::UAI::ContentDiscovery
 	{
 		FString JsonPath;
 		FString SourceKind;
+		FString NameField = TEXT("name");
+		FString SelectField = TEXT("select");
 	};
 
 	/** Exact original names. Ambiguity carries readable name/choose facts; native identities stay internal. */

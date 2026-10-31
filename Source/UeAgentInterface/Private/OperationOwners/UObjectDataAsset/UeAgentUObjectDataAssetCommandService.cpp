@@ -2049,6 +2049,16 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 				}
 				const TSharedRef<FJsonObject> NormalizedParams =
 					MakeShared<FJsonObject>();
+				if (Params->HasField(TEXT("analysis_ref")))
+				{
+					FString AnalysisRef;
+					if (Route->Kind != EUeAgentUObjectDataAssetRouteKind::Import
+						|| RootTypeIdentity != TEXT("/Script/Engine.World")
+						|| !ResolvedSource->IsSemanticWorkspaceDirectory()
+						|| !Params->TryGetStringField(TEXT("analysis_ref"), AnalysisRef) || AnalysisRef.IsEmpty())
+						return FailWithTerminalFacts(OutError, UE::UAI::Contract::FDiagnostic::Failure(
+							TEXT("scene_analysis_binding_unsupported"), TEXT("analysis_ref is supported only for an edited Level directory workspace."), TEXT("scene_analysis")));
+				}
 				NormalizedParams->Values = Params->Values;
 				if (Route->Kind == EUeAgentUObjectDataAssetRouteKind::Export)
 					NormalizedParams->SetStringField(TEXT("expected_revision"), TEXT("missing"));
@@ -2311,6 +2321,8 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 					return false;
 				}
 				FImportInitializationDomainResolution Resolution;
+				DomainRequest->SetWorkspaceExportPreparation(Request.WorkspaceExportPreparation);
+				DomainRequest->SetWorkspaceProfileId(Request.WorkspaceProfileId);
 				FWorkspaceError WorkspaceError;
 				if (!Registry->TryResolve(
 						DomainRequest.GetValue(),

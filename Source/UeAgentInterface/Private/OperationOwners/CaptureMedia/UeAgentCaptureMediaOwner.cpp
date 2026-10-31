@@ -16,6 +16,7 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 		bool IsOwnedCommand(const FString& Id)
 		{
 			return Id == TEXT("capture.image.execute")
+				|| Id == TEXT("asset.folder.preview")
 				|| Id == TEXT("capture.media.execute")
 				|| Id == TEXT("capture.render.execute");
 		}
@@ -139,7 +140,7 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 			if (!Route)
 			{
 				OutError = CommandFailure(TEXT("capture_media_command_not_supported"), CommandId,
-					TEXT("This owner accepts capture.image.execute, capture.media.execute and capture.render.execute."));
+					TEXT("This owner accepts the registered image, folder preview, media and render capture commands."));
 				OutError.PropertyPath = TEXT("command_supported");
 				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
 				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
@@ -186,13 +187,13 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 			});
 			return Result;
 		}();
-		if (Routes.Num() != 3)
+		if (Routes.Num() != 4)
 		{
 			OutError = CommandFailure(TEXT("capture_media_route_count_mismatch"), FString(),
-				TEXT("The activation profiles did not produce the three capture command routes."));
+				TEXT("The activation profiles did not produce the four capture command routes."));
 			OutError.PropertyPath = TEXT("route_count");
 			OutError.ActualValue = MakeShared<FJsonValueNumber>(Routes.Num());
-			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(3);
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(4);
 			return false;
 		}
 		OutRoutes = &Routes;

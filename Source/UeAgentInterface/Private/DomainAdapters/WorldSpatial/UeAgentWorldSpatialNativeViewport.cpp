@@ -8,6 +8,7 @@
 #include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
 #include "Core/EditorViewport/UeAgentViewportViewMode.h"
 #include "Core/EditorViewport/UeAgentViewportRealtimeState.h"
+#include "Core/EditorCapture/UeAgentSlateWindowCapture.h"
 
 #include "Components/PrimitiveComponent.h"
 #include "Dom/JsonObject.h"
@@ -21,6 +22,8 @@
 #include "InteractiveToolManager.h"
 #include "InteractiveToolsContext.h"
 #include "SceneView.h"
+#include "SEditorViewport.h"
+#include "Slate/SceneViewport.h"
 #include "Selection/GeometrySelectionManager.h"
 #include "Selections/GeometrySelection.h"
 #include "UnrealClient.h"
@@ -2012,10 +2015,27 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						OutError);
 				}
 
+				TOptional<FIntPoint> ColdSize;
+				if (Request.GetPayload().IsType<FViewportRayDeprojectRequestInput>())
+					ColdSize = Request.GetPayload().Get<FViewportRayDeprojectRequestInput>().ColdStartRenderSize;
+				else if (Request.GetPayload().IsType<FViewportRayTraceRequestInput>())
+					ColdSize = Request.GetPayload().Get<FViewportRayTraceRequestInput>().ColdStartRenderSize;
 				FViewportBinding Binding;
-				if (!TryResolveViewport(*Environment, Context, Binding, OutError))
+				if (!TryResolveViewport(*Environment, Context, Binding, OutError, !ColdSize.IsSet()))
 				{
 					return false;
+				}
+				UE::UAI::EditorCapture::SlateWindow::FScopedViewportExtent ScopedExtent;
+				if (ColdSize.IsSet())
+				{
+					const auto Widget = Binding.Client->GetEditorViewportWidget();
+					const auto SceneViewport = Widget ? Widget->GetSceneViewport() : nullptr;
+					if (!SceneViewport || SceneViewport.Get() != Binding.Viewport)
+						return ViewportFailure(OutError, TEXT("world_spatial_viewport_state_unavailable"),
+							TEXT("Cold-start ray queries require the bound editor scene viewport."), TEXT("/viewport"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("matching editor scene viewport")), Binding.Identity);
+					if (!ScopedExtent.Prepare(SceneViewport, &ColdSize.GetValue(), TEXT("explicit_query_size"), OutError)
+						|| !TryResolveViewport(*Environment, Context, Binding, OutError)) return false;
 				}
 				if (Request.GetPayload().IsType<FViewportPixelScaleReadRequestInput>())
 				{

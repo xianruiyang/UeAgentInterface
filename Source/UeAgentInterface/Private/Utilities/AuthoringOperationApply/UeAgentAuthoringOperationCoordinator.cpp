@@ -1020,6 +1020,47 @@ bool FOperationTransactionBackend::FinalizeVerification(FOperationFailure &OutFa
     return true;
   if (CapturedMutations.IsEmpty())
     return Options.FinalReadback(OutFailure);
+  if (Options.ObservePublishedReadback && !PublishedReadbackPackages.IsEmpty()) {
+    TArray<FOperationReadback> Readbacks;
+    if (!BuildReadbackRequests(Readbacks, OutFailure)) return false;
+    if (Readbacks.Num() == AppliedMutations.Num()) {
+      bool bVerified = false;
+      const TOptional<bool> Observed = Options.ObservePublishedReadback(
+          PublishedReadbackPackages, Readbacks,
+          [this, &Readbacks, &bVerified](FOperationFailure& Failure) {
+            bVerified = true;
+            return VerifyReadbackRequests(Readbacks, Failure);
+          }, OutFailure);
+      if (Observed.IsSet()) {
+        if (Observed.GetValue() && !bVerified) {
+          SetFailure(OutFailure, TEXT("operation_persisted_observation_incomplete"),
+              TEXT("The persisted observer returned without executing the operation readback."));
+          return false;
+        }
+        if (!Observed.GetValue()) return false;
+        for (auto* Prepared : CapturedMutations)
+          Prepared->ExpectedSnapshot.ReleaseNativeValues();
+        // The published artifacts/checkpoint now own both durable versions,
+        // exactly as in UnloadForReadback. FinalReadback may restore another
+        // Editor world before durable commit; the just-saved package must not
+        // be mistaken for unsaved user work during that handoff.
+        if (EditorTransaction.IsValid()) {
+          EditorTransaction->Cancel();
+          EditorTransaction.Reset();
+        }
+        for (const auto& Published : PublishedReadbackPackages) {
+          if (Published.Intent != EPackageDurableIntent::Save) continue;
+          for (const auto& Plan : DurablePackagePlans) {
+            if (Plan.Intent == EPackageDurableIntent::Save && Plan.PackageName == Published.PackageName) {
+              if (UPackage* Package = Plan.Package.Get()) Package->SetDirtyFlag(false);
+              break;
+            }
+          }
+        }
+        return Options.FinalReadback(OutFailure);
+      }
+    }
+  }
   if (!UnloadForReadback(OutFailure) || !ReloadForReadback(OutFailure) ||
       !Verify(OutFailure))
     return false;
@@ -1296,8 +1337,17 @@ bool FOperationTransactionBackend::StageDurableArtifacts(
     Plan.TopLevelAsset = Package ? FindObject<UObject>(Package,
         *FPackageName::GetLongPackageAssetName(Plan.PackageName)) : nullptr;
   }
-  return Options.PackageStager->StagePackages(
-      DurablePackagePlans, InOutArtifacts, OutFailure);
+  if (!Options.PackageStager->StagePackages(
+      DurablePackagePlans, InOutArtifacts, OutFailure)) return false;
+  PublishedReadbackPackages.Reset();
+  for (const FPackageDurablePlan& Plan : DurablePackagePlans) {
+    const auto* Header = InOutArtifacts.FindByPredicate([&Plan](const auto& Artifact) {
+      return Artifact.ArtifactId == HeaderArtifactId(Plan);
+    });
+    if (!Header) { PublishedReadbackPackages.Reset(); break; }
+    PublishedReadbackPackages.Add({Plan.PackageName, Header->FinalPath, Plan.Intent});
+  }
+  return true;
 }
 
 bool FOperationTransactionBackend::CollectAdditionalDurableArtifacts(
@@ -1345,6 +1395,14 @@ bool FOperationTransactionBackend::StageMemoryCheckpoint(
 }
 
 bool FOperationTransactionBackend::Verify(FOperationFailure &OutFailure) {
+  TArray<FOperationReadback> Readbacks;
+  return BuildReadbackRequests(Readbacks, OutFailure)
+      && VerifyReadbackRequests(Readbacks, OutFailure);
+}
+
+bool FOperationTransactionBackend::BuildReadbackRequests(
+    TArray<FOperationReadback>& OutReadbacks, FOperationFailure& OutFailure) {
+  OutReadbacks.Reset();
   const auto Warn = [&]() {
     UeAgentAuthoringDiagnostics::ReportConsistencyWarning(OutFailure.Diagnostic.Code,
         OutFailure.Diagnostic, TEXT("operation_state_observation"));
@@ -1364,17 +1422,31 @@ bool FOperationTransactionBackend::Verify(FOperationFailure &OutFailure) {
     TArray<UeAgentAuthoringState::FReadRequest> ActualRequests;
     if (!Prepared->State->BuildActualReadRequests(ActualRequests, OutFailure))
       { Warn(); continue; }
+    OutReadbacks.Add({Prepared->State->GetResolvedOperation(),
+        MoveTemp(ActualRequests), &Prepared->ExpectedSnapshot});
+  }
+  return true;
+}
+
+bool FOperationTransactionBackend::VerifyReadbackRequests(
+    const TArray<FOperationReadback>& Readbacks, FOperationFailure& OutFailure) {
+  const auto Warn = [&]() {
+    UeAgentAuthoringDiagnostics::ReportConsistencyWarning(OutFailure.Diagnostic.Code,
+        OutFailure.Diagnostic, TEXT("operation_state_observation"));
+    OutFailure = FOperationFailure();
+  };
+  for (const FOperationReadback& Readback : Readbacks) {
     UeAgentAuthoringState::FStateSnapshot ActualSnapshot;
-    if (!CaptureRequests(ActualRequests, ActualSnapshot, OutFailure))
+    if (!CaptureRequests(Readback.Requests, ActualSnapshot, OutFailure))
       { Warn(); continue; }
 
     UeAgentAuthoringSemanticCompare::FComparisonReport Report;
     if (!UeAgentAuthoringSemanticCompare::CompareSnapshots(
-            Prepared->ExpectedSnapshot, ActualSnapshot,
+            *Readback.Expected, ActualSnapshot,
             UeAgentAuthoringSemanticCompare::FCompareOptions(), Report,
             Options.SemanticRegistry, Options.ComparatorRegistry) ||
         !Report.bEquivalent) {
-      SetSemanticComparisonFailure(OutFailure, ActualRequests, Report, false);
+      SetSemanticComparisonFailure(OutFailure, Readback.Requests, Report, false);
       Warn();
     }
   }

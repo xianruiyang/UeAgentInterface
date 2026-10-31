@@ -64,6 +64,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			if (!Object || Object->GetKind() != EUeAgentValueKind::Object) return true;
 			auto Members = Object->GetObjectItems();
+			bool bChanged = false;
 			for (auto& Member : Members)
 			{
 				for (const auto& Field : Fields)
@@ -72,11 +73,12 @@ namespace UE::UAI::HjsonWorkspace
 						FUeAgentCanonicalValuePtr Value = Member.Value;
 						if (!OrganizeValue(Value, Field.Type,
 							Name.IsEmpty() ? FString(Field.Name) : Name + TEXT("/") + Field.Name, Context)) return false;
+						bChanged |= Value.Get() != &Member.Value.Get();
 						Member.Value = Value.ToSharedRef();
 						break;
 					}
 			}
-			return Context.Build(Members, Object);
+			return !bChanged || Context.Build(Members, Object);
 		}
 
 		bool OrganizeValue(FUeAgentCanonicalValuePtr& Value, EContentType Type,
@@ -218,6 +220,7 @@ namespace UE::UAI::HjsonWorkspace
 		return true;
 		};
 		if (!OrganizeDocument()) return false;
+		if (Document.Get() == &Value->Value.Get()) return true;
 		Value->Value = Document.ToSharedRef();
 		return Context.Build(Members, VisibleRow);
 	}

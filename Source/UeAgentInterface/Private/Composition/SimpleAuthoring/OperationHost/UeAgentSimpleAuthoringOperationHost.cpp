@@ -811,6 +811,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 		return Factory;
 	}
 
+	bool TryPrepareDurableJournal(
+		const AssetDurable::FAssetDurableRequest& Request,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		AssetDurable::FAssetDurableSessionPtr& OutSession,
+		AssetDurable::FAssetDurableError& OutError)
+	{
+		TSharedPtr<IUeAgentSimpleAuthoringAssetDurableService, ESPMode::ThreadSafe> Service;
+		return TryGetDurableService(Service, OutError)
+			&& Service->TryPrepare(Request, Resources, OutSession, OutError);
+	}
+
 	bool TryInspectDurableJournal(
 		const FString& JournalId,
 		ContextResource::FUeAgentResourceTracker& Resources,

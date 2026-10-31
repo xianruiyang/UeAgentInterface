@@ -17,8 +17,11 @@ namespace UE::UAI::ContentDiscovery
 			UE::UAI::Contract::FDiagnostic* OutError = nullptr,
 			const FNameSelectionInputContext* InputContext = nullptr)
 		{
+			const FString NameField = InputContext ? InputContext->NameField : TEXT("name");
+			const FString SelectField = InputContext ? InputContext->SelectField : TEXT("select");
+			const FString SelectPointer = TEXT("/") + SelectField.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
 			auto Candidate = MakeShared<FJsonObject>();
-			Candidate->SetStringField(TEXT("name"), Name);
+			Candidate->SetStringField(NameField, Name);
 			auto Selection = MakeShared<FJsonObject>();
 			for (const TPair<FString, FString>& Field : Select)
 			{
@@ -29,10 +32,10 @@ namespace UE::UAI::ContentDiscovery
 					{
 						*OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("candidate_selector_invalid"),
 							!IsReadableDiscoveryName(Field.Key) ? TEXT("A candidate selection field has an empty or unreadable semantic name.") : TEXT("A candidate selection field has an empty or unreadable semantic value."), TEXT("candidate_selection"));
-						OutError->PropertyPath = IsReadableDiscoveryName(Field.Key) ? TEXT("select.") + Field.Key : TEXT("select");
+						OutError->PropertyPath = IsReadableDiscoveryName(Field.Key) ? SelectField + TEXT(".") + Field.Key : SelectField;
 						if (InputContext) OutError->Source.JsonPath = IsReadableDiscoveryName(Field.Key)
-							? TEXT("/select/") + Field.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))
-							: TEXT("/select");
+							? SelectPointer + TEXT("/") + Field.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))
+							: SelectPointer;
 						OutError->ActualEvidence = MakeShared<FJsonValueString>(!IsReadableDiscoveryName(Field.Key) ? Field.Key : Field.Value);
 						OutError->ExpectedValue = MakeShared<FJsonValueString>(TEXT("readable semantic string"));
 					}
@@ -42,12 +45,12 @@ namespace UE::UAI::ContentDiscovery
 			}
 			if (!Select.IsEmpty())
 			{
-				Candidate->SetObjectField(TEXT("select"), Selection);
+				Candidate->SetObjectField(SelectField, Selection);
 			}
 			HjsonWorkspace::DomainAuthoring::FDomainHjsonCandidateSelector Parsed;
 			HjsonWorkspace::FWorkspaceError SyntaxError;
 			if (!HjsonWorkspace::DomainAuthoring::TryReadCandidateSelector(
-				Candidate, InputContext ? TEXT("") : TEXT("candidate"), Parsed, SyntaxError))
+				Candidate, InputContext ? TEXT("") : TEXT("candidate"), Parsed, SyntaxError, NameField, SelectField))
 			{
 				if (OutError) *OutError = SyntaxError.GetDiagnostic();
 				return false;
@@ -251,7 +254,11 @@ namespace UE::UAI::ContentDiscovery
 		const ENameComparison Comparison, const FNameSelectionInputContext* InputContext)
 	{
 		OutIndex = INDEX_NONE; OutError.Reset();
-		auto AttachInputSource = [&](const TCHAR* RelativePointer)
+		const FString NameField = InputContext ? InputContext->NameField : TEXT("name");
+		const FString SelectField = InputContext ? InputContext->SelectField : TEXT("select");
+		const FString NamePointer = TEXT("/") + NameField.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		const FString SelectPointer = TEXT("/") + SelectField.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		auto AttachInputSource = [&](const FString& RelativePointer)
 		{
 			if (!InputContext || OutError.SourceKind == TEXT("native_result") || !OutError.Source.SourceFile.IsEmpty()) return;
 			if (OutError.Source.JsonPath.IsEmpty()) OutError.Source.JsonPath = RelativePointer;
@@ -277,7 +284,7 @@ namespace UE::UAI::ContentDiscovery
 			OutError = !SyntaxError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("candidate_selector_invalid"), SyntaxError, TEXT("candidate_selection"))
 				: UE::UAI::Contract::FDiagnostic::Failure(TEXT("candidate_selector_invalid"), TEXT("Candidate select requires at most two readable semantic string fields."), TEXT("candidate_selection"));
 			OutError.CandidateName = Name;
-			AttachInputSource(TEXT("/select"));
+			AttachInputSource(SelectPointer);
 			return false;
 		}
 		TArray<int32> NamedEntries;
@@ -288,7 +295,7 @@ namespace UE::UAI::ContentDiscovery
 				? ESearchCase::IgnoreCase : ESearchCase::CaseSensitive)) continue;
 			NamedEntries.Add(Index);
 		}
-		if (NamedEntries.IsEmpty()) { OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("candidate_name_not_found"), FString::Printf(TEXT("No candidate named '%s' exists in the current creation context."), *Name), TEXT("candidate_selection")); OutError.CandidateName = Name; AttachInputSource(TEXT("/name")); return false; }
+		if (NamedEntries.IsEmpty()) { OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("candidate_name_not_found"), FString::Printf(TEXT("No candidate named '%s' exists in the current creation context."), *Name), TEXT("candidate_selection")); OutError.CandidateName = Name; AttachInputSource(NamePointer); return false; }
 		TArray<FNameSelectionGroup> Groups;
 		if (!TryGroupNameSelectionEntries(Entries, NamedEntries, Groups, OutError)) return false;
 		TArray<int32> Representatives;
@@ -320,22 +327,22 @@ namespace UE::UAI::ContentDiscovery
 			}
 			else
 			{
-				OutError.PublicMessage += TEXT(" This name is unique; omit select.");
+				OutError.PublicMessage += FString::Printf(TEXT(" This name is unique; omit %s."), *SelectField);
 				OutError.ExpectedValue = MakeShared<FJsonValueObject>(MakeShared<FJsonObject>());
 			}
 			OutError.CandidateName = Name;
 			auto ActualSelection = MakeShared<FJsonObject>();
 			for (const auto& Field : Select) ActualSelection->SetStringField(Field.Key, Field.Value);
-			OutError.PropertyPath = TEXT("select"); OutError.ActualValue = MakeShared<FJsonValueObject>(ActualSelection);
-			AttachInputSource(TEXT("/select"));
+			OutError.PropertyPath = SelectField; OutError.ActualValue = MakeShared<FJsonValueObject>(ActualSelection);
+			AttachInputSource(SelectPointer);
 			return false;
 		}
 		if (!TryBuildAmbiguity(Entries, NamedEntries, Matches, Name, OutError))
 		{
-			AttachInputSource(Select.IsEmpty() ? TEXT("/name") : TEXT("/select"));
+			AttachInputSource(Select.IsEmpty() ? NamePointer : SelectPointer);
 			return false;
 		}
-		AttachInputSource(Select.IsEmpty() ? TEXT("/name") : TEXT("/select"));
+		AttachInputSource(Select.IsEmpty() ? NamePointer : SelectPointer);
 		return false;
 	}
 

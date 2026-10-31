@@ -2523,6 +2523,7 @@ namespace UE::UAI::Composition::GraphCompound
 					? FPaths::ProjectSavedDir()
 						/ TEXT("UeAgentInterface/GraphCompoundDurable")
 					: Config.DurableJournalRoot)
+				, DurableBackend(FString(), Config.AdditionalDurableContentRoots)
 				, NiagaraLifecycle(
 					JournalRoot, MaterialNativeHook,
 					DurableBackend, LastFencingToken)

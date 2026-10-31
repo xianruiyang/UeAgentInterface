@@ -118,6 +118,7 @@ namespace UE::UAI::HjsonWorkspace
 		const TArray<FSemanticUnit>& GetUnits() const;
 		const TArray<FString>& GetTargetUnitIds() const;
 		const FSemanticUnit* FindUnit(const FString& UnitId) const;
+		TArray<const FSemanticUnit*> FindUnitsForTargetIdentity(const FString& TargetIdentity) const;
 		const FString* FindReadablePropertyDefinitionName(const FString& UnitId) const;
 		const FString& GetSemanticFingerprint() const;
 
@@ -138,6 +139,7 @@ namespace UE::UAI::HjsonWorkspace
 		TArray<FSemanticUnit> Units;
 		TArray<FString> TargetUnitIds;
 		TMap<FString, int32> UnitIndex;
+		TMap<uint32, TArray<int32>> TargetIdentityIndex;
 		TMap<FString, FString> ReadablePropertyDefinitionNames;
 		FString SemanticFingerprint;
 
@@ -261,6 +263,9 @@ namespace UE::UAI::HjsonWorkspace
 
 	UEAGENTINTERFACE_API bool TryHashSemanticUnitContent(
 		const FSemanticUnit& Unit, FString& OutHash, FWorkspaceError& OutError);
+	/** Exact strings/keys and container membership; only number/bool leaves may differ. */
+	bool HaveOnlyNumericOrBooleanValueChanges(const StateSemantic::FUeAgentCanonicalValue& A,
+		const StateSemantic::FUeAgentCanonicalValue& B);
 
 	UEAGENTINTERFACE_API bool TrySerializeSemanticHjsonObject(
 		const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Object,

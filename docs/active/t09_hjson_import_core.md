@@ -47,9 +47,12 @@ before original-file locations are attached. Existing precise native-file locati
 ## Successful directory import refresh
 
 After native apply and final readback succeed, the public source-custody coordinator
-calls the target's existing exporter into a temporary sibling directory. The shared
-artifact publisher then publishes those canonical files back to the source root,
-using its existing staging, backup, verification and rollback lifecycle. Files
+calls the target's existing exporter. Level returns its freshly captured export
+plan through an internal request-local output, and the shared artifact publisher
+publishes it directly back to the source root once. There is no intermediate
+Level export directory to write, verify, reload and republish. Other exporters
+retain the temporary sibling export path. Both paths share the same source-file
+preservation logic and staging, backup, verification and rollback lifecycle. Files
 outside the old/current managed set are retained byte-for-byte, including binary
 files and unrelated HJSON. A canonical path collision with a retained user file
 is reported rather than overwriting that file.
@@ -65,6 +68,71 @@ reports `asset_applied=true`, `retry_import=false` and recovery instructions.
 This does not relabel an applied asset operation as rolled back. Failed asset
 apply never refreshes the source. Inline/single-file creates and legacy bundles
 do not acquire this semantic-directory refresh behavior.
+
+Successful semantic-directory imports also return `execution_timing` with
+`scope: "server_directory_import"` and seconds measured at the existing source-custody
+coordinator: `source_prepare_seconds`, `domain_import_seconds`,
+`workspace_export_seconds`, `workspace_refresh_other_seconds`, and `total_seconds`.
+Source preparation reuses managed paths from the same verified semantic resolve
+used for revision/fingerprint recovery; it does not parse the directory again
+only to collect refresh paths. This is request-local reuse, with the existing
+complete canonical export and publication behavior retained.
+The domain interval includes its own planning, apply, native update, persistence
+and readback; it does not claim to separate those internal stages. The refresh
+export interval covers capture and plan preparation for Level; publication belongs
+to refresh-other. For other exporters, export still includes the temporary export's
+publication. Refresh-other also includes source preservation and cleanup. Compare
+the combined refresh interval across these implementations, not either bucket in
+isolation. Client transport/waiting and model time are outside
+these server measurements. Timing is diagnostic evidence and changes no success,
+refresh, retry or recovery semantics. Failed refreshes retain a matching timing
+line in the Editor log; they do not fabricate a successful public timing result.
+
+Level export reuses the canonical model already built by its current native
+capture when that model matches the requested profile. It uses the same export
+planner/publisher without rebuilding the model from the same snapshot. This also
+applies to directory-import refresh. It does not reuse pre-import state, change
+the native capture scope, or turn structural final readback into a complete
+property snapshot. Other profiles retain their existing projection path.
+
+The optional Level `scene_editing` profile selects a smaller Actor/Component
+capture before planning; its scope is defined in [T26](t26_level_world_domain.md#optional-scene-editing-profile).
+Source custody carries the verified workspace profile to Level import and refresh,
+so successful refresh does not silently expand a scene workspace to `llm_authoring`.
+
+The prepared plan is an immutable, in-memory result of this request, not a cache
+of pre-import state and not an extra public command or parameter. Public exports
+still publish normally. Only successful native apply/readback can enter refresh;
+the final publication retains ownership/collision checks, stale generated-file
+removal, disk readback and HJSON reparse. Refresh failure still reports the applied
+asset boundary described above.
+
+Developer logs prefixed `UAI export timing phase=` break down native Level
+request construction/snapshot reads, canonical capture/model composition, export
+planning, publication, and result assembly. Export planning separates layout,
+documents, inventory, navigation, examples, manifest serialization, and plan
+finalization. Publication separates preflight, staging write/readback, HJSON
+reparse, inventory checks, commit, final verification, and cleanup. These are
+wall-clock measurements of the existing execution path, not new commands or
+public result fields. Parent durations include their children: `model_compose`
+is inside `canonical_capture`; `compact_validation_s` is inside export-plan
+`documents_s`; staging write/readback and parse are inside `generated_s`. Do not
+sum nested values. A successful-stage line does not prove the enclosing export
+succeeded; the normal result remains authoritative. An early failure may have
+no final timing line. Counters and timings do not enter workspace content or
+fingerprints.
+
+`workspace_export_prepare` measures the Level refresh plan preparation that ends
+before publication. Content organization reuses unchanged canonical objects while
+retaining canonical/JSON normalization. Serialization writes UTF-8 directly into
+the final byte array; completed file arrays move into the export plan after hashing.
+These changes avoid temporary allocations/copies without changing the workspace
+format, hashes or formatter checks.
+
+Packed rows retain the same formatter analysis, preflight, and render checks.
+The discarded compact-row UTF-8 copy and edit hash are omitted; the visible-row
+serialization still supplies the final edit hash. No formatter failure is
+suppressed and no separate validation implementation is introduced.
 
 `TryPlanHjsonImportInitialization` validates the source baseline, exact target
 revision, every explicit change, the server-resolved candidate binding,

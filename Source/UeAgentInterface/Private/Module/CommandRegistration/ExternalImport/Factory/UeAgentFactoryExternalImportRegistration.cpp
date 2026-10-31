@@ -82,7 +82,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 				TEXT("options"),
 				TEXT("object"),
 				false,
-				TEXT("Bounded factory options. Texture supports srgb, compression_settings, mip_gen_settings and lod_group. FBX skeletal mesh supports skeleton_ref, import_morph_targets, import_animations, update_skeleton_reference_pose and expected result validation. Unknown or inapplicable options fail before mutation.")));
+				TEXT("Bounded factory options. FBX static mesh combines source nodes into one asset and supports import_materials and import_textures. Texture supports srgb, compression_settings, mip_gen_settings and lod_group. FBX skeletal mesh supports skeleton_ref, import_morph_targets, import_animations, update_skeleton_reference_pose and expected result validation. Unknown or inapplicable options fail before mutation.")));
 			Result.ResultFields = {
 				Field(TEXT("command_id"), TEXT("string"), true,
 					TEXT("The unchanged exact public command identity.")),

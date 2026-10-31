@@ -5,6 +5,7 @@
 #include "Core/Contract/UeAgentDiagnostic.h"
 #include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeDiagnostics.h"
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationContract.h"
+#include "DomainAdapters/EditorSessionOperation/UeAgentPieLaunchPolicy.h"
 #include "DomainAdapters/EditorProject/UeAgentSettingsConfig.h"
 
 #include "Async/Async.h"
@@ -694,7 +695,15 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 						Self->ShutdownHandle.Reset();
 					}
 				});
-				GUnrealEd->RequestPlaySession(Params);
+				UE::UAI::Contract::FDiagnostic LaunchError;
+				if (!LaunchPolicy.RequestPlaySession(Params, [WeakSelf](bool bStarted, const UE::UAI::Contract::FDiagnostic& Error) {
+					if (!bStarted)
+						if (const auto Self = WeakSelf.Pin()) Self->BeginStopOnGameThread(false, Error);
+				}, LaunchError))
+				{
+					BeginStopOnGameThread(false, MoveTemp(LaunchError));
+					return;
+				}
 
 				const FTSTicker::FDelegateHandle Handle =
 					FTSTicker::GetCoreTicker().AddTicker(
@@ -769,6 +778,9 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 						&& CancellationToken->IsCancelled();
 					LocalState = State;
 				}
+				if (LocalState == EDebugEditorSessionState::Stopping
+					|| LocalState == EDebugEditorSessionState::ExitedFailure
+					|| LocalState == EDebugEditorSessionState::ExitedSuccess) return false;
 				if (bLocalStopRequested || bCancelled)
 				{
 					BeginStopOnGameThread(true, UE::UAI::Contract::FDiagnostic());
@@ -840,6 +852,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 			void BeginStopOnGameThread(bool bRequestedSuccess, UE::UAI::Contract::FDiagnostic FailureDiagnostic)
 			{
 				check(IsInGameThread());
+				LaunchPolicy.Disarm();
 				RefreshHiddenPieSurfaceOwnershipOnGameThread();
 				FString ActiveSessionRef;
 				{
@@ -977,6 +990,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 			const int32 LocalPlayerIndex;
 			const FIntPoint ViewportSize;
 			FPieWindowPreferences WindowPreferences;
+			FPieLaunchPolicy LaunchPolicy;
 			FDelegateHandle PreEndHandle;
 			FDelegateHandle ShutdownHandle;
 			TSharedRef<FUeAgentPieRuntimeDebugRegistry, ESPMode::ThreadSafe> Registry;

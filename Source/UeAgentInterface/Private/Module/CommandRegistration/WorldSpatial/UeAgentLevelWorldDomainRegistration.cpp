@@ -98,6 +98,39 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 			return Result;
 		}
 
+		FUeAgentCommandDeclaration ComponentCandidateDeclaration()
+		{
+			auto Result = CandidateDeclaration();
+			Result.CommandId = TEXT("world.component.candidates");
+			Result.PythonFunction = TEXT("component_candidates");
+			Result.InputFields = {
+				Field(TEXT("target"), TEXT("string"), true, TEXT("Exact owning Level Actor object_ref returned by content_graph.items.")),
+				Field(TEXT("query"), TEXT("string"), false, TEXT("Optional native component catalog text filter.")),
+				Field(TEXT("describe"), TEXT("object"), false, TEXT("One candidate: name, optional select, optional fields. Returns native default property descriptors usable as creation properties.")),
+			};
+			Result.ResultFields = {
+				Field(TEXT("scope"), TEXT("object"), true, TEXT("Owning Actor and World context.")),
+				Field(TEXT("names"), TEXT("array"), true, TEXT("Native component candidate names; the selected name when describing one candidate.")),
+				Field(TEXT("description"), TEXT("object"), false, TEXT("Native defaults, creation support and selected editable property descriptors.")),
+			};
+			Result.Errors = {
+				{TEXT("level_component_candidate_owner_invalid"), TEXT("target must identify a loaded, authorable Level Actor.")},
+				{TEXT("level_component_not_authorable"), TEXT("The native component class or owner cannot be authored.")},
+			};
+			Result.Purpose.Summary = TEXT("Discover native components for an existing Level Actor and describe creation properties.");
+			Result.Purpose.Target = TEXT("One owning Level Actor object_ref; not a Blueprint asset or World path.");
+			Result.Purpose.Preconditions = {TEXT("Obtain the exact Actor object_ref from content_graph.items.")};
+			Result.Purpose.ParameterGuidance = TEXT("Use query for names; use describe with name/select and a small fields list for native defaults.");
+			Result.Purpose.ResultGuidance = TEXT("Add the chosen name and edited description.properties to a new key in the owning Actor's level_components.hjson components map.");
+			Result.Purpose.FailureGuidance = TEXT("Resolve ambiguous names with select; instance edits cannot remove components owned by the Actor class or Blueprint construction.");
+			Result.Purpose.SideEffectGuidance = TEXT("Read-only native discovery; no persistent Actor or component is created.");
+			Result.Purpose.MinimumExample = TEXT("client.world.component_candidates(target=actor_object_ref, describe={'name':'Point Light','fields':['Intensity']})");
+			Result.Purpose.RelatedFlows = {TEXT("content_graph.items"), TEXT("content_graph.export_workspace"), TEXT("content_graph.import_workspace")};
+			Result.Purpose.Keywords = {TEXT("level"), TEXT("component"), TEXT("candidate"), TEXT("properties"), TEXT("hjson")};
+			Result.Purpose.Synonyms = {TEXT("add Level Actor component")};
+			return Result;
+		}
+
 		class FCandidateContribution final : public IUeAgentActiveCommandContribution
 		{
 		public:
@@ -111,6 +144,7 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 				TArray<FUeAgentCommandDeclaration>& OutDeclarations) const override
 			{
 				OutDeclarations.Add(CandidateDeclaration());
+				OutDeclarations.Add(ComponentCandidateDeclaration());
 			}
 
 			virtual bool CreateHandlers(

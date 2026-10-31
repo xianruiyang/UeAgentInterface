@@ -13,6 +13,7 @@
 namespace UE::UAI::HjsonWorkspace
 {
 	class FHjsonNode;
+	struct FPreparedWorkspaceExport;
 	enum class EAuthoringSurfaceKind : uint8
 	{
 		Properties,
@@ -245,7 +246,20 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& ProfileId,
 		const UeAgentAuthoringState::FStateSnapshot& Snapshot,
 		const FString& WorkspaceRoot,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		FPreparedWorkspaceExport* PreparedExport = nullptr);
+
+	/** Publish an already-built capture through the same planner and publisher.
+	 * Model and snapshot binding must come from the same canonical capture. */
+	UEAGENTINTERFACE_API bool TryExportCapturedCompositionWorkspace(
+		const FString& TargetKind,
+		const FString& ProfileId,
+		FAuthoringModelRef Model,
+		const FCompositionSnapshotBinding& SnapshotBinding,
+		const FString& WorkspaceRoot,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		FPreparedWorkspaceExport* PreparedExport = nullptr);
 
 	/** Reuses composition's type/value and definition projection for nested reflected records.
 	 * Native scope binds recursive rows to their live reflected schema instead of a definition catalog;

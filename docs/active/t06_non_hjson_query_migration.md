@@ -93,6 +93,42 @@ not its Actor or asset. `vertex_index` is the zero-based position in ascending l
 vertex-ID order; it is local to the current topology. Positions are transformed
 through the component into the requested world-space observation.
 
+`world.capsule_path` keeps its default payload as `{"blocked_segments": N}`.
+It sweeps a world-vertical capsule through each input segment in `step_cm`
+substeps, stops at the first blocker within that segment, then visits the
+remaining input segments to complete the count. A blocked path is a successful
+query result, not a query error. Existing input validation and channel defaults
+remain unchanged.
+
+Optional `include_first_hit` and `trace_complex` both default to `false`.
+When `include_first_hit=true`, the same already-computed native hit is published
+as `first_blocking_hit`; no additional collision query is performed. The field
+is explicitly `null` when no segment is blocked, and is omitted when the option
+is omitted or false. A non-null record contains:
+
+| Field | Meaning |
+| --- | --- |
+| `segment_index` | Zero-based input segment joining `points[i]` and `points[i+1]`; the earliest blocked segment in input order, then its first blocked substep. |
+| `target_ref` | Native hit Component object path, or null if the native hit has no Component. This is not a ContentGraph/HJSON selector or an identity for an internal mesh wall. |
+| `shape_location` | Native swept capsule center at the hit. |
+| `impact_point` | Native impact point. |
+| `start_penetrating` | Native initial-penetration flag. For an initial overlap, the reported positions do not establish a precise contact surface. |
+
+Both positions use the existing spatial-value shape with `frame_id="ue.world"`,
+`unit="centimeter"` and three `components`. The result is the first blocker in
+path order, not all blockers or the globally nearest object. `trace_complex`
+selects the same native collision query's representation; asset collision flags
+still determine the available geometry. A complex-query pass does not establish
+that the Pawn's actual movement representation can pass, and static sweeps do
+not prove navigation, step-up, floor support or runtime movement.
+
+WorldRead remains the sole mechanics owner. Its canonical nullable observation
+and the shared public projection preserve the requested null; other optional
+fields retain their existing omission behavior. `capsule_sweep` remains useful
+for its multi-hit or direct single-segment query, and `overlap` for occupancy.
+Do not append either solely to recover the same first hit already returned by
+`capsule_path`.
+
 `editor.dirty_resources` owns a read-only dirty-resource observation rather
 than reusing the open-asset set. For `map` resources it observes loaded World
 packages, their loaded map-build-data packages, and loaded External Actor
@@ -145,6 +181,16 @@ existing capabilities with a public `diagnostics` warning. Description queries
 can explain a specific action's support without creating it.
 
 ## Public SDK and CLI
+
+`asset.sample` reads native mesh observations. `bounds` returns local-centimetre
+origin/extents for StaticMesh or SkeletalMesh; `vertex` requires a StaticMesh LOD 0
+vertex ID. `section` reads a StaticMesh LOD 0 render section (`index` defaults to
+0), returning section/slot counts, triangle count, actual render material index
+and path, and current/original editor section-map indices. An out-of-range
+material reference is returned with `material_index_valid=false` and an empty
+path so a missing material remains diagnosable. An invalid section index fails.
+Only the requested asset's pending compilation is finished before reading render
+data; the query neither edits slots nor opens an asset editor.
 
 Diagnostics report coverage separately from messages and never trigger compile
 or open an editor. Niagara stored VM freshness follows its native owner:

@@ -262,11 +262,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FWorldSpatialValue Pivot;
 		TOptional<bool> PreserveWorldGeometry;
 	};
-	struct FViewportRayDeprojectRequestInput { FWorldSpatialValue ScreenPoint; };
+	struct FViewportRayDeprojectRequestInput
+	{
+		FWorldSpatialValue ScreenPoint;
+		TOptional<FIntPoint> ColdStartRenderSize;
+	};
 	struct FViewportRayTraceRequestInput
 	{
 		FWorldSpatialValue ScreenPoint;
 		FWorldSpatialTraceQuery TraceQuery;
+		TOptional<FIntPoint> ColdStartRenderSize;
 	};
 	struct FViewportActorPickRequestInput
 	{

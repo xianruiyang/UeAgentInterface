@@ -1759,7 +1759,9 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		const TSharedPtr<const FJsonObject>& Candidate,
 		const FString& JsonPointer,
 		FDomainHjsonCandidateSelector& OutSelector,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		const FString& NameField,
+		const FString& SelectField)
 	{
 		OutSelector = {};
 		OutError.Reset();
@@ -1770,13 +1772,14 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			return Fail(OutError, MoveTemp(Error), FString(), JsonPointer);
 		}
 
-		const FString NamePointer = JsonPointer + TEXT("/name");
+		const FString NamePointer = JsonPointer + TEXT("/") + EscapeJsonPointerSegment(NameField);
+		const FString SelectPointer = JsonPointer + TEXT("/") + EscapeJsonPointerSegment(SelectField);
 		FString RawName;
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Candidate->Values)
 		{
-			if (Field.Key != TEXT("name") && Field.Key != TEXT("select"))
+			if (Field.Key != NameField && Field.Key != SelectField)
 			{
-				auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("domain_hjson_candidate_selector_field_unsupported"), TEXT("Candidate selectors support only name and select fields."), TEXT("domain_authoring"));
+				auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("domain_hjson_candidate_selector_field_unsupported"), FString::Printf(TEXT("Candidate selectors support only %s and %s fields."), *NameField, *SelectField), TEXT("domain_authoring"));
 				Error.ActualValue = MakeShared<FJsonValueString>(Field.Key);
 				return Fail(OutError, MoveTemp(Error), FString(), JsonPointer + TEXT("/") + EscapeJsonPointerSegment(Field.Key));
 			}
@@ -1799,36 +1802,36 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			return true;
 		};
 
-		if (!TryReadStrictString(TEXT("name"), RawName))
+		if (!TryReadStrictString(*NameField, RawName))
 		{
 			return Fail(OutError, UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("domain_hjson_candidate_selector_invalid"), NamePointer,
-				MakeShared<FJsonValueString>(TEXT("string")), MakeShared<FJsonValueString>(UeAgentJsonDiagnostics::JsonValueTypeToString(Candidate->TryGetField(TEXT("name")))),
+				MakeShared<FJsonValueString>(TEXT("string")), MakeShared<FJsonValueString>(UeAgentJsonDiagnostics::JsonValueTypeToString(Candidate->TryGetField(NameField))),
 				TEXT("domain_authoring"), TEXT("The candidate name must be a string.")), FString(), NamePointer);
 		}
 		OutSelector.Name = RawName.TrimStartAndEnd();
 		if (OutSelector.Name.IsEmpty())
 		{
 			return Fail(OutError, UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("domain_hjson_candidate_selector_required"), NamePointer,
-				MakeShared<FJsonValueString>(TEXT("non-empty string")), Candidate->TryGetField(TEXT("name")), TEXT("domain_authoring"),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")), Candidate->TryGetField(NameField), TEXT("domain_authoring"),
 				TEXT("The candidate selector requires a non-empty name.")), FString(), NamePointer);
 		}
 
 		const TSharedPtr<FJsonObject>* Select = nullptr;
-		if (Candidate->HasField(TEXT("select")))
+		if (Candidate->HasField(SelectField))
 		{
-			if (!Candidate->TryGetObjectField(TEXT("select"), Select)
+			if (!Candidate->TryGetObjectField(SelectField, Select)
 				|| Select == nullptr || !Select->IsValid())
 			{
-				return Fail(OutError, UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("domain_hjson_candidate_selector_select_invalid"), JsonPointer + TEXT("/select"),
-					MakeShared<FJsonValueString>(TEXT("object")), MakeShared<FJsonValueString>(UeAgentJsonDiagnostics::JsonValueTypeToString(Candidate->TryGetField(TEXT("select")))),
-					TEXT("domain_authoring"), TEXT("Candidate select must be an object containing one or two semantic fields.")), FString(), JsonPointer + TEXT("/select"));
+				return Fail(OutError, UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("domain_hjson_candidate_selector_select_invalid"), SelectPointer,
+					MakeShared<FJsonValueString>(TEXT("object")), MakeShared<FJsonValueString>(UeAgentJsonDiagnostics::JsonValueTypeToString(Candidate->TryGetField(SelectField))),
+					TEXT("domain_authoring"), TEXT("Candidate select must be an object containing one or two semantic fields.")), FString(), SelectPointer);
 			}
 			if ((*Select)->Values.IsEmpty() || (*Select)->Values.Num() > 2)
 			{
 				return Fail(OutError, UE::UAI::Contract::FDiagnostic::Failure(
 					TEXT("domain_hjson_candidate_selector_select_invalid"),
 					FString::Printf(TEXT("Candidate select requires one or two semantic fields; received %d."), (*Select)->Values.Num()),
-					TEXT("domain_authoring")), FString(), JsonPointer + TEXT("/select"));
+					TEXT("domain_authoring")), FString(), SelectPointer);
 			}
 			TSet<FString> SeenSelectKeys;
 			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field :
@@ -1849,7 +1852,7 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 					Error.CandidateName = OutSelector.Name;
 					if (Key.IsEmpty() || SeenSelectKeys.Contains(LowerKey)) Error.ActualValue = MakeShared<FJsonValueString>(Field.Key);
 					else Error.ActualValue = MakeShared<FJsonValueString>(UeAgentJsonDiagnostics::JsonValueTypeToString(Field.Value));
-					return Fail(OutError, MoveTemp(Error), FString(), JsonPointer + TEXT("/select/") + EscapeJsonPointerSegment(Field.Key));
+					return Fail(OutError, MoveTemp(Error), FString(), SelectPointer + TEXT("/") + EscapeJsonPointerSegment(Field.Key));
 				}
 				SeenSelectKeys.Add(LowerKey);
 				Value.TrimStartAndEndInline();
@@ -1868,7 +1871,7 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 					Error.CandidateName = OutSelector.Name;
 					if (Value.IsEmpty()) Error.ActualValue = MakeShared<FJsonValueString>(FString());
 					else Error.ActualEvidence = Field.Value;
-					return Fail(OutError, MoveTemp(Error), FString(), JsonPointer + TEXT("/select/") + EscapeJsonPointerSegment(Field.Key));
+					return Fail(OutError, MoveTemp(Error), FString(), SelectPointer + TEXT("/") + EscapeJsonPointerSegment(Field.Key));
 				}
 				OutSelector.Select.Add(Key, MoveTemp(Value));
 			}

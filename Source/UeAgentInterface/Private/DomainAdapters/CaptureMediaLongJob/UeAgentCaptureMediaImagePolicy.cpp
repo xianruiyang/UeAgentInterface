@@ -1,12 +1,15 @@
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaImagePolicy.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/Contract/UeAgentContractJson.h"
+#include "Core/Contract/UeAgentContractSchema.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaDiagnostics.h"
 
 #include <initializer_list>
 
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentAudioAssetEditorCapture.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentAssetFolderThumbnailCapture.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentAssetEditorImageCapture.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentBlueprintEditorCapture.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentLevelViewportSequenceCapture.h"
@@ -50,6 +53,34 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 
 	namespace
 	{
+		void RemoveParameterSchemaAnnotations(const TSharedPtr<FJsonObject>& Schema)
+		{
+			// Discovery includes documentation/default annotations. ContractSchema v1
+			// validates assertions only; do not remove names from authored object data.
+			Schema->RemoveField(TEXT("default"));
+			Schema->RemoveField(TEXT("description"));
+			const TSharedPtr<FJsonObject>* Properties = nullptr;
+			if (Schema->TryGetObjectField(TEXT("properties"), Properties))
+			{
+				for (const auto& Property : (*Properties)->Values)
+					if (Property.Value.IsValid() && Property.Value->Type == EJson::Object)
+						RemoveParameterSchemaAnnotations(Property.Value->AsObject());
+			}
+			for (const TCHAR* Field : {TEXT("items"), TEXT("additionalProperties"), TEXT("not")})
+			{
+				const TSharedPtr<FJsonObject>* Child = nullptr;
+				if (Schema->TryGetObjectField(Field, Child)) RemoveParameterSchemaAnnotations(*Child);
+			}
+			for (const TCHAR* Field : {TEXT("allOf"), TEXT("anyOf"), TEXT("oneOf")})
+			{
+				const TArray<TSharedPtr<FJsonValue>>* Children = nullptr;
+				if (Schema->TryGetArrayField(Field, Children))
+					for (const auto& Child : *Children)
+						if (Child.IsValid() && Child->Type == EJson::Object)
+							RemoveParameterSchemaAnnotations(Child->AsObject());
+			}
+		}
+
 		void LocateProjectedDiagnostic(UE::UAI::Contract::FDiagnostic& Diagnostic,
 			const TMap<FString, UE::UAI::Contract::FSourceLocation>& Sources)
 		{
@@ -312,6 +343,14 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		const TArray<FPolicyRoute>& Routes()
 		{
 			static const TArray<FPolicyRoute> Value = {
+				{{TEXT("policy:image-capture:asset-folder-thumbnail/v1"),
+					TEXT("mechanics:capture:asset-folder-thumbnail/v1"),
+					GetAssetFolderPreviewOptionsSchema(),
+					TEXT("Read a content folder's registry and native cached thumbnails into named contact sheets; no asset editors or implicit asset loading."),
+					TEXT("Finish and materialize the sheets; asset_catalog retains complete identities and missing-thumbnail states, with next_after for continuation."),
+					TEXT("client.asset.folder_preview(folder='/Game/RuinedCrypt')"),
+					TEXT(R"schema({"type":"string","pattern":"^capture-subject:asset-folder:.+"})schema")},
+					TEXT("asset_folder_thumbnail_capture"), nullptr, nullptr, FString(), &TryCaptureAssetFolderThumbnails},
 				{{TEXT("policy:image-capture:asset-preview/v1"),
 					TEXT("mechanics:capture:asset-preview/v1"),
 					TEXT("{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"target\":{\"type\":\"string\",\"minLength\":1},\"mode\":{\"type\":\"string\",\"enum\":[\"single\",\"sequence\"]}}}"),
@@ -435,7 +474,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					&TryCaptureViewportBufferImage},
 				{{TEXT("policy:image-capture:viewport/v1"),
 					TEXT("mechanics:capture:level-viewport-visualization/v1"),
-					ViewportParameterSchema(),
+					ViewportParameterSchema(TEXT(R"schema("cold_start_render_size":{"type":"object","additionalProperties":false,"required":["width","height"],"properties":{"width":{"type":"integer","minimum":1,"maximum":4096},"height":{"type":"integer","minimum":1,"maximum":4096}},"description":"Optional explicit extent for a zero-sized Editor viewport. Omission adapts to its window's single-monitor work area, bounded to 4096 per edge; display lookup failure uses primary monitor then 1280x720. Existing positive viewport extents take precedence. No native window geometry changes; max_size remains output downscaling."})schema")),
 					TEXT("Use exact subject_ref capture-subject:viewport:active. Optional parameters select png/jpg/jpeg output, quality, maximum size, output path, warmup frames and a temporary view mode that is restored after capture."),
 					TEXT("Poll operation.status until terminal, read latest_signal.payload.artifact_ref, then verify the published image artifact before releasing the operation."),
 					TEXT("client.capture.image_execute(subject_ref='capture-subject:viewport:active', policy_id='policy:image-capture:viewport/v1', parameters={'format': 'png', 'max_size': 1024, 'restore_view_mode_after_capture': True})"),
@@ -512,6 +551,11 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					ResolveProjectRelativeFilePath(RequestedOutput);
 			}
 			const FString& Subject = Request.GetSubjectRef();
+			if (Subject.StartsWith(TEXT("capture-subject:asset-folder:")))
+			{
+				OutParameters->SetStringField(TEXT("folder"), Subject.RightChop(FString(TEXT("capture-subject:asset-folder:")).Len()));
+				MarkDerivedParameter(OutSources, TEXT("folder"));
+			}
 			const bool bActorSubject = Subject.StartsWith(TEXT("capture-subject:actor:"));
 			const bool bAssetSubject = Subject.StartsWith(TEXT("capture-subject:asset:"));
 			const bool bPcgViewport = Route.Descriptor.GetPolicyId() == TEXT("policy:image-capture:pcg-viewport/v1");
@@ -769,10 +813,18 @@ AttemptedPaths->SetField(Pointer, Facts({
 			const bool bLevelSequence = Route.Descriptor.GetPolicyId() == TEXT("policy:image-capture:level-sequence/v1");
 
 			const TSharedRef<FJsonObject> Receipt = MakeShared<FJsonObject>();
+			if (Route.Descriptor.GetPolicyId() == TEXT("policy:image-capture:asset-folder-thumbnail/v1"))
+			{
+				CopyReceiptField(Result, Receipt, TEXT("asset_catalog"));
+				const TArray<TSharedPtr<FJsonValue>>* SheetPaths = nullptr;
+				if (Result.IsValid() && Result->TryGetArrayField(TEXT("folder_sheet_files"), SheetPaths))
+					for (const auto& Path : *SheetPaths) OutResult.AdditionalProducedPaths.Add(Path->AsString());
+			}
 			Receipt->SetStringField(
 				TEXT("schema"), TEXT("uai.capture.image.receipt.v1"));
 			Receipt->SetStringField(
 				TEXT("policy_id"), Route.Descriptor.GetPolicyId());
+			Receipt->SetBoolField(TEXT("policy_defaulted"), Request.WasPolicyDefaulted());
 			Receipt->SetStringField(
 				TEXT("mechanics_id"), Route.Descriptor.GetMechanicsId());
 			Receipt->SetStringField(TEXT("subject_ref"), Request.GetSubjectRef());
@@ -1045,6 +1097,77 @@ AttemptedPaths->SetField(Pointer, Facts({
 			{
 				return Policy.GetPolicyId() == PolicyId;
 			});
+	}
+
+	bool TryResolveDefaultCaptureImagePolicy(
+		const FString& SubjectRef, const TSharedPtr<FJsonValue>& Parameters,
+		Contract::FUeAgentContractSchemaCheckpoint Checkpoint,
+		FString& OutPolicyId, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutPolicyId.Reset();
+		if (SubjectRef == TEXT("capture-subject:viewport:active"))
+			OutPolicyId = TEXT("policy:image-capture:viewport/v1");
+		else if (SubjectRef.StartsWith(TEXT("capture-subject:asset:")) && SubjectRef.Len() > 22)
+			OutPolicyId = TEXT("policy:image-capture:asset-preview/v1");
+		else
+		{
+			OutError = Input(TEXT("capture_image_default_policy_unavailable"),
+				TEXT("This subject does not define an unambiguous default image observation. Use viewport:active for the current Level, an asset subject for its supported preview, or supply an explicit policy_id for actor framing and other capture tasks."),
+				TEXT("capture_default"), TEXT("/subject_ref"), MakeShared<FJsonValueString>(SubjectRef),
+				MakeShared<FJsonValueString>(TEXT("capture-subject:viewport:active, capture-subject:asset:<object-path>, or explicit policy_id")));
+			return false;
+		}
+		// Keep asset class/target support with AssetPreview's existing native owner.
+		// Validate the chosen observation's parameters before opening any editor;
+		// e.g. sequence frame/camera requests must not silently become a still preview.
+		const auto* Policy = FindCaptureMediaImagePolicy(OutPolicyId);
+		TSharedPtr<const Contract::FUeAgentContractSchema> Schema;
+		TSharedPtr<FJsonObject> SchemaObject;
+		FString SchemaJson;
+		FString ParameterJson;
+		Contract::FDiagnostic ValidationError;
+		TOptional<Contract::FUeAgentContractValue> Canonical;
+		if (Policy && Contract::Json::TryParseObject(Policy->GetParameterSchemaJson(), SchemaObject, ValidationError))
+		{
+			RemoveParameterSchemaAnnotations(SchemaObject);
+			if (Contract::Json::TryCanonicalize(SchemaObject, SchemaJson, ValidationError))
+				Contract::FUeAgentContractSchema::TryCompile(Contract::FUeAgentContractValue(SchemaJson), Schema, ValidationError);
+		}
+		if (!Schema.IsValid())
+		{
+			OutError = Native(TEXT("capture_image_default_schema_invalid"),
+				TEXT("The default image policy parameter contract could not be prepared."),
+				TEXT("capture_default"), TEXT("policy_id"), MakeShared<FJsonValueString>(OutPolicyId),
+				MakeShared<FJsonValueString>(TEXT("compilable parameter contract")));
+			OutError.CandidateName = OutPolicyId;
+			if (!ValidationError.IsEmpty()) OutError.PublicCause = MakeShared<Contract::FDiagnostic>(MoveTemp(ValidationError));
+			return false;
+		}
+		bool bCheckpointFailed = false;
+		const auto ValidationCheckpoint = [&Checkpoint, &bCheckpointFailed](const int64 WorkUnits,
+			const FString& InstancePath, Contract::FUeAgentContractSchemaError& Error)
+		{
+			const bool bContinue = Checkpoint(WorkUnits, InstancePath, Error);
+			bCheckpointFailed |= !bContinue;
+			return bContinue;
+		};
+		if (!Contract::Json::TryCanonicalize(Parameters, ParameterJson, ValidationError)
+			|| !Schema->TryValidateAndCanonicalize(Contract::FUeAgentContractValue(ParameterJson), ValidationCheckpoint, Canonical, ValidationError))
+		{
+			if (bCheckpointFailed)
+			{
+				OutError = MoveTemp(ValidationError);
+				return false;
+			}
+			OutError = Input(TEXT("capture_image_default_parameters_invalid"),
+				TEXT("The parameters do not match the default image policy. Supply policy_id explicitly for sequence-camera rendering, graph/window capture, or another observation; no alternate renderer was attempted."),
+				TEXT("capture_default"), TEXT("/parameters"), Parameters,
+				MakeShared<FJsonValueString>(OutPolicyId));
+			OutError.CandidateName = OutPolicyId;
+			if (!ValidationError.IsEmpty()) OutError.PublicCause = MakeShared<Contract::FDiagnostic>(MoveTemp(ValidationError));
+			return false;
+		}
+		return true;
 	}
 
 	bool TryNormalizeTransformCandidateParameters(

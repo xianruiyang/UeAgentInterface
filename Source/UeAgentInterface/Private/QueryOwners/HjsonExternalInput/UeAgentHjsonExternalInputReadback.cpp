@@ -84,9 +84,12 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 					? TEXT("asset.reimport_sparse_volume_texture")
 					: TEXT("external.sparse_volume_texture.import");
 			}
-			else if (ClassPath == TEXT("/Script/Engine.StaticMesh") && bReimport)
+			else if (ClassPath == TEXT("/Script/Engine.StaticMesh"))
 			{
-				OutCommandId = TEXT("asset.reimport_static_mesh");
+				OutCommandId = bReimport
+					? TEXT("asset.reimport_static_mesh")
+					: TEXT("external.fbx.static_mesh.import");
+				bOutFbx = !bReimport;
 			}
 			else if (ClassPath == TEXT("/Script/Engine.SkeletalMesh") && !bReimport)
 			{

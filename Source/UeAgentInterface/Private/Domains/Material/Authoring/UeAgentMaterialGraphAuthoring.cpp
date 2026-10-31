@@ -556,6 +556,10 @@ bool PrepareProperties(
   UeAgentAuthoringObjectApply::FFailure PrepareFailure;
   UeAgentAuthoringObjectApply::FOptions Options;
   Options.bAllowDomainAuthorizedOwners = true;
+  // A graph is incomplete while expressions are being populated. Per-node
+  // PostEditChange can compile before its texture references and edges exist;
+  // the graph owner refreshes once after the complete graph has been applied.
+  Options.bEmitEditorNotifications = false;
   Options.AuthorizeProperty = ExpressionPropertyPolicy(Expression).Limits.AuthorizeProperty;
   Options.bCompactValues = bCompactValues;
   if (!UeAgentAuthoringObjectApply::PrepareObject(

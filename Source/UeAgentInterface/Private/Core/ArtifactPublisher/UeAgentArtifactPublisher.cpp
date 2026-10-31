@@ -1,6 +1,9 @@
 #include "Core/ArtifactPublisher/UeAgentArtifactPublisher.h"
 
 #include "Core/ArtifactPublisher/UeAgentArtifactPublisherTestHooks.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonValidatedHeader.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
+#include "CoreGlobals.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/CriticalSection.h"
@@ -8,6 +11,7 @@
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
@@ -47,6 +51,16 @@ namespace UE::UAI::ArtifactPublisher
 		FCriticalSection FailureMutex;
 		int32 AfterFinalMovedToBackupFailures = 0;
 		int32 FirstMoveAttemptFailures = 0;
+
+		// This proves syntax only. Each candidate came from a successful parse of
+		// real staged-file readback with this parser. Publication still verifies
+		// every current byte/hash, the complete workspace and target version.
+		struct FValidatedArtifactSyntax
+		{
+			TMap<FString, FString> ContentHashes;
+			TMap<FString, TMap<EUeAgentResourceDimension, int64>> ParseCharges;
+		};
+		thread_local TSharedPtr<const FValidatedArtifactSyntax> PreviousArtifactSyntax;
 
 		void SetError(
 			FArtifactPublishError& OutError,
@@ -819,6 +833,12 @@ namespace UE::UAI::ArtifactPublisher
 			const TMap<FString, FString>& Hashes,
 			FArtifactPublishError& OutError)
 		{
+			const double StageStarted = FPlatformTime::Seconds();
+			double WriteReadbackSeconds = 0.0;
+			double ParseSeconds = 0.0;
+			int32 ReusedSyntaxFiles = 0;
+			const auto SyntaxBaseline = PreviousArtifactSyntax;
+			TMap<FString, TMap<EUeAgentResourceDimension, int64>> ParseCharges;
 			IFileManager& Files = IFileManager::Get();
 			if (!Files.MakeDirectory(
 				*(Paths.bSingleFile
@@ -841,14 +861,40 @@ namespace UE::UAI::ArtifactPublisher
 					? Paths.Staging
 					: Paths.Staging / Relative;
 				TArray<uint8> Observed;
+				const double WriteStarted = FPlatformTime::Seconds();
 				if (!WriteAndVerifyStagedFile(Destination, Relative, File.GetCanonicalUtf8(), &Hashes.FindChecked(Relative),
 					TEXT("artifact_staging_write_failed"), TEXT("artifact_staging_verification_failed"), Observed, OutError)) return false;
+				const double ParseStarted = FPlatformTime::Seconds();
+				WriteReadbackSeconds += ParseStarted - WriteStarted;
+				const FString* PreviousHash = SyntaxBaseline.IsValid()
+					? SyntaxBaseline->ContentHashes.Find(Relative) : nullptr;
+				const auto* PreviousCharges = SyntaxBaseline.IsValid() ? SyntaxBaseline->ParseCharges.Find(Relative) : nullptr;
+				if (PreviousHash && PreviousCharges)
+				{
+					// WriteAndVerifyStagedFile has just hashed the actual readback;
+					// use that same content proof instead of retaining giant files.
+					if (PreviousHash->Equals(Hashes.FindChecked(Relative), ESearchCase::CaseSensitive))
+					{
+						FUeAgentResourceChargeError ResourceError;
+						if (!Resources.TryChargeMany(*PreviousCharges,
+							TEXT("artifact_publish.validated_syntax"), ResourceError))
+						{
+							OutError = ResourceError;
+							return false;
+						}
+						ParseCharges.Add(Relative, *PreviousCharges);
+						++ReusedSyntaxFiles;
+						ParseSeconds += FPlatformTime::Seconds() - ParseStarted;
+						continue;
+					}
+				}
 				Observed.Add(0);
 				const FString Text = UTF8_TO_TCHAR(
 					reinterpret_cast<const char*>(Observed.GetData()));
 				Observed.Pop(EAllowShrinking::No);
 				FHjsonDocumentPtr Document;
 				FWorkspaceError ParseError;
+				const auto UsageBefore = Resources.Snapshot();
 				if (!TryParseHjsonDocument(
 					Text,
 					Relative,
@@ -862,7 +908,30 @@ namespace UE::UAI::ArtifactPublisher
 					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Relative;
 					return false;
 				}
+				const auto UsageAfter = Resources.Snapshot();
+				TMap<EUeAgentResourceDimension, int64> Charges;
+				bool bExactCharges = true;
+				for (uint8 D = 0; D <= static_cast<uint8>(EUeAgentResourceDimension::EstimatedMemoryBytes); ++D)
+				{
+					const auto Dimension = static_cast<EUeAgentResourceDimension>(D);
+					const int64 Before = UsageBefore.Consumed(Dimension), After = UsageAfter.Consumed(Dimension);
+					if (After == MAX_int64 || After < Before) { bExactCharges = false; break; }
+					if (After > Before) Charges.Add(Dimension, After - Before);
+				}
+				if (bExactCharges)
+				{
+					if (Relative.Equals(Request.GetPlan()->GetEntryFile(), ESearchCase::CaseSensitive))
+					{
+						RememberParsedHjsonRootHeader(Hashes.FindChecked(Relative), *Document, Charges);
+						RememberParsedSemanticManifest(Paths.Final, Hashes.FindChecked(Relative), *Document, Observed, Charges);
+					}
+					else if (Relative.StartsWith(TEXT(".uai/inventory/"), ESearchCase::CaseSensitive))
+						RememberParsedSemanticManifest(Paths.Final, Hashes.FindChecked(Relative), *Document, Observed, Charges);
+					ParseCharges.Add(Relative, MoveTemp(Charges));
+				}
+				ParseSeconds += FPlatformTime::Seconds() - ParseStarted;
 			}
+			const double GeneratedFinished = FPlatformTime::Seconds();
 			for (const auto& File : Request.GetPreservedFiles())
 			{
 				const FString Destination = Paths.Staging / File.Key;
@@ -870,6 +939,7 @@ namespace UE::UAI::ArtifactPublisher
 				if (!WriteAndVerifyStagedFile(Destination, File.Key, File.Value, nullptr,
 					TEXT("artifact_preserved_file_write_failed"), TEXT("artifact_preserved_file_write_failed"), Observed, OutError)) return false;
 			}
+			const double PreservedFinished = FPlatformTime::Seconds();
 			if (Request.RequiresVerification()
 				&& !Request.GetVerification()->TryVerifyStagedWorkspace(
 					Paths.Staging,
@@ -887,6 +957,21 @@ namespace UE::UAI::ArtifactPublisher
 				}
 				return false;
 			}
+			const double StageFinished = FPlatformTime::Seconds();
+			PreviousArtifactSyntax.Reset();
+			if (Request.GetPlan()->GetFiles().Num() <= 200000)
+			{
+				auto Next = MakeShared<FValidatedArtifactSyntax>();
+				Next->ContentHashes = Hashes;
+				Next->ParseCharges = MoveTemp(ParseCharges);
+				PreviousArtifactSyntax = MoveTemp(Next);
+			}
+			UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=incremental_syntax reused_files=%d parsed_files=%d"),
+				ReusedSyntaxFiles, Request.GetPlan()->GetFiles().Num() - ReusedSyntaxFiles);
+			UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=publish_stage files=%d write_readback_s=%.6f parse_s=%.6f generated_s=%.6f preserved_s=%.6f semantic_verify_s=%.6f total_s=%.6f success=true"),
+				Request.GetPlan()->GetFiles().Num(), WriteReadbackSeconds, ParseSeconds,
+				GeneratedFinished - StageStarted, PreservedFinished - GeneratedFinished,
+				StageFinished - PreservedFinished, StageFinished - StageStarted);
 			return true;
 		}
 
@@ -1343,7 +1428,6 @@ namespace UE::UAI::ArtifactPublisher
 		FArtifactPublishReceipt& OutReceipt, FArtifactPublishError& OutError)
 	{
 		const FString CanonicalRoot = NormalizeFinalPath(CanonicalWorkspace);
-		const FString SourceRoot = NormalizeFinalPath(SourceWorkspace);
 		TSharedPtr<FJsonObject> Marker;
 		const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
 		const TSharedPtr<FJsonObject>* Revision = nullptr;
@@ -1416,6 +1500,28 @@ namespace UE::UAI::ArtifactPublisher
 			}
 			CanonicalFiles.Emplace(Relative, MoveTemp(Bytes), Hash);
 		}
+		const FExportWorkspacePlanRef Plan = MakeShared<FExportWorkspacePlan>(
+			EWorkspaceKind::Directory, Entry, Snapshot,
+			FUeAgentStateRevision(RevisionSource, Generation, static_cast<int64>(Sequence)),
+			Evidence, MoveTemp(CanonicalFiles), Fingerprint, 0);
+		return TryRefreshPlannedWorkspace(Plan, Owner, SourceWorkspace, ManagedSourcePaths,
+			Resources, OutReceipt, OutError);
+	}
+
+	bool TryRefreshPlannedWorkspace(
+		FExportWorkspacePlanRef Plan, const FString& Owner, const FString& SourceWorkspace,
+		const TArray<FString>& ManagedSourcePaths, FUeAgentResourceTracker& Resources,
+		FArtifactPublishReceipt& OutReceipt, FArtifactPublishError& OutError)
+	{
+		const FString SourceRoot = NormalizeFinalPath(SourceWorkspace);
+		if (Plan->GetWorkspaceKind() != EWorkspaceKind::Directory)
+		{
+			SetError(OutError, TEXT("artifact_refresh_source_invalid"), TEXT("Refreshing a published workspace requires a directory export."), SourceWorkspace, SourceRoot);
+			SetPointer(OutError, TEXT("/workspace_kind"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(TEXT("single_file"));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("directory"));
+			return false;
+		}
 		TSet<FString> Managed;
 		TSet<FString> LegacyInventory;
 		TSharedPtr<FJsonObject> SourceMarker;
@@ -1471,17 +1577,13 @@ namespace UE::UAI::ArtifactPublisher
 			// Older receipts did not distinguish generated files from preserved user files.
 			// Coalesce only byte-identical collisions; never infer ownership from a suffix.
 			if (LegacyInventory.Contains(Relative.ToLower())
-				&& CanonicalFiles.ContainsByPredicate([&](const FExportFilePlan& File)
+				&& Plan->GetFiles().ContainsByPredicate([&](const FExportFilePlan& File)
 				{
 					return File.GetRelativePath().Equals(Relative, ESearchCase::IgnoreCase)
 						&& File.GetCanonicalUtf8() == Bytes;
 				})) continue;
 			Preserved.Add(Relative, MoveTemp(Bytes));
 		}
-		const FExportWorkspacePlanRef Plan = MakeShared<FExportWorkspacePlan>(
-			EWorkspaceKind::Directory, Entry, Snapshot,
-			FUeAgentStateRevision(RevisionSource, Generation, static_cast<int64>(Sequence)),
-			Evidence, MoveTemp(CanonicalFiles), Fingerprint, 0);
 		return TryPublishExportPlan(FArtifactPublishRequest(Plan, SourceRoot, Owner, MoveTemp(Preserved)),
 			Resources, OutReceipt, OutError);
 	}
@@ -1492,6 +1594,7 @@ namespace UE::UAI::ArtifactPublisher
 		FArtifactPublishReceipt& OutReceipt,
 		FArtifactPublishError& OutError)
 	{
+		const double PublishStarted = FPlatformTime::Seconds();
 		OutReceipt = {};
 		OutError = {};
 		if (!Request.IsValid())
@@ -1506,6 +1609,7 @@ namespace UE::UAI::ArtifactPublisher
 		{
 			return false;
 		}
+		const double PreflightFinished = FPlatformTime::Seconds();
 
 		FPublishPaths Transaction;
 		if (!BuildPaths(Request, Transaction, OutError)
@@ -1553,6 +1657,7 @@ namespace UE::UAI::ArtifactPublisher
 		bool bOldMoved = false;
 		bool bNewPublished = false;
 		TArray<FArtifactPublishError> PendingWarnings;
+		const double StageStarted = FPlatformTime::Seconds();
 		if (!StageAndReparse(
 			Request,
 			Transaction,
@@ -1563,6 +1668,7 @@ namespace UE::UAI::ArtifactPublisher
 			CleanupStaging(Transaction, false, OutError);
 			return false;
 		}
+		const double StageFinished = FPlatformTime::Seconds();
 		if (!SaveJson(
 				Transaction.StagingOwner,
 				BuildOwnerRecord(
@@ -1584,6 +1690,7 @@ namespace UE::UAI::ArtifactPublisher
 			CleanupStaging(Transaction, true, OutError);
 			return false;
 		}
+		const double StageVerified = FPlatformTime::Seconds();
 
 		if (Request.RequiresVerification()
 			&& !Request.GetVerification()->TryRecheckTargetVersion(OutError))
@@ -1660,6 +1767,7 @@ namespace UE::UAI::ArtifactPublisher
 			return false;
 		}
 
+		const double CommitFinished = FPlatformTime::Seconds();
 		if (!VerifyFinal(
 			Transaction,
 			Request,
@@ -1671,6 +1779,7 @@ namespace UE::UAI::ArtifactPublisher
 			return false;
 		}
 
+		const double FinalVerified = FPlatformTime::Seconds();
 		OutReceipt.SetPublished(
 			Request, Transaction.Final, Transaction.TransactionId,
 			MoveTemp(Paths), MoveTemp(Hashes), Inventory);
@@ -1697,6 +1806,13 @@ namespace UE::UAI::ArtifactPublisher
 			CleanupWarning.Severity = UE::UAI::Contract::ESeverity::Warning;
 			OutReceipt.CleanupWarnings.Add(CleanupWarning);
 		}
+		const double PublishFinished = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=publish files=%d preflight_s=%.6f setup_s=%.6f stage_s=%.6f staged_inventory_s=%.6f commit_s=%.6f final_verify_s=%.6f cleanup_s=%.6f total_s=%.6f success=true"),
+			Request.GetPlan()->GetFiles().Num(), PreflightFinished - PublishStarted,
+			StageStarted - PreflightFinished, StageFinished - StageStarted,
+			StageVerified - StageFinished, CommitFinished - StageVerified,
+			FinalVerified - CommitFinished, PublishFinished - FinalVerified,
+			PublishFinished - PublishStarted);
 		return true;
 	}
 

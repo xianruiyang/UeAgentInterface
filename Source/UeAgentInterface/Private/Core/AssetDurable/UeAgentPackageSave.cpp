@@ -1,11 +1,16 @@
 #include "Core/AssetDurable/UeAgentPackageSave.h"
 
 #include "CoreGlobals.h"
+#include "Engine/Level.h"
+#include "Engine/LevelStreaming.h"
+#include "Engine/World.h"
+#include "LevelUtils.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "HAL/FileManager.h"
 #include "Logging/LogMacros.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "UObject/LinkerLoad.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
@@ -54,6 +59,16 @@ namespace UE::UAI::AssetDurable
 		SaveArgs.SaveFlags &= ~SAVE_NoError;
 		FStringOutputDevice Diagnostics;
 		SaveArgs.Error = &Diagnostics;
+		// Scratch publication must preserve dirty state and avoid Editor save UI/GC.
+		// Match the native map-save coordinate conversion without the surrounding
+		// Editor lifecycle: loaded streaming actors use world coordinates in memory,
+		// while the sub-map stores coordinates relative to its streaming transform.
+		UWorld* World = Cast<UWorld>(TopLevelAsset);
+		ULevelStreaming* Streaming = World && World->PersistentLevel
+			? FLevelUtils::FindStreamingLevel(World->PersistentLevel) : nullptr;
+		const bool bRemoveTransform = Streaming && World->PersistentLevel->bAlreadyMovedActors;
+		if (bRemoveTransform) FLevelUtils::RemoveEditorTransform(Streaming);
+		ON_SCOPE_EXIT { if (bRemoveTransform) FLevelUtils::ApplyEditorTransform(Streaming); };
 		const FSavePackageResultStruct Result =
 			UPackage::Save(&Package, TopLevelAsset, *Filename, SaveArgs);
 		if (Result.Result == ESavePackageResult::Success)

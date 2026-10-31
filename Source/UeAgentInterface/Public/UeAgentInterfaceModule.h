@@ -72,6 +72,7 @@ private:
 
 	FDelegateHandle MainFrameCreationFinishedForStartMinimizedHandle;
 	FDelegateHandle EditorMapOpenedHandle;
+	FDelegateHandle StartPieScratchCleanupHandle;
 	FString PreviousRootWindowInitiallyMaximizedValue;
 	bool bAppliedRootWindowMaximizeOverride;
 	bool bHadPreviousRootWindowInitiallyMaximizedValue;

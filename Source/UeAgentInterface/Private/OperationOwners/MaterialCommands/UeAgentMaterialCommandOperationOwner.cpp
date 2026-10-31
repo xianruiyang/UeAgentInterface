@@ -9,6 +9,7 @@
 #include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
+#include "Interfaces/IPluginManager.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
@@ -55,6 +56,10 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 			FGraphCompoundBlueprintMaterialProductionConfig ProductionConfig;
 			ProductionConfig.DurableJournalRoot = FPaths::ProjectSavedDir()
 				/ TEXT("UeAgentInterface/GraphCompound/MaterialCommands");
+			if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UeAgentInterface")))
+			{
+				ProductionConfig.AdditionalDurableContentRoots.Add(Plugin->GetContentDir() / TEXT("Materials"));
+			}
 			FGraphCompoundRuntimeError RuntimeError;
 			if (!TryCreateBlueprintMaterialGraphProductionRuntime(
 					RuntimeConfig,

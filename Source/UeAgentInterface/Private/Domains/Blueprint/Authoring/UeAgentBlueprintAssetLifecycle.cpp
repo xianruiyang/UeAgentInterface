@@ -7,12 +7,15 @@
 #include "BaseWidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
 #include "Dom/JsonObject.h"
+#include "Editor.h"
 #include "ComponentInstanceDataCache.h"
 #include "GameFramework/Actor.h"
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
 #include "Serialization/ObjectAndNameAsStringProxyArchive.h"
+#include "Serialization/ArchiveReplaceObjectRef.h"
 #include "UObject/GCObject.h"
+#include "UObject/GarbageCollection.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/SCS_Node.h"
@@ -23,8 +26,12 @@
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "ObjectTools.h"
+#include "ScopedTransaction.h"
 #include "Misc/PackageName.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
+#include "UObject/Package.h"
+#include "UObject/StrongObjectPtr.h"
 #include "UObject/Class.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringAssetIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
@@ -99,6 +106,7 @@ namespace UeAgentBlueprintAssetLifecycle
 			TWeakObjectPtr<UBlueprint> ExistingTarget;
 		};
 		TMap<TWeakObjectPtr<const UBlueprint>, FAuthoringContext> AuthoringContexts;
+		bool bRetiredScratchPendingCollection = false;
 
 		void RestoreAuthoredPreviewSettings(UBlueprint* Source, UBlueprint* Duplicate)
 		{
@@ -160,6 +168,20 @@ namespace UeAgentBlueprintAssetLifecycle
 		{
 			RestoreAuthoredPreviewSettings(Source, &Copy);
 			RestoreAuthoredMemberGuids(Copy, AuthoredMemberGuids);
+			if (Source)
+			{
+				// Generated classes are package siblings of their Blueprint. A native
+				// duplicate can retain source-class references in graph nodes (for
+				// example a cast target) while member references already use the copy.
+				// Preserve the authored self type consistently within the copied graph.
+				TMap<UObject*, UObject*> Classes;
+				if (Source->GeneratedClass && Copy.GeneratedClass && Source->GeneratedClass != Copy.GeneratedClass)
+					Classes.Add(Source->GeneratedClass, Copy.GeneratedClass);
+				if (Source->SkeletonGeneratedClass && Copy.SkeletonGeneratedClass && Source->SkeletonGeneratedClass != Copy.SkeletonGeneratedClass)
+					Classes.Add(Source->SkeletonGeneratedClass, Copy.SkeletonGeneratedClass);
+				FArchiveReplaceObjectRef<UObject> Rebind(&Copy, Classes,
+					EArchiveReplaceObjectFlags::IgnoreOuterRef | EArchiveReplaceObjectFlags::IgnoreArchetypeRef);
+			}
 			RebindBlueprintSelfMemberReferences(Copy);
 			// PostDuplicate changes member GUIDs before reconstructing nodes. Restore
 			// authored identities before settling context-dependent native interfaces
@@ -247,6 +269,94 @@ namespace UeAgentBlueprintAssetLifecycle
 			if (bPersistent) Expected->SetBoolField(TEXT("transient"), false);
 			OutError.ExpectedValue = MakeShared<FJsonValueObject>(Expected);
 			return false;
+		}
+	}
+
+	struct FScratchBlueprintPreflightTransaction::FImpl
+	{
+		TUniquePtr<FScopedTransaction> Transaction;
+	};
+
+	FScratchBlueprintPreflightTransaction::FScratchBlueprintPreflightTransaction()
+		: Impl(MakeUnique<FImpl>()) {}
+
+	FScratchBlueprintPreflightTransaction::~FScratchBlueprintPreflightTransaction()
+	{
+		if (Impl->Transaction) Impl->Transaction->Cancel();
+	}
+
+	bool FScratchBlueprintPreflightTransaction::Begin(const FString& TargetPath, FDiagnostic& OutError)
+	{
+		if (GEditor && (GEditor->IsTransactionActive() || GIsTransacting))
+		{
+			OutError = FDiagnostic::Failure(TEXT("blueprint_preflight_transaction_active"),
+				TEXT("No Blueprint mutation was started because an Editor transaction is active. Finish the current editing action, then retry."), TEXT("preflight"));
+			OutError.TargetPath = TargetPath;
+			OutError.SourceKind = TEXT("native_state");
+			OutError.PropertyPath = TEXT("editor_transaction_active");
+			OutError.ActualValuePresent = true;
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.bRetrySafe = true;
+			return false;
+		}
+		Impl->Transaction = MakeUnique<FScopedTransaction>(
+			NSLOCTEXT("UeAgentInterface", "BlueprintPreflight", "Validate Blueprint Authoring"));
+		return true;
+	}
+
+	struct FScratchBlueprintPackages::FImpl
+	{
+		TArray<TStrongObjectPtr<UPackage>> Packages;
+	};
+
+	FScratchBlueprintPackages::FScratchBlueprintPackages() : Impl(MakeUnique<FImpl>()) {}
+	FScratchBlueprintPackages::~FScratchBlueprintPackages() { Reset(); }
+
+	UPackage* FScratchBlueprintPackages::Create(const TCHAR* Purpose)
+	{
+		UPackage* Package = CreatePackage(*FString::Printf(TEXT("/Temp/UAI/Blueprint/%s_%s"),
+			Purpose, *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+		Package->SetFlags(RF_Transient);
+		Impl->Packages.Emplace(Package);
+		return Package;
+	}
+
+	void FScratchBlueprintPackages::Reset()
+	{
+		for (const auto& Owned : Impl->Packages)
+		{
+			UPackage* Package = Owned.Get();
+			if (!Package) continue;
+			TArray<UObject*> Objects;
+			GetObjectsWithPackage(Package, Objects, true);
+			for (UObject* Object : Objects)
+			{
+				Object->ClearFlags(RF_Public | RF_Standalone | RF_Transactional);
+				Object->SetFlags(RF_Transient);
+				if (UBlueprint* Blueprint = Cast<UBlueprint>(Object))
+				{
+					AuthoringContexts.Remove(Blueprint);
+					// Match native Blueprint retirement: invalidate the authoring root,
+					// not its generated class, functions or CDO. Those dependencies
+					// must stay valid until native instance/frame destruction finishes.
+					Blueprint->MarkAsGarbage();
+				}
+			}
+			Package->SetDirtyFlag(false);
+			Package->ClearFlags(RF_Public | RF_Standalone | RF_Transactional);
+			bRetiredScratchPendingCollection = true;
+		}
+		Impl->Packages.Reset();
+	}
+
+	void CollectRetiredScratchBlueprints()
+	{
+		check(IsInGameThread());
+		if (bRetiredScratchPendingCollection)
+		{
+			bRetiredScratchPendingCollection = false;
+			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 		}
 	}
 

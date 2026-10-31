@@ -1,5 +1,6 @@
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonDiagnostic.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonValidatedHeader.h"
 #include "Core/StateSemantic/UeAgentExactStringKeys.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
@@ -20,6 +21,14 @@ namespace UE::UAI::HjsonWorkspace
 
 	namespace
 	{
+		struct FParsedRootHeader
+		{
+			FString ContentHash;
+			TArray<TPair<FString, FString>> Strings;
+			TMap<EUeAgentResourceDimension, int64> ParseCharges;
+		};
+		thread_local TSharedPtr<const FParsedRootHeader> PreviousParsedRootHeader;
+
 		struct FHjsonJsonProjectionTask
 		{
 			const FHjsonNode* Node = nullptr;
@@ -1801,6 +1810,40 @@ namespace UE::UAI::HjsonWorkspace
 		return PlanFingerprint;
 	}
 	int64 FExportWorkspacePlan::GetObservedTokens() const { return ObservedTokens; }
+
+	void RememberParsedHjsonRootHeader(const FString& ContentHash, const FHjsonDocument& Document,
+		const TMap<EUeAgentResourceDimension, int64>& ParseCharges)
+	{
+		PreviousParsedRootHeader.Reset();
+		if (ContentHash.IsEmpty() || Document.GetRoot()->GetKind() != EHjsonNodeKind::Object) return;
+		auto Header = MakeShared<FParsedRootHeader>();
+		int64 Characters = 0;
+		for (const auto& Pair : Document.GetRoot()->GetEntries())
+		{
+			if (Pair.Value->GetKind() != EHjsonNodeKind::String) continue;
+			Characters += Pair.Key.Len() + Pair.Value->GetText().Len();
+			if (Characters > 65536) return;
+			Header->Strings.Emplace(Pair.Key, Pair.Value->GetText());
+		}
+		Header->ContentHash = ContentHash;
+		Header->ParseCharges = ParseCharges;
+		PreviousParsedRootHeader = MoveTemp(Header);
+	}
+
+	bool TryReuseParsedHjsonRootString(const FString& ContentHash, const FString& Field, FString& OutValue,
+		TMap<EUeAgentResourceDimension, int64>& OutParseCharges)
+	{
+		if (!PreviousParsedRootHeader.IsValid()
+			|| !PreviousParsedRootHeader->ContentHash.Equals(ContentHash, ESearchCase::CaseSensitive)) return false;
+		for (const auto& Pair : PreviousParsedRootHeader->Strings)
+			if (Pair.Key.Equals(Field, ESearchCase::CaseSensitive))
+			{
+				OutValue = Pair.Value;
+				OutParseCharges = PreviousParsedRootHeader->ParseCharges;
+				return true;
+			}
+		return false;
+	}
 
 	bool TryParseHjsonDocument(
 		const FString& Text,

@@ -113,6 +113,7 @@ namespace UE::UAI::DomainAdapters::HjsonExternalInput
 					TEXT("asset.reimport_texture"),
 					TEXT("external.fbx.animation.import"),
 					TEXT("external.fbx.skeletal_mesh.import"),
+					TEXT("external.fbx.static_mesh.import"),
 					TEXT("external.geometry_cache.import"),
 					TEXT("external.light_profile.import"),
 					TEXT("external.sound_wave.import"),

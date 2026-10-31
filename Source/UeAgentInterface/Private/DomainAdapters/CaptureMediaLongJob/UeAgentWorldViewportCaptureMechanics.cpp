@@ -22,13 +22,17 @@
 
 namespace UE::UAI::DomainAdapters::CaptureMediaLongJob::WorldViewportMechanics
 {
-	bool PrepareLevelViewportForCapture(FLevelEditorViewportClient* ViewportClient, UE::UAI::Contract::FDiagnostic& OutError)
+	TSharedPtr<FSceneViewport> GetLevelSceneViewport(FLevelEditorViewportClient* ViewportClient)
 	{
 		// Keep the selected client's owner; another active window may host a
 		// different viewport, and FViewport itself need not be a FSceneViewport.
 		const auto Widget = ViewportClient ? ViewportClient->GetEditorViewportWidget() : nullptr;
-		return EditorCapture::SlateWindow::PrepareViewport(
-			Widget ? Widget->GetSceneViewport() : nullptr, OutError, true, true);
+		return Widget ? Widget->GetSceneViewport() : nullptr;
+	}
+
+	bool PrepareLevelViewportForCapture(FLevelEditorViewportClient* ViewportClient, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return EditorCapture::SlateWindow::PrepareViewport(GetLevelSceneViewport(ViewportClient), OutError);
 	}
 
 	static bool TryGetString(const TSharedPtr<FJsonObject>& Object, const FString& Key, FString& OutValue)

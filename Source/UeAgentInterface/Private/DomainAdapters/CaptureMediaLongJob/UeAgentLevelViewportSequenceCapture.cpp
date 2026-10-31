@@ -221,8 +221,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 						: PreviewContext.Viewport ? PreviewContext.Viewport->GetSceneViewport() : nullptr;
 					if (SceneViewport)
 					{
-						if (!EditorCapture::SlateWindow::PrepareViewport(SceneViewport, OutError,
-							RequestedRenderSize.X == 0 || RequestedRenderSize.Y == 0)) return false;
+						if (!EditorCapture::SlateWindow::PrepareViewport(SceneViewport, OutError, false)) return false;
 					}
 					bPreviewWindowPrepared = true;
 				}
@@ -515,6 +514,8 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			if (bAssetPreview)
 			{
 				Metadata->SetStringField(TEXT("source"), TEXT("asset_preview"));
+				if (!PreviewContext.bWidgetPreview)
+					Metadata->SetObjectField(TEXT("viewport_initialization"), RenderSize.Describe());
 				Metadata->SetStringField(TEXT("asset_path"), PreviewAsset->GetPathName());
 				Metadata->SetStringField(TEXT("target"), PreviewContext.Target);
 				Metadata->SetNumberField(TEXT("interval_seconds"), IntervalSeconds);

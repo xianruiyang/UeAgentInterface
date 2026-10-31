@@ -12,4 +12,7 @@ namespace UE::UAI::QueryOwners::WorldSpatial
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		HjsonWorkspace::FWorkspaceError& OutError);
+
+	bool TryExecuteComponentCandidateQuery(const FString& CanonicalParamsJson,
+		FString& OutPayloadJson, HjsonWorkspace::FWorkspaceError& OutError);
 }

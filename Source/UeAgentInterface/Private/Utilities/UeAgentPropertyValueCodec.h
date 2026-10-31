@@ -105,6 +105,13 @@ Encode(FProperty *Property, const void *ValuePtr, UObject *Owner,
        TSharedPtr<FJsonObject> *OutValueDefinition = nullptr,
        bool bIgnoreFixedArray = false);
 
+// Observe ordinary asset/soft-reference values through this codec without
+// rebuilding reflection descriptors. No scoped/custom encoder is applied.
+// Owned/inline objects, non-asset hard references and other shapes return false.
+// The result owns only JSON paths; it never retains native object storage.
+UEAGENTINTERFACE_API bool TryEncodePathOnlyAssetReferences(FProperty* Property,
+    const void* ValuePtr, UObject* Owner, TSharedPtr<FJsonValue>& OutValue);
+
 UEAGENTINTERFACE_API TSharedPtr<FJsonValue>
 EncodeStructValue(UScriptStruct *Struct, const void *ValuePtr, UObject *Owner,
                   const FOptions &Options, int32 Depth = 0,

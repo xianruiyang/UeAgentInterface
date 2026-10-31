@@ -1049,7 +1049,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 							*ReferenceResolver,
 							TargetRef,
 							Baseline,
-							CarrierError))
+							CarrierError,
+							Profile->OperationKey == TEXT("remove_components") || Profile->OperationKey == TEXT("translate_components")))
 					{
 						SetProductionError(OutError, CarrierError, TargetRef);
 						return false;
@@ -1423,7 +1424,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling
 							*ReferenceResolver,
 							TargetRef,
 							Actual,
-							CarrierError)
+							CarrierError,
+							Profile->OperationKey == TEXT("remove_components") || Profile->OperationKey == TEXT("translate_components")
+								|| Profile->OperationKey == TEXT("boolean"))
 						|| !AppendState(
 							TargetRef,
 							ExistingEdit::BuildActualVerificationState(

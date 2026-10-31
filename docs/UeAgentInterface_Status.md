@@ -88,6 +88,11 @@ HJSON 以 LLM 易用和最小必要字段为目标：
   spawner 保持完整解析。名称投影按查询与语义筛选复用，公共名称索引保留完整相关同名组、
   字面括号和作用域消歧规则。预演与正式资产分别持有目录，编译或 action database 刷新时
   失效；引脚上下文仍即时解析，不跨 UObject 生命周期共享创建对象。
+- Blueprint 与 UMG authoring 的 Proposed/Rollback 临时包共用 Blueprint lifecycle owner，
+  预检早返、状态退出及持久读回释放均退休自有临时对象，并在原生 PIE 编译发现前按需 GC。
+  原生依赖回收只标记 Blueprint 根，不强制销毁生成类、函数或 CDO。两者的 scratch 预检
+  共用可取消事务作用域，退出时取消临时 undo 记录；已有编辑事务时零写入返回
+  `blueprint_preflight_transaction_active`，不取消用户事务、不影响 Remove。
 - 单次公开 import 的各读取阶段共享不可变 HJSON 解析结果。每阶段仍检查路径并读取实际
   文件，只有绝对路径、source unit 与文本完全相同时复用；变化的文本重新解析，请求结束
   即释放，不依赖修改时间、不跨请求缓存。增删改依赖顺序、持久化读回、workspace 刷新、

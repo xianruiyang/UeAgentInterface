@@ -7,9 +7,15 @@
 namespace UE::UAI::HjsonWorkspace
 {
 	struct FSemanticWorkspaceReadState;
+	/** Internal syntax/index proof from actual publisher readback. Semantic row
+	 * reuse still requires a previous successful resolver and exact source text. */
+	void RememberParsedSemanticManifest(const FString& WorkspaceRoot, const FString& ContentHash,
+		const FHjsonDocument& Document, const TArray<uint8>& Utf8,
+		const TMap<ContextResource::EUeAgentResourceDimension, int64>& ParseCharges);
 
-	/** Shares immutable parses within one synchronous import. Files are still
-	 * read on every pass; reuse requires equal source identity and text. */
+	/** Shares immutable parses and validated resolutions within one synchronous
+	 * import. Reuse rereads source text and rechecks referenced file existence;
+	 * a source, mode or content change uses the complete resolver again. */
 	class UEAGENTINTERFACE_API FSemanticWorkspaceReadScope final
 	{
 	public:

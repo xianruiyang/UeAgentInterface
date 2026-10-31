@@ -339,8 +339,11 @@ namespace UE::UAI::DomainAdapters::ExternalDataImport
 					return false;
 				}
 				FDurableReceipt RollbackReceipt;
-				return TryRollbackAssetDurability(Session.ToSharedRef(), Backend, Token, bMemoryConfirmed,
-					Resources, RollbackReceipt, OutError);
+				if (!TryRollbackAssetDurability(Session.ToSharedRef(), Backend, Token, bMemoryConfirmed,
+					Resources, RollbackReceipt, OutError)) return false;
+				if (RollbackReceipt.GetStatus() == EDurableStatus::RolledBack) return true;
+				OutError = RollbackReceipt.GetFailureDiagnostic();
+				return false;
 			}
 
 			FString JournalId() const

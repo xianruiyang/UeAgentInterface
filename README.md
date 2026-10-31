@@ -58,7 +58,8 @@ Manifest、generated binding、handler forwarding、mock 或测试发现只证�
 
 ## 目录生命周期
 
-- `Config/`、`Resources/`、`Source/` 和上述活动文档是正常实现与维护入口。
+- `Config/`、`Content/`、`Resources/`、`Source/` 和上述活动文档是正常实现与维护入口。
+- `Content/Materials/M_UAI_MetricGrid.uasset` 是建模默认尺寸材质，挂载为 `/UeAgentInterface/Materials/M_UAI_MetricGrid`。安装或分发插件时必须包含 `Content/`；它不依赖示例项目或 `/Game/UAI`。颜色和刻度原点存于使用它的组件，见 [T38 建模材质](docs/active/t38_modeling_geometry_operation.md#bundled-metric-material)。
 - 当前没有活动 `Tests/Fixtures/` root。原五个不完整且无 consumer 的 manifest 已等形移到
   `retired/strict_v2/audit-fixtures/unbound_contract_manifests/`；该位置只保存最小失败设计证据，不是
   fixture truth 或自动发现入口。

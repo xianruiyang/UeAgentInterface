@@ -2454,6 +2454,25 @@ namespace UE::UAI::StateSemantic
 		}
 	}
 
+	FUeAgentCanonicalIdentity FUeAgentCanonicalIdentity::WithGeneration(FString InGeneration) const
+	{
+		FUeAgentCanonicalIdentity Result = *this;
+		if (!bValid) return Result;
+		Result.Generation = MoveTemp(InGeneration);
+		Result.bValid = NormalizeIdentityPart(Result.Generation, TEXT("generation"), Result.ValidationDiagnostic);
+		if (!Result.bValid)
+		{
+			Result.CanonicalKey.Reset();
+			return Result;
+		}
+		// Both constructors frame the final generation by its UTF-8 byte length.
+		// Remove that exact suffix, not a delimiter search: generation may contain '|'.
+		const FString OldSuffix = FString::Printf(TEXT("%lld:%s"), MeasureText(Generation).Utf8Bytes, *Generation);
+		Result.CanonicalKey = CanonicalKey.LeftChop(OldSuffix.Len())
+			+ FString::Printf(TEXT("%lld:%s"), MeasureText(Result.Generation).Utf8Bytes, *Result.Generation);
+		return Result;
+	}
+
 	const FString& FUeAgentCanonicalIdentity::GetSemanticId() const { return SemanticId; }
 	const FString& FUeAgentCanonicalIdentity::GetTargetKind() const { return TargetKind; }
 	const FString& FUeAgentCanonicalIdentity::GetOwnerId() const { return OwnerId; }
