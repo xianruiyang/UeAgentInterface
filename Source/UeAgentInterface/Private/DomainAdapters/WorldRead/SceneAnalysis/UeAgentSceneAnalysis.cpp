@@ -2,6 +2,7 @@
 
 #include "DomainAdapters/WorldRead/SceneAnalysis/UeAgentSceneGeometry.h"
 #include "Composition/HjsonImport/UeAgentSemanticWorkspaceImport.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
 #include "DomainAdapters/WorldSpatial/UeAgentLevelWorldDomainMechanics.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringSpatial.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
@@ -23,6 +24,7 @@
 #include "Dom/JsonValue.h"
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Misc/ScopeLock.h"
+#include "Misc/ScopeExit.h"
 #include "Misc/SecureHash.h"
 #include "Misc/Paths.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringWorkspacePaths.h"
@@ -105,7 +107,6 @@ namespace
         TArray<FValue> AppliedRecheck;
         FJson AppliedSummary;
         TArray<FString> Limitations;
-        Composition::HjsonImport::FPreparedAuthoringImportPtr Prepared;
         double Margin = 0, Near = .01, CaptureMs = 0, ComputeMs = 0;
         int32 CandidatePairs = 0, AnalyzedPairs = 0, Changed = 0;
         bool bGeometryRequested = false, bPending = false, bComplete = false, bCancelled = false;
@@ -591,6 +592,7 @@ namespace
         TSharedPtr<FRecord,ESPMode::ThreadSafe>& Out, Contract::FDiagnostic& Error)
     {
         const double Started=FPlatformTime::Seconds();
+        HjsonWorkspace::FSemanticWorkspaceReadScope SourceReadScope;
         auto R=MakeShared<FRecord,ESPMode::ThreadSafe>(); R->World=&World; R->WorldPath=World.GetPathName();
         R->Limitations.Add(TEXT("editor_debug_draw_and_visualization_components_excluded"));
         if(World.IsPartitionedWorld())R->Limitations.Add(TEXT("loaded_world_partition_cells_only"));
@@ -599,6 +601,22 @@ namespace
         if(!R->WorkspaceRoot.IsEmpty())R->WorkspaceRoot=UeAgentAuthoringWorkspacePaths::NormalizeAbsolutePath(R->WorkspaceRoot);
         Input->TryGetNumberField(TEXT("margin_cm"),R->Margin);
         Input->TryGetNumberField(TEXT("near_distance_cm"),R->Near);
+        TFunction<void(UWorld*, TArray<UPackage*>*)> PartitionReadScope;
+        ON_SCOPE_EXIT { if (PartitionReadScope) PartitionReadScope(nullptr, nullptr); };
+        auto Bundle=MakeShared<FJsonObject>();
+        Composition::HjsonImport::FPreparedAuthoringImportPtr Prepared;
+        if (!R->WorkspaceRoot.IsEmpty())
+        {
+            HjsonWorkspace::FWorkspaceError E;
+            if (!DomainAdapters::WorldSpatial::TryPrepareLevelWorkspace(World,R->WorkspaceRoot,TEXT("scene_editing"),Prepared,Bundle,E,nullptr,nullptr,&PartitionReadScope)) { Error=E.GetDiagnostic(); return false; }
+            R->WorkspaceFingerprint=Prepared->GetWorkspace()->GetWorkspaceFingerprint();
+            FString CanonicalBundle;
+            if(!Contract::Json::TryCanonicalize(Bundle,CanonicalBundle,Error))return false;
+            R->PreparedBundleFingerprint=Hash(CanonicalBundle);
+        }
+        // Preparation may load the selected Partition targets/references. The
+        // geometry index consumes that same actual scope, once, before its
+        // native references are released at the end of this read-only request.
         auto* Index=RefreshIndex(World,R->Shapes);
         if(!Index)return Fail(Error,TEXT("scene_inventory_budget_exceeded"),TEXT("Component/instance inventory exceeded the bounded snapshot budget; no complete context or geometry result was produced."));
         TMap<FString,FShape> OriginalMutable;
@@ -606,12 +624,6 @@ namespace
         for (const auto& S:R->Shapes) R->Baseline.Add(S.Id,BindingSignature(S));
         if (!R->WorkspaceRoot.IsEmpty())
         {
-            auto Bundle=MakeShared<FJsonObject>(); HjsonWorkspace::FWorkspaceError E;
-            if (!DomainAdapters::WorldSpatial::TryPrepareLevelWorkspace(World,R->WorkspaceRoot,TEXT("scene_editing"),R->Prepared,Bundle,E)) { Error=E.GetDiagnostic(); return false; }
-            R->WorkspaceFingerprint=R->Prepared->GetWorkspace()->GetWorkspaceFingerprint();
-            FString CanonicalBundle;
-            if(!Contract::Json::TryCanonicalize(Bundle,CanonicalBundle,Error))return false;
-            R->PreparedBundleFingerprint=Hash(CanonicalBundle);
             if (!ProjectBundle(World,Bundle,*R,Error)) return false;
         }
         R->WorldVersion=Cache().Version(&World);R->WorldSettingsVersion=Cache().Version(World.GetWorldSettings());

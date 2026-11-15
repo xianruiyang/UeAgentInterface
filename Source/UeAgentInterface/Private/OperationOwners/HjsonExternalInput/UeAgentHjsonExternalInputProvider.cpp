@@ -315,7 +315,7 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 								Request.GetTargetIdentity(),
 								Request.GetCanonicalParamsJson(),
 								PayloadJson,
-								OutError))
+								OutError, Request.GetWorkspaceExportPreparation().Get()))
 					{
 						return false;
 					}

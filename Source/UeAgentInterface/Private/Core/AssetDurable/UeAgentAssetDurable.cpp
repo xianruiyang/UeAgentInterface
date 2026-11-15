@@ -3504,7 +3504,12 @@ namespace UE::UAI::AssetDurable
 	{
 		OutError = FAssetDurableError();
 		TArray<FString> PublishedFiles;
-		ON_SCOPE_EXIT { RefreshPublishedPackageFiles(PublishedFiles); };
+		FString AttemptedFile;
+		ON_SCOPE_EXIT
+		{
+			RefreshPublishedPackageFiles(PublishedFiles);
+			if (!AttemptedFile.IsEmpty()) RescanPackageFiles({AttemptedFile});
+		};
 		for (const FDurableArtifact& Artifact :
 			Session->GetInventory().GetArtifacts())
 		{
@@ -3521,7 +3526,7 @@ namespace UE::UAI::AssetDurable
 				return false;
 			}
 			const FString FinalPath = Artifact.GetFinalPath();
-			PublishedFiles.Add(FinalPath);
+			AttemptedFile = FinalPath;
 			ReleaseLoadedPackageFileForReplacement(FinalPath);
 			if (Artifact.GetIntent()
 				== EAssetDurableIntent::Delete)
@@ -3537,6 +3542,7 @@ namespace UE::UAI::AssetDurable
 					OutError.TargetPath = Artifact.GetDurableLocation();
 					return false;
 				}
+				PublishedFiles.Add(MoveTemp(AttemptedFile));
 				continue;
 			}
 			const FString StagePath =
@@ -3560,6 +3566,7 @@ namespace UE::UAI::AssetDurable
 					OutError.TargetPath = Artifact.GetDurableLocation();
 					return false;
 				}
+				PublishedFiles.Add(MoveTemp(AttemptedFile));
 				continue;
 			}
 			IFileManager::Get().MakeDirectory(
@@ -3577,6 +3584,7 @@ namespace UE::UAI::AssetDurable
 				OutError.TargetPath = Artifact.GetDurableLocation();
 				return false;
 			}
+			PublishedFiles.Add(MoveTemp(AttemptedFile));
 		}
 		return true;
 	}
@@ -3590,7 +3598,12 @@ namespace UE::UAI::AssetDurable
 		bOutConfirmed = false;
 		OutError = FAssetDurableError();
 		TArray<FString> PublishedFiles;
-		ON_SCOPE_EXIT { RefreshPublishedPackageFiles(PublishedFiles); };
+		FString AttemptedFile;
+		ON_SCOPE_EXIT
+		{
+			RefreshPublishedPackageFiles(PublishedFiles);
+			if (!AttemptedFile.IsEmpty()) RescanPackageFiles({AttemptedFile});
+		};
 		for (const FDurableArtifact& Artifact :
 			Session->GetInventory().GetArtifacts())
 		{
@@ -3620,8 +3633,8 @@ namespace UE::UAI::AssetDurable
 				return false;
 			}
 			Marker.TrimStartAndEndInline();
-			ReleaseLoadedPackageFileForReplacement(Artifact.GetFinalPath());
-			PublishedFiles.Add(Artifact.GetFinalPath());
+			AttemptedFile = Artifact.GetFinalPath();
+			ReleaseLoadedPackageFileForReplacement(AttemptedFile);
 			if (Marker == TEXT("present"))
 			{
 				IFileManager::Get().MakeDirectory(
@@ -3665,6 +3678,7 @@ namespace UE::UAI::AssetDurable
 				OutError.ActualEvidence = MakeShared<FJsonValueString>(Marker);
 				return false;
 			}
+			PublishedFiles.Add(MoveTemp(AttemptedFile));
 		}
 		bOutConfirmed = true;
 		return true;

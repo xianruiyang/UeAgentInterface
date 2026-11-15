@@ -8,6 +8,7 @@
 #include "Utilities/AuthoringExport/UeAgentExportWorkspaceWriter.h"
 
 class UObject;
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
 
 namespace UeAgentReflectionAuthoring
 {
@@ -24,7 +25,8 @@ namespace UeAgentReflectionAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ExportProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 
 	UEAGENTINTERFACE_API bool ExportAssetFile(
 		const FProfile& Profile,

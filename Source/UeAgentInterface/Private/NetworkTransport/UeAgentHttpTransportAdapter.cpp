@@ -65,7 +65,7 @@ namespace UE::UAI::NetworkTransport
 		{
 			return false;
 		}
-		if (!RouteHost->Bind(
+		if (!RouteHost->BindWithImmediate(
 			Config.InstanceId,
 			Config.Method,
 			Config.RoutePath,
@@ -73,7 +73,8 @@ namespace UE::UAI::NetworkTransport
 			{
 				return HandleRequest(Request);
 			},
-			OutDiagnostic, EUeAgentHttpRouteExecution::GameThread))
+			[this](const FUeAgentHttpRequest& Request) { return HandleRequestInternal(Request, true); },
+			OutDiagnostic))
 		{
 			return false;
 		}
@@ -196,6 +197,11 @@ namespace UE::UAI::NetworkTransport
 	FUeAgentHttpResponse FUeAgentHttpTransportAdapter::HandleRequest(
 		const FUeAgentHttpRequest& Request) const
 	{
+		return HandleRequestInternal(Request, false).GetValue();
+	}
+	TOptional<FUeAgentHttpResponse> FUeAgentHttpTransportAdapter::HandleRequestInternal(
+		const FUeAgentHttpRequest& Request, bool bConcurrent) const
+	{
 		if (!bRunning || !bCommandRouteBound
 			|| !RouteHost->IsBound(Config.InstanceId))
 		{
@@ -245,7 +251,10 @@ namespace UE::UAI::NetworkTransport
 			CorrelationId,
 			Peer);
 		const FUeAgentTransportIngress Ingress(Frame, Peer);
-		const FUeAgentTransportReply Reply = Handler->Handle(Ingress);
+		const auto MaybeReply = bConcurrent ? Handler->TryHandleConcurrent(Ingress)
+			: TOptional<FUeAgentTransportReply>(Handler->Handle(Ingress));
+		if (!MaybeReply.IsSet()) return {};
+		const FUeAgentTransportReply& Reply = MaybeReply.GetValue();
 		if (Reply.Frame.GetCorrelationId() != CorrelationId)
 		{
 			return FUeAgentHttpResponse::Failure(

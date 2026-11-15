@@ -18,6 +18,7 @@ class UScriptStruct;
 namespace UeAgentPropertyValueCodec {
 using UE::UAI::Contract::FDiagnostic;
 using UE::UAI::StateSemantic::CanonicalJson::FValueComparison;
+
 using FObjectReferenceEncoder = TFunction<bool(
     const FObjectPropertyBase *Property, const void *ValuePtr, UObject *Owner,
     int32 Depth, TSharedPtr<FJsonValue> &OutValue,
@@ -34,6 +35,12 @@ using FScopedValueInitializer = TFunction<bool(FProperty*, const TSharedPtr<FJso
 // loaded UObject. Soft paths must retain their lazy-loading semantics.
 using FScopedReferenceEncoder = TFunction<TSharedPtr<FJsonValue>(UObject*, const FString&)>;
 using FScopedReferenceDecoder = TFunction<bool(const TSharedPtr<FJsonValue>&, TSharedPtr<FJsonValue>&, FDiagnostic&)>;
+
+// Actual synchronous output selected by the original producer, not a proof or
+// permission to retry another implementation after a failed conversion.
+enum class EAuthoringValueDestination : uint8 {
+  None, Scalar, BuiltinShape, Reference, OriginalJson, NumericJson, CallbackJson, Unavailable, Sequence, Bitmask
+};
 
 struct FOptions {
   bool bAllowPartialStructFields = false;
@@ -54,7 +61,35 @@ struct FOptions {
   // Verification callers with a freshly resolved live member may provide its
   // containing struct. Never inferred from detached/standalone property storage.
   const void* NativeMemberContainer = nullptr;
+  // Internal immutable-result consumer contract; external mutable codec users
+  // keep the original fresh-subtree behavior.
+  bool bShareImmutableFieldDefinitions = false;
+  // Explicit synchronous immutable consumer. Original scalar/closed/reference
+  // producers select their output at the actual native read/callback return.
+  // Without a destination receiver, numeric input must be finite.
+  TSharedPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalValue>* DirectAuthoringLiteral = nullptr;
+  FDiagnostic* DirectAuthoringLiteralError = nullptr;
+  EAuthoringValueDestination* DirectAuthoringDestination = nullptr;
+  int32* DirectComponentNumbers = nullptr;
+  // Synchronous leaf receiver of the original container encoder. Defaults to
+  // the original root-only contract; no callbacks or options are recaptured.
+  int32 DirectAuthoringDepth = 0;
+  // Independent of OutValueDefinition/public schema and field-emission policy.
+  // False only for a consumer with no EncodedTypes::BuildDefinition reader.
+  bool bCaptureTypeProvenance = true;
+  int64* RetiredTypeRecords = nullptr;
+  // Borrowed for this synchronous encode. Reading a private field need not
+  // authorize an edit in its public descriptor.
+  const TFunction<bool(const FProperty*)>* StructFieldAuthorization = nullptr;
 };
+
+UEAGENTINTERFACE_API bool SupportsDirectAuthoringLiteral(const FProperty* Property);
+UEAGENTINTERFACE_API const UE::UAI::StateSemantic::FUeAgentCanonicalValue* ReadDirectAuthoringLiteral(
+    const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value);
+UEAGENTINTERFACE_API TSharedPtr<FJsonValue> ProjectDirectAuthoringLiteral(
+    const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value);
+UEAGENTINTERFACE_API TSharedPtr<FJsonValue> ProjectDirectAuthoringValue(
+    const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value);
 
 // Shared enum name/value contract; unnamed native values encode as an empty name.
 UEAGENTINTERFACE_API FString EncodeEnumValueName(const UEnum* Enum, int64 Raw);
@@ -68,6 +103,18 @@ UEAGENTINTERFACE_API bool DecodeObjectReference(const TSharedPtr<FJsonValue>& Va
                                                const FScopedReferenceDecoder& Resolver = {});
 
 UEAGENTINTERFACE_API FString GetValueKind(const FProperty *Property);
+// Current native observation, not a type-only/dirty/pointer proof. The closed
+// empty owned-object-array shape has no element callback or dynamic definition.
+UEAGENTINTERFACE_API bool IsUnchangedEmptyOwnedObjectArray(
+    const FProperty* Property, const void* ValuePtr,
+    const TSharedPtr<FJsonValue>& PreviousValue,
+    const TSharedPtr<FJsonValue>& PreviousDefinition);
+// Compare the current built-in scalar output before allocating its literal
+// envelope. No reference, enum/bitmask, container or callback-dependent shape.
+UEAGENTINTERFACE_API bool IsUnchangedBuiltinScalar(
+    const FProperty* Property, const void* ValuePtr,
+    const TSharedPtr<FJsonValue>& PreviousValue,
+    const TSharedPtr<FJsonValue>& PreviousDefinition);
 UEAGENTINTERFACE_API bool IsSupported(const FProperty *Property,
                                       FDiagnostic& OutReason);
 UEAGENTINTERFACE_API bool IsSupported(const FProperty *Property,

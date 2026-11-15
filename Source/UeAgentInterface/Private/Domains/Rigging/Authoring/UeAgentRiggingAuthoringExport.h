@@ -10,6 +10,8 @@
 
 class UObject;
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UeAgentRiggingAuthoring
 {
 	UEAGENTINTERFACE_API bool ExportAssetWorkspace(
@@ -17,5 +19,6 @@ namespace UeAgentRiggingAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ExportProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

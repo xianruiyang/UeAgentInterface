@@ -9,6 +9,7 @@ namespace UE::UAI::HjsonWorkspace
 	class FExportFilePlan;
 	class FWorkspaceError;
 	struct FKeyedItemProjectionContract;
+	struct FAuthoringExamplePublicationProof;
 
 	/** Reading aids only. No example is an import default, requirement or identity. */
 	struct FAuthoringExample
@@ -36,6 +37,12 @@ namespace UE::UAI::HjsonWorkspace
 	class FAuthoringExampleCatalog
 	{
 	public:
+		struct FPropertyInstruction
+		{
+			FString Pointer, TypeName, Definition, Category, Name;
+		};
+		/** Same property guide consumer, without manufacturing a document/value tree. */
+		void AddPropertyDocument(const FString& Path, TArray<FPropertyInstruction>&& Properties);
 		void AddDefinitions(const FString& Path, const TSharedRef<FJsonObject>& Definitions,
 			const TSharedPtr<FJsonObject>& Enums = nullptr);
 		void AddDocument(const FString& Path, const StateSemantic::FUeAgentCanonicalValueRef& Document,
@@ -43,13 +50,25 @@ namespace UE::UAI::HjsonWorkspace
 		void AddRule(FAuthoringDocumentExampleRule Rule);
 		void AddCollection(const FString& Path, const StateSemantic::FUeAgentCanonicalValueRef& Document,
 			const FKeyedItemProjectionContract& Contract);
+		/** Collect the declared aliases consulted by the document guide reader. */
+		static void CollectPropertyGuideReferences(const StateSemantic::FUeAgentCanonicalValueRef& Document,
+			TSet<FString>& OutReferences);
 		bool Publish(TArray<FExportFilePlan>& Files, FWorkspaceError& OutError,
-			TFunctionRef<FString(const TArray<uint8>&)> Hash);
+			TFunctionRef<FString(const TArray<uint8>&)> Hash,
+			const TSharedPtr<const FAuthoringExamplePublicationProof>& Previous = nullptr,
+			TSharedPtr<const FAuthoringExamplePublicationProof>* OutProof = nullptr,
+			const TMap<FString, const FExportFilePlan*>* PreviousFiles = nullptr,
+			const TSharedPtr<FJsonObject>& PreviousIndex = nullptr,
+			const TSet<FString>* ReplacedDocuments = nullptr,
+			const TMap<FString, StateSemantic::FUeAgentCanonicalValueRef>* PreviousGuides = nullptr,
+			const TMap<FString, TArray<FString>>* ReplacedPointers = nullptr,
+			TMap<FString, StateSemantic::FUeAgentCanonicalValueRef>* ProducedGuides = nullptr);
 	private:
 		struct FDocument
 		{
 			FString Path, SemanticType, Role, Field;
-			StateSemantic::FUeAgentCanonicalValueRef Value;
+			StateSemantic::FUeAgentCanonicalValuePtr Value;
+			TArray<FPropertyInstruction> Properties;
 		};
 		TMap<FString, TSharedPtr<FJsonObject>> Definitions;
 		TMap<FString, TSharedRef<FJsonObject>> DefinitionCatalogs;

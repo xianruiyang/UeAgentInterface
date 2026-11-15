@@ -9,6 +9,7 @@ class UBehaviorTree;
 
 namespace UeAgentBehaviorTreeAuthoring
 {
+	struct FGraphCapture;
 	inline constexpr const TCHAR* GraphSemanticId = TEXT("uai.semantic.behavior_tree.graph");
 	inline constexpr const TCHAR* NodeSemanticId = TEXT("uai.semantic.behavior_tree.node");
 	inline constexpr const TCHAR* NodePropertySemanticId = TEXT("uai.semantic.behavior_tree.node_property");
@@ -17,4 +18,6 @@ namespace UeAgentBehaviorTreeAuthoring
 	bool RegisterGraphState(UE::UAI::Contract::FDiagnostic& OutError);
 	bool AppendGraphExportRequests(UBehaviorTree& Tree,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError);
+	bool CaptureObservedGraph(UBehaviorTree& Tree, FGraphCapture& Capture,
+		UeAgentAuthoringState::FStateSnapshot& OutStructure, UE::UAI::Contract::FDiagnostic& OutError);
 }

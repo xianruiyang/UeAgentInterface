@@ -39,6 +39,9 @@ bool FUeAgentNumericValueComparisonTest::RunTest(const FString& Parameters)
 		const FString IntegerKey = UeAgentAuthoringState::MakeStableCanonicalValueKey(MakeShared<FJsonValueNumberString>(Case.Integer));
 		const FString DecimalKey = UeAgentAuthoringState::MakeStableCanonicalValueKey(MakeShared<FJsonValueNumberString>(Case.Decimal));
 		TestEqual(TEXT("stable key follows exact numeric equality"), IntegerKey == DecimalKey, Case.bEqual);
+		TestEqual(TEXT("snapshot equality follows exact numeric equality"),
+			UeAgentAuthoringState::AreStableCanonicalValuesEqual(MakeShared<FJsonValueNumberString>(Case.Integer),
+				MakeShared<FJsonValueNumberString>(Case.Decimal)), Case.bEqual);
 		for (bool bReverse : {false, true})
 		{
 			FUeAgentCanonicalValuePtr Left, Right;
@@ -123,10 +126,28 @@ bool FUeAgentNumericValueComparisonTest::RunTest(const FString& Parameters)
 		return false;
 	TestTrue(TEXT("native and HJSON values agree across kinds and member order"), CompareValues(HjsonValue.ToSharedRef(), NativeObjectValue.ToSharedRef(), TEXT("/value"), Resources).IsEquivalent());
 	TestEqual(TEXT("native and HJSON stable keys agree recursively"), UeAgentAuthoringState::MakeStableCanonicalValueKey(NativeJson), UeAgentAuthoringState::MakeStableCanonicalValueKey(ProjectedJson));
+	TestTrue(TEXT("snapshot exact equality ignores object insertion order"), UeAgentAuthoringState::AreStableCanonicalValuesEqual(NativeJson, ProjectedJson));
 	TestEqual(TEXT("clone preserves exact key"), UeAgentAuthoringState::MakeStableCanonicalValueKey(UeAgentAuthoringState::CloneCanonicalValue(ProjectedJson)), UeAgentAuthoringState::MakeStableCanonicalValueKey(ProjectedJson));
 	const auto Forward = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueNumber>(1.0), MakeShared<FJsonValueNumber>(2.0)});
 	const auto Reverse = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueNumber>(2.0), MakeShared<FJsonValueNumber>(1.0)});
 	TestFalse(TEXT("ordered arrays remain different"), UeAgentAuthoringState::MakeStableCanonicalValueKey(Forward) == UeAgentAuthoringState::MakeStableCanonicalValueKey(Reverse));
+	TestFalse(TEXT("snapshot equality retains array order"), UeAgentAuthoringState::AreStableCanonicalValuesEqual(Forward, Reverse));
+	const auto Upper = MakeShared<FJsonObject>(); Upper->SetField(TEXT("Value"), MakeShared<FJsonValueNull>());
+	const auto Lower = MakeShared<FJsonObject>(); Lower->SetField(TEXT("value"), MakeShared<FJsonValueNull>());
+	TestFalse(TEXT("snapshot object keys are case sensitive"), UeAgentAuthoringState::AreStableCanonicalValuesEqual(
+		MakeShared<FJsonValueObject>(Upper), MakeShared<FJsonValueObject>(Lower)));
+	TestFalse(TEXT("snapshot absent member differs from null"), UeAgentAuthoringState::AreStableCanonicalValuesEqual(
+		MakeShared<FJsonValueObject>(Upper), MakeShared<FJsonValueObject>(MakeShared<FJsonObject>())));
+	TestFalse(TEXT("snapshot missing value differs from JSON null"), UeAgentAuthoringState::AreStableCanonicalValuesEqual(nullptr, MakeShared<FJsonValueNull>()));
+	TestFalse(TEXT("snapshot case-only string edit is not discarded"), UeAgentAuthoringState::AreStableCanonicalValuesEqual(
+		MakeShared<FJsonValueString>(TEXT("Blue")), MakeShared<FJsonValueString>(TEXT("blue"))));
+	// Preserve the pre-existing malformed-cycle behavior; no cyclic data is
+	// admitted to the canonical model by this equality helper.
+	const auto CycleA = MakeShared<FJsonObject>(); const auto CycleB = MakeShared<FJsonObject>();
+	CycleA->SetObjectField(TEXT("self"), CycleA); CycleB->SetObjectField(TEXT("self"), CycleB);
+	TestTrue(TEXT("snapshot malformed cycles retain legacy key comparison"), UeAgentAuthoringState::AreStableCanonicalValuesEqual(
+		MakeShared<FJsonValueObject>(CycleA), MakeShared<FJsonValueObject>(CycleB)));
+	CycleA->RemoveField(TEXT("self")); CycleB->RemoveField(TEXT("self"));
 	TestFalse(TEXT("HJSON nonfinite literal rejected"), TryParseHjsonDocument(TEXT("{value:NaN}"), TEXT("numeric-invalid.hjson"), Resources, Document, WorkspaceError));
 	TestFalse(TEXT("native JSON nonfinite number rejected"), CanonicalJson::TryFromJsonValue(MakeShared<FJsonValueNumber>(std::numeric_limits<double>::infinity()), Resources, Parsed, JsonError));
 	return true;

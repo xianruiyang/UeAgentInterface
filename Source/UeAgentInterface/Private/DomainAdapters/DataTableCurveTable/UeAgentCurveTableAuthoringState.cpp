@@ -172,6 +172,7 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 		{
 			UeAgentAuthoringState::FReadRequest Request;
 			Request.SemanticId = Id;
+			if (Id == TargetSemantic) Request.MarkExportTarget();
 			Request.RootObject = &Table;
 			Request.RootOwnerPath = Path;
 			if (!UeAgentAuthoringIdentity::BuildCanonicalIdentity(IdentityModel, TargetKind,

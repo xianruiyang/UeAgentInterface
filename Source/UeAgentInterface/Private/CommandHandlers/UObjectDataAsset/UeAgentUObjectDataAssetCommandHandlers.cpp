@@ -97,26 +97,10 @@ namespace UE::UAI::CommandHandlers::UObjectDataAsset
 					}
 					return Failure(Request, Diagnostic, Error.SubjectId);
 				}
-				if (Route.Kind == EUeAgentUObjectDataAssetRouteKind::Query
-					&& !Response.bReadOnly)
-				{
-					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("uobject_dataasset_query_not_read_only"), TEXT("the command service violated its query contract"), TEXT("command_submit")), Request.GetCommandId());
-				}
-				TSharedPtr<FJsonObject> Payload;
-				UE::UAI::Contract::FDiagnostic JsonError;
-				if (!CommandContract::Json::TryParseObject(
-						Response.PayloadJson, Payload, JsonError))
-				{
-					return Failure(Request, JsonError, Request.GetCommandId());
-				}
-				FString CanonicalPayload;
-				if (!CommandContract::Json::TryCanonicalize(
-						Payload, CanonicalPayload, JsonError))
-				{
-					return Failure(Request, JsonError, Request.GetCommandId());
-				}
+				// Command declaration owns query permissions. The wire protocol parses
+				// the service's canonical object once when building the public result.
 				return FUeAgentCommandResult::Success(
-					Request, MoveTemp(CanonicalPayload));
+					Request, MoveTemp(Response.PayloadJson));
 			}
 
 		private:

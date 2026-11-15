@@ -86,7 +86,8 @@ namespace UE::UAI::CommandHandlers::AnimationRigGraph
 		bool bReadOnly = false;
 		if (!DomainAdapters::AnimationRigGraph::TryExecuteContentGraph(
 			Request.GetCommandId(), Request.GetTargetIdentity(),
-			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
+			Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

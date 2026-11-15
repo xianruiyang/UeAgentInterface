@@ -256,7 +256,8 @@ namespace UE::UAI::HjsonWorkspace
 			const FUeAgentStateRevision& Revision =
 				Request.GetExpectedTargetRevision();
 			const TArray<FString> MaterialParts{
-				Request.GetModel()->GetModelFingerprint(),
+				TEXT("uai.initialization.inputs/2"),
+				LexToString(Request.GetCarrier()),
 				Request.GetTargetIdentity(),
 				Revision.GetSourceId(),
 				Revision.GetGeneration(),
@@ -438,7 +439,6 @@ namespace UE::UAI::HjsonWorkspace
 
 	FImportInitializationPlanningRequest::FImportInitializationPlanningRequest(
 		const EImportSourceCarrier InCarrier,
-		FUnifiedHjsonSemanticModelRef InModel,
 		FString InTargetIdentity,
 		FUeAgentStateRevision InExpectedTargetRevision,
 		FString InSourceBaselineFingerprint,
@@ -449,7 +449,6 @@ namespace UE::UAI::HjsonWorkspace
 		TArray<FString> InImpactScopes,
 		FString InAuthorizationId)
 		: Carrier(InCarrier)
-		, Model(MoveTemp(InModel))
 		, TargetIdentity(Normalize(MoveTemp(InTargetIdentity)))
 		, ExpectedTargetRevision(MoveTemp(InExpectedTargetRevision))
 		, SourceBaselineFingerprint(
@@ -470,8 +469,6 @@ namespace UE::UAI::HjsonWorkspace
 			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_planning_request_invalid"), TEXT("The import source carrier must be directory, multi_file, single_file or inline."), TEXT("/carrier"));
 			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Carrier));
 		}
-		else if (!Model->IsValid())
-			ValidationDiagnostic = Contract::FDiagnostic::WrapFailure(TEXT("hjson_import_planning_request_invalid"), Model->GetValidationDiagnostic());
 		else if (TargetIdentity.IsEmpty())
 			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_planning_request_invalid"), TEXT("The import planning request requires a target."), TEXT("/target"));
 		else if (!ExpectedTargetRevision.IsValid())
@@ -490,7 +487,6 @@ namespace UE::UAI::HjsonWorkspace
 	}
 
 	EImportSourceCarrier FImportInitializationPlanningRequest::GetCarrier() const { return Carrier; }
-	const FUnifiedHjsonSemanticModelRef& FImportInitializationPlanningRequest::GetModel() const { return Model; }
 	const FString& FImportInitializationPlanningRequest::GetTargetIdentity() const { return TargetIdentity; }
 	const FUeAgentStateRevision& FImportInitializationPlanningRequest::GetExpectedTargetRevision() const { return ExpectedTargetRevision; }
 	const FString& FImportInitializationPlanningRequest::GetSourceBaselineFingerprint() const { return SourceBaselineFingerprint; }
@@ -503,7 +499,6 @@ namespace UE::UAI::HjsonWorkspace
 	bool FImportInitializationPlanningRequest::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FImportInitializationPlan::FImportInitializationPlan(
-		FString InSourceModelFingerprint,
 		FString InTargetIdentity,
 		FUeAgentStateRevision InExpectedTargetRevision,
 		TArray<FImportChange> InChanges,
@@ -512,8 +507,7 @@ namespace UE::UAI::HjsonWorkspace
 		TMap<FString, FString> InResolvedCandidates,
 		TArray<FString> InImpactScopes,
 		FString InPlanFingerprint)
-		: SourceModelFingerprint(MoveTemp(InSourceModelFingerprint))
-		, TargetIdentity(MoveTemp(InTargetIdentity))
+		: TargetIdentity(MoveTemp(InTargetIdentity))
 		, ExpectedTargetRevision(MoveTemp(InExpectedTargetRevision))
 		, Changes(MoveTemp(InChanges))
 		, CreationOrder(MoveTemp(InCreationOrder))
@@ -522,12 +516,7 @@ namespace UE::UAI::HjsonWorkspace
 		, ImpactScopes(MoveTemp(InImpactScopes))
 		, PlanFingerprint(MoveTemp(InPlanFingerprint))
 	{
-		if (!IsFingerprint(SourceModelFingerprint))
-		{
-			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_plan_invalid"), TEXT("The import plan source model fingerprint is not a SHA-256 digest."), TEXT("/source_model_fingerprint"));
-			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(SourceModelFingerprint);
-		}
-		else if (TargetIdentity.IsEmpty())
+		if (TargetIdentity.IsEmpty())
 			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_plan_invalid"), TEXT("The import plan requires a target."), TEXT("/target"));
 		else if (!ExpectedTargetRevision.IsValid())
 			ValidationDiagnostic = Contract::FDiagnostic::WrapFailure(TEXT("hjson_import_plan_invalid"), ExpectedTargetRevision.GetValidationDiagnostic());
@@ -539,7 +528,6 @@ namespace UE::UAI::HjsonWorkspace
 		if (!ValidationDiagnostic.IsEmpty() && ValidationDiagnostic.TargetPath.IsEmpty()) ValidationDiagnostic.TargetPath = TargetIdentity;
 	}
 
-	const FString& FImportInitializationPlan::GetSourceModelFingerprint() const { return SourceModelFingerprint; }
 	const FString& FImportInitializationPlan::GetTargetIdentity() const { return TargetIdentity; }
 	const FUeAgentStateRevision& FImportInitializationPlan::GetExpectedTargetRevision() const { return ExpectedTargetRevision; }
 	const TArray<FImportChange>& FImportInitializationPlan::GetChanges() const { return Changes; }
@@ -878,7 +866,6 @@ namespace UE::UAI::HjsonWorkspace
 
 		FImportInitializationPlanPtr Candidate = MakeShareable(
 			new FImportInitializationPlan(
-				Request.GetModel()->GetModelFingerprint(),
 				Request.GetTargetIdentity(),
 				Request.GetExpectedTargetRevision(),
 				Request.GetChanges(),

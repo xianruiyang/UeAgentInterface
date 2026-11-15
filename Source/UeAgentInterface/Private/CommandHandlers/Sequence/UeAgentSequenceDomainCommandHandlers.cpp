@@ -21,7 +21,8 @@ namespace UE::UAI::CommandHandlers::Sequence
 				Request.GetCanonicalParamsJson(),
 				Payload,
 				bReadOnly,
-				OutError))
+				OutError,
+				Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

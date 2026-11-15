@@ -10,6 +10,7 @@ class UBehaviorTreeGraphNode;
 class UEdGraph;
 class FJsonObject;
 class FJsonValue;
+namespace UeAgentAuthoringState { class FStateSnapshot; }
 namespace UE::UAI::HjsonWorkspace { class FWorkspaceError; struct FGraphNodeReferenceBinding; }
 namespace UE::UAI::Composition::HjsonImport { class FPreparedAuthoringImport; struct FSemanticWorkspaceChangeProjection; }
 namespace UeAgentDetailsAuthoringService { struct FScopedPropertyIntent; }
@@ -25,6 +26,8 @@ namespace UeAgentDetailsAuthoringService { struct FScopedPropertyIntent; }
 	// Server-side desired state. Workspace identity and aliases are resolved by the common coordinator.
 	bool ValidateGraphDocument(const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool ReadGraphDocument(UBehaviorTree& Tree, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError);
+	bool ReadGraphDocument(UBehaviorTree& Tree, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError,
+		TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure);
 	bool ApplyGraphDocument(UBehaviorTree& Tree, const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError);
 	bool ApplyGraphDocument(UBehaviorTree& Tree, const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError,
 		TArray<UeAgentDetailsAuthoringService::FScopedPropertyIntent>* OutPropertyIntents);

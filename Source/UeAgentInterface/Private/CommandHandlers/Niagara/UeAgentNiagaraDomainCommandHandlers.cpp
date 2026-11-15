@@ -88,7 +88,8 @@ namespace UE::UAI::CommandHandlers::Niagara
 		if (!DomainAdapters::Niagara::TryExecuteContentGraph(
 				Request.GetCommandId(), Request.GetTargetIdentity(),
 				Request.GetRootTypeIdentity(),
-				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
+				Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

@@ -86,7 +86,8 @@ namespace UE::UAI::DomainAdapters::AssetSimple
 					if (!CommandContract::Json::TryParseObject(Request.GetCanonicalParamsJson(), Params, ParseError)
 						|| !Params || !Params->TryGetStringField(TEXT("workspace_path"), Path) || Path.IsEmpty())
 					{ Error.SetFailure(ParseError.IsValid() ? MoveTemp(ParseError) : UE::UAI::Contract::FDiagnostic::Failure(Config.ProfileId + TEXT("_export_path_required"), TEXT("workspace_path must be a non-empty string."), TEXT("workspace_export")), Target); return false; }
-					if (!Composition::HjsonImport::TryExportReflectionRootWorkspace(*Profile, Target, Path, Payload, Error)) return false;
+					if (!Composition::HjsonImport::TryExportReflectionRootWorkspace(*Profile, Target, Path, Payload, Error,
+						Request.GetWorkspaceExportPreparation().Get())) return false;
 					Response = FImportInitializationDomainResponse(MoveTemp(Payload), true);
 					return Response.IsValid();
 				}

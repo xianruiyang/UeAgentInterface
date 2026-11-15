@@ -273,6 +273,7 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 		{
 			FReadRequest Request;
 			Request.SemanticId = SemanticId;
+			if (SemanticId == TargetSemantic) Request.MarkExportTarget();
 			Request.RootObject = &Table;
 			Request.RootOwnerPath = CanonicalAssetPath;
 			if (!BuildIdentity(CanonicalAssetPath, RowName, FString(), Request.TargetIdentity, OutError)) return false;

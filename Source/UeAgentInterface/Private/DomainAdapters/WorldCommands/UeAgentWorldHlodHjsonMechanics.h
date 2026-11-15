@@ -2,6 +2,8 @@
 
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UE::UAI::DomainAdapters::WorldCommands
 {
 	UEAGENTINTERFACE_API bool TryExecuteHlodContentGraph(
@@ -11,5 +13,6 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
 		HjsonWorkspace::FWorkspaceError& OutError,
-		const FString& RootType = TEXT("/Script/Engine.HLODLayer"));
+		const FString& RootType = TEXT("/Script/Engine.HLODLayer"),
+		HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

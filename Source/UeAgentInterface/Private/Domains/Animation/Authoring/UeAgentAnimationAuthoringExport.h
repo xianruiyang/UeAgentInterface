@@ -10,6 +10,8 @@
 
 class UObject;
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UeAgentAnimationAuthoring {
 UEAGENTINTERFACE_API bool
 ResolveDefaultWorkspaceFolder(const FProfile &Profile, const FString &AssetPath,
@@ -18,5 +20,6 @@ UEAGENTINTERFACE_API bool
 ExportAssetWorkspace(const FProfile &Profile, UObject &Asset,
                      const FString &WorkspaceRoot,
                      const FString &ExportProfileId,
-                     UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult);
+                     UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult,
+                     UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 } // namespace UeAgentAnimationAuthoring

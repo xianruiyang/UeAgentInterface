@@ -1,4 +1,5 @@
 #include "Utilities/UeAgentSplineValue.h"
+#include "Utilities/UeAgentNativeNumberFormat.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
@@ -12,10 +13,11 @@ namespace UeAgentSplineValue
 {
 namespace
 {
-TArray<TSharedPtr<FJsonValue>> Numbers(std::initializer_list<double> Values)
+template<typename T>
+TArray<TSharedPtr<FJsonValue>> Numbers(std::initializer_list<T> Values)
 {
     TArray<TSharedPtr<FJsonValue>> Out;
-    for (double V : Values) Out.Add(MakeShared<FJsonValueNumber>(V));
+    for (T V : Values) Out.Add(UeAgentNumericFormatting::MakeNativeValue(V));
     return Out;
 }
 FString ModeName(EInterpCurveMode Mode)
@@ -63,7 +65,7 @@ TSharedPtr<FJsonObject> Encode(const FSplineCurves& Curves)
     for (const auto& P : Curves.Position.Points)
     {
         auto Row = MakeShared<FJsonObject>();
-        Row->SetNumberField(TEXT("input_key"), P.InVal);
+        Row->SetField(TEXT("input_key"), UeAgentNumericFormatting::MakeNativeValue(P.InVal));
         Row->SetStringField(TEXT("type"), ModeName(P.InterpMode));
         Row->SetArrayField(TEXT("position"), Numbers({P.OutVal.X, P.OutVal.Y, P.OutVal.Z}));
         const FQuat R = Curves.Rotation.Eval(P.InVal, FQuat::Identity);

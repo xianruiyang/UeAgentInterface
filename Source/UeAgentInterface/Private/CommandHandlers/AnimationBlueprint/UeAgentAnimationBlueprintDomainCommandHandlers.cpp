@@ -101,7 +101,8 @@ namespace UE::UAI::CommandHandlers::AnimationBlueprint
 		bool bReadOnly = false;
 		if (!DomainAdapters::AnimationBlueprint::TryExecuteContentGraph(
 			Request.GetCommandId(), Request.GetTargetIdentity(),
-			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
+			Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

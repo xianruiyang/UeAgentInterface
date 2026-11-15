@@ -43,5 +43,5 @@ namespace UE::UAI::HjsonWorkspace
 		TMap<FString, int64> Telemetry,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FExportWorkspacePlanPtr& OutPlan,
-		FWorkspaceError& OutError);
+		FWorkspaceError& OutError, FPreparedWorkspaceExport* ExportSettings = nullptr);
 }

@@ -1,6 +1,7 @@
 #include "DomainAdapters/DataTableCurveTable/UeAgentCurveTableAuthoringApply.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -107,7 +108,8 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			NotifyRowsChanged(Target);
 		}
 
-		bool ApplyRows(UCurveTable& Target, const FJsonObject& Desired, FOperationFailure& Failure, const FString& LogicalTarget)
+		bool ApplyRows(UCurveTable& Target, const FJsonObject& Desired, FOperationFailure& Failure,
+			const FString& LogicalTarget, TSet<FName>& ChangedRows)
 		{
 			auto Invalid = [&](const TCHAR* Code, const TCHAR* Reason, const FString& Pointer,
 				TSharedPtr<FJsonValue> Actual, const FString& Expected)
@@ -146,9 +148,10 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			TMap<FName, FSimpleCurve> Simple;
 			TMap<FName, FRichCurve> Rich;
 			TSet<FName> Names;
+			int32 ReusedRows = 0;
 			for (const auto& Pair : (*Rows)->Values)
 			{
-				const FString RowPath = TEXT("/rows/") + Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+				const FString RowPath = TEXT("/rows/") + HjsonWorkspace::EscapeJsonPointerSegment(Pair.Key);
 				const FName Name(*Pair.Key);
 				if (Name.IsNone() || Names.Contains(Name) || !Pair.Value.IsValid() || Pair.Value->Type != EJson::Object)
 				{
@@ -168,6 +171,10 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 				if (!Pair.Value->AsObject()->TryGetObjectField(TEXT("properties"), Properties))
 					return Invalid(TEXT("curve_table_curve_value_invalid"), TEXT("The CurveTable row requires a properties object."),
 						RowPath + TEXT("/properties"), Pair.Value->AsObject()->TryGetField(TEXT("properties")), TEXT("object containing only Curve"));
+				if ((*Properties)->Values.IsEmpty()
+					&& (bSimple ? Target.GetSimpleCurveRowMap().Contains(Name) : Target.GetRichCurveRowMap().Contains(Name))) {
+					++ReusedRows; continue;
+				}
 				if ((*Properties)->Values.Num() != 1)
 					return Invalid(TEXT("curve_table_curve_value_invalid"), TEXT("The CurveTable row must contain exactly one Curve property."),
 						RowPath + TEXT("/properties"), MakeShared<FJsonValueNumber>((*Properties)->Values.Num()), TEXT("exactly one Curve property"));
@@ -181,7 +188,7 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 					return Invalid(TEXT("curve_table_curve_value_invalid"), TEXT("The Curve property requires an object value."),
 						RowPath + TEXT("/properties/Curve/value"), (*Property)->TryGetField(TEXT("value")), TEXT("object"));
 				const FString CurvePointer = TEXT("/rows/")
-					+ Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))
+					+ HjsonWorkspace::EscapeJsonPointerSegment(Pair.Key)
 					+ TEXT("/properties/Curve/value");
 				TArray<UE::UAI::Contract::FDiagnostic> Issues;
 				bool bApplied;
@@ -207,11 +214,16 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 						TEXT("curve_table_curve_value_invalid"), Issues, TEXT("curve_decode"), LogicalTarget);
 					return Fail(Failure, Diagnostic);
 				}
+				ChangedRows.Add(Name);
 			}
-			RemoveRowsPreservingMode(Target);
+			TArray<FName> BeforeNames;
+			if (BeforeMode == ECurveTableMode::SimpleCurves) Target.GetSimpleCurveRowMap().GetKeys(BeforeNames);
+			else if (BeforeMode == ECurveTableMode::RichCurves) Target.GetRichCurveRowMap().GetKeys(BeforeNames);
+			for (const FName Name : BeforeNames) if (!Names.Contains(Name)) Target.RemoveRow(Name);
 			for (const auto& Pair : Simple) Target.AddSimpleCurve(Pair.Key) = Pair.Value;
 			for (const auto& Pair : Rich) Target.AddRichCurve(Pair.Key) = Pair.Value;
 			NotifyRowsChanged(Target);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=curve_table_native_rows membership=%d reused_rows=%d decoded_rows=%d"), Names.Num(), ReusedRows, ChangedRows.Num());
 			return true;
 		}
 
@@ -221,8 +233,8 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 		class FTableState final : public IReflectionOperationLifecycleState
 		{
 		public:
-			FTableState(FString InPath, UCurveTable* InActual, UCurveTable* InProposed, bool bInRows)
-				: Path(MoveTemp(InPath)), Actual(InActual), Proposed(InProposed), bRows(bInRows), bCreate(!InActual) {}
+			FTableState(FString InPath, UCurveTable* InActual, UCurveTable* InProposed, bool bInRows, TSet<FName> InChangedRows)
+				: Path(MoveTemp(InPath)), Actual(InActual), Proposed(InProposed), ChangedRows(MoveTemp(InChangedRows)), bRows(bInRows), bCreate(!InActual) {}
 			~FTableState() override { Release(Proposed); Release(Before); }
 			FString GetTargetKey() const override { return Path; }
 			EOperation GetResolvedOperation() const override { return bCreate ? EOperation::Create : EOperation::Update; }
@@ -256,7 +268,20 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 				}
 				if (!bRows) return true;
 				if (!Actual || !Proposed.IsValid()) return Fail(Failure, CurveLifecycleFailure(TEXT("curve_table_apply_state_missing"), TEXT("The CurveTable lifecycle cannot apply without both actual and proposed objects."), Path, Actual ? TEXT("/proposed_object_present") : TEXT("/actual_object_present"), false, true));
-				Actual->Modify(); CopyRows(*Actual, *Proposed); Actual->MarkPackageDirty(); return true;
+				Actual->Modify();
+				TArray<FName> Names;
+				if (Actual->GetCurveTableMode() == ECurveTableMode::SimpleCurves) Actual->GetSimpleCurveRowMap().GetKeys(Names);
+				else if (Actual->GetCurveTableMode() == ECurveTableMode::RichCurves) Actual->GetRichCurveRowMap().GetKeys(Names);
+				if (Proposed->GetCurveTableMode() == ECurveTableMode::SimpleCurves) {
+					const auto& Rows = Proposed->GetSimpleCurveRowMap();
+					for (const FName Name : Names) if (!Rows.Contains(Name)) Actual->RemoveRow(Name);
+					for (const FName Name : ChangedRows) Actual->AddSimpleCurve(Name) = *Rows.FindChecked(Name);
+				} else if (Proposed->GetCurveTableMode() == ECurveTableMode::RichCurves) {
+					const auto& Rows = Proposed->GetRichCurveRowMap();
+					for (const FName Name : Names) if (!Rows.Contains(Name)) Actual->RemoveRow(Name);
+					for (const FName Name : ChangedRows) Actual->AddRichCurve(Name) = *Rows.FindChecked(Name);
+				} else { Actual->EmptyTable(); Actual->MarkPackageDirty(); return true; }
+				NotifyRowsChanged(*Actual); Actual->MarkPackageDirty(); return true;
 			}
 			bool Compile(FOperationFailure&) override { return true; }
 			bool Save(FOperationFailure&) override { return true; }
@@ -316,6 +341,7 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			FString Path;
 			UCurveTable* Actual;
 			TStrongObjectPtr<UCurveTable> Proposed, Before;
+			TSet<FName> ChangedRows;
 			bool bRows;
 			bool bCreate = false;
 			bool bCreated = false;
@@ -347,12 +373,13 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 				if (!Proposed.IsValid()) return Fail(Failure, CurveLifecycleFailure(TEXT("curve_table_prepare_failed"), TEXT("The proposed CurveTable could not be created or duplicated."), Path, TEXT("/proposed_object_present"), false, true));
 				Proposed->ClearFlags(RF_Public | RF_Standalone);
 				const bool bRows = Request.Input->ProviderExtension.IsValid() && !Request.Input->ProviderExtension->Values.IsEmpty();
-				if (bRows && !ApplyRows(*Proposed, *Request.Input->ProviderExtension, Failure, Path))
+				TSet<FName> ChangedRows;
+				if (bRows && !ApplyRows(*Proposed, *Request.Input->ProviderExtension, Failure, Path, ChangedRows))
 				{
 					BindCurveTableInputSource(Failure.Diagnostic, *Request.Unit);
 					return false;
 				}
-				OutState = MakeUnique<FTableState>(Path, Actual, Proposed.Get(), bRows);
+				OutState = MakeUnique<FTableState>(Path, Actual, Proposed.Get(), bRows, MoveTemp(ChangedRows));
 				Proposed.Reset();
 				return true;
 			}

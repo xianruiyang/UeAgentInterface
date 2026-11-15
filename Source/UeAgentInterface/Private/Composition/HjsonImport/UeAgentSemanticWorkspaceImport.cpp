@@ -4,6 +4,7 @@
 
 #include "Core/Contract/UeAgentDiagnostic.h"
 #include "Utilities/UeAgentCurveOriginalIntent.h"
+#include "Utilities/UeAgentThreadCpuTiming.h"
 #include "Composition/HjsonImport/UeAgentSemanticWorkspaceRebase.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
@@ -14,6 +15,7 @@
 #include "JsonUtils/JsonPointer.h"
 
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentWorkspacePublication.h"
 #include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
 #include "Core/AssetPreview/UeAgentAssetPreviewState.h"
 #include "Core/HjsonWorkspace/UeAgentReflectedPropertyRows.h"
@@ -35,14 +37,20 @@ namespace UE::UAI::Composition::HjsonImport
 	using namespace UE::UAI::PlanningPreflight;
 	using namespace UE::UAI::StateSemantic;
 
+	static bool PrepareRebasedAuthoringImport(const FResolvedSemanticWorkspaceRef& Workspace,
+		const FAuthoringModelRef& CurrentModel, const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
+		const FChangeSetDraft& ChangeSetDraft, const FUeAgentCallerContext& CallerContext, bool bDryRun,
+		const FString& ExpectedSelectionFingerprint, const FString& ExpectedClosureFingerprint,
+		FUeAgentResourceTracker& Resources, FPreparedAuthoringImportPtr& OutPrepared,
+		FSemanticWorkspaceImportError& OutError);
+
 	namespace
 	{
 		TArray<const FSemanticUnit*> FindIdentityUnits(const FAuthoringModelRef& Model,
 			const FString& IdentityKey, const FString& AuthoringTargetIdentityKey)
 		{
-			auto Units = Model->FindUnitsForTargetIdentity(IdentityKey);
-			if (!AuthoringTargetIdentityKey.IsEmpty() && AuthoringTargetIdentityKey != IdentityKey)
-				Units.Append(Model->FindUnitsForTargetIdentity(AuthoringTargetIdentityKey));
+			auto Units = Model->FindUnitsForTargetIdentity(
+				AuthoringTargetIdentityKey.IsEmpty() ? IdentityKey : AuthoringTargetIdentityKey);
 			Units.Sort([](const FSemanticUnit& Left, const FSemanticUnit& Right) { return &Left < &Right; });
 			return Units;
 		}
@@ -62,7 +70,7 @@ namespace UE::UAI::Composition::HjsonImport
 		FString SourceUnit;
 		for (const auto* Unit : Workspace->GetModel()->FindUnitsForTargetIdentity(TargetKey))
 		{
-			const auto* Source = Workspace->GetUnitSources().Find(Unit->GetUnitId());
+			const auto* Source = Workspace->FindUnitSource(Unit->GetUnitId());
 			if (!Source) continue;
 			if (Match) return;
 			Match = Source;
@@ -90,7 +98,8 @@ namespace UE::UAI::Composition::HjsonImport
 		const TArray<FDocumentValueSourceBinding>& DocumentSources,
 		const UeAgentNativeNormalizationIntent::FScope* NativeNormalization,
 		const TArray<UeAgentAuthoringState::FReadRequest>* CurrentReadRequests,
-		const TArray<HjsonWorkspace::FGraphNodeReferenceBinding>& GraphReferenceBindings)
+		const TArray<HjsonWorkspace::FGraphNodeReferenceBinding>& GraphReferenceBindings,
+		HjsonWorkspace::FProjectObservedGraphNodeFields ProjectObservedGraphNodeFields)
 	{
 		OutError.Reset();
 		auto IntentDocumentSources = DocumentSources;
@@ -214,9 +223,10 @@ namespace UE::UAI::Composition::HjsonImport
 			else if (!Actual.bAvailable) ValueError = ImportFailure(TEXT("hjson_import_intent_check_failed"), ValueError.IsValid() ? ValueError : FailureDetail, TEXT("The final readback value could not be compared with the original edit."));
 			else
 			{
-				if (const auto* InputBefore = Prepared.FindPropertyBaseline(Change.GetIdentity().GetCanonicalKey()))
-					if (!CanonicalJson::TryToJsonValue(**InputBefore, Before, FailureDetail))
-						ValueError = ImportFailure(TEXT("hjson_import_intent_input_invalid"), ValueError.IsValid() ? ValueError : FailureDetail, TEXT("The original authored property value could not be read for intent verification."));
+				const auto* InputBefore = Prepared.FindPropertyBaseline(Change.GetIdentity().GetCanonicalKey());
+				if (!Prepared.IsValid()) ValueError = Prepared.GetValidationDiagnostic();
+				else if (InputBefore && !CanonicalJson::TryToJsonValue(**InputBefore, Before, FailureDetail))
+					ValueError = ImportFailure(TEXT("hjson_import_intent_input_invalid"), ValueError.IsValid() ? ValueError : FailureDetail, TEXT("The original authored property value could not be read for intent verification."));
 				// ObjectApply has already consumed binding/creation syntax and frozen
 				// the decoded values, including nested owned edits. Check that it
 				// received the original delta, then verify that intent on the fresh
@@ -352,6 +362,14 @@ namespace UE::UAI::Composition::HjsonImport
 							}
 							UeAgentAuthoringState::FStateEntry NativeNode;
 							if (NativeUnit && ReadItem(*NativeUnit, false, NativeNode)) {
+								if (ProjectObservedGraphNodeFields && Operation != TEXT("remove")
+									&& !ProjectObservedGraphNodeFields(*DesiredNodes->GetObjectField(Node.Key), NativeNode,
+										NativeAfter, CurrentReadRequests, FailureDetail)) {
+									DifferencePath = TEXT("/nodes/") + EscapeJsonPointerSegment(Node.Key) + FailureDetail.Source.JsonPath;
+									ValueError = ImportFailure(TEXT("hjson_import_intent_check_failed"), FailureDetail,
+										TEXT("The authored node field could not be bound to its final native readback."));
+									break;
+								}
 								ActualNodes->SetField(Node.Key, NativeNode.Value);
 								NodeTypes->SetObjectField(Node.Key, TypeDescriptor(NativeNode));
 							} else if (!NativeUnit && bNativeGraphDocument) {
@@ -622,7 +640,7 @@ namespace UE::UAI::Composition::HjsonImport
 				if (Unit.GetTargetIdentityKey() != NativeKey
 					&& Unit.GetTargetIdentityKey() != Change.GetIdentity().GetCanonicalKey()) continue;
 				const auto* Source = Workspace->FindValueSource(Unit.GetUnitId(), TEXT("/values") + DifferencePath);
-				if (!Source) Source = Workspace->GetUnitSources().Find(Unit.GetUnitId());
+				if (!Source) Source = Workspace->FindUnitSource(Unit.GetUnitId());
 				if (Source) Failure.Locate(*Source);
 				break;
 			}
@@ -922,7 +940,8 @@ namespace UE::UAI::Composition::HjsonImport
 				const auto* CurrentSource = DefinitionField(&Current.Get(), TEXT("literal"));
 				if (const auto* Localized = DefinitionField(&Current.Get(), TEXT("localized")))
 					CurrentSource = DefinitionField(Localized, TEXT("source"));
-				if (CurrentSource && CurrentSource->GetKind() == EUeAgentValueKind::String && CurrentSource->GetText() == SourceEdit->GetText())
+				if (CurrentSource && CurrentSource->GetKind() == EUeAgentValueKind::String
+					&& CurrentSource->GetText().Equals(SourceEdit->GetText(), ESearchCase::CaseSensitive))
 				{
 					OutValue = Current;
 					return true;
@@ -1069,23 +1088,11 @@ namespace UE::UAI::Composition::HjsonImport
 							}
 						}
 						BusinessItems.Add(Desired.ToSharedRef());
-						const auto* Owned = FindObjectValue(Desired.ToSharedRef(), TEXT("owned_object"));
-						if (!Owned) { ApplyItems.Add(Desired.ToSharedRef()); continue; } // Explicit nullable slot.
-						if ((*Owned)->GetKind() != EUeAgentValueKind::Object) {
-							OutError = Contract::FDiagnostic::Failure(TEXT("hjson_owned_item_value_invalid"),
-								TEXT("The owned_object value must be an object."), TEXT("hjson_import"));
-							FUeAgentStateSemanticError ConversionError;
-							if (!CanonicalJson::TryToJsonValue(**Owned, OutError.ActualValue, ConversionError)) OutError = MoveTemp(ConversionError);
-							else OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+						FUeAgentCanonicalValuePtr ApplyItem;
+						if (!Binding.TryBuildApplyItem(Desired.ToSharedRef(), Resources, ApplyItem, OutError)) {
 							UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, TEXT("/") + FString::FromInt(Index) + TEXT("/owned_object"));
 							return false;
 						}
-						auto Fields = (*Owned)->GetObjectItems();
-						FUeAgentCanonicalValuePtr Selector, ApplyOwned, ApplyItem;
-						if (!FUeAgentCanonicalValue::TryString(Binding.RelativePath, Resources, Selector, OutError)) return false;
-						Fields.Emplace(TEXT("owner_relative_path"), Selector.ToSharedRef());
-						if (!FUeAgentCanonicalValue::TryObject(Fields, Resources, ApplyOwned, OutError)
-							|| !FUeAgentCanonicalValue::TryObject({{TEXT("owned_object"), ApplyOwned.ToSharedRef()}}, Resources, ApplyItem, OutError)) return false;
 						ApplyItems.Add(ApplyItem.ToSharedRef());
 					}
 					FUeAgentCanonicalValuePtr Business;
@@ -1581,7 +1588,7 @@ namespace UE::UAI::Composition::HjsonImport
 					// The type definition may live in the hidden envelope. In that case
 					// the authored value is related context, not an erroneous type leaf.
 					Source = Workspace->FindValueSource(PropertyUnit.GetUnitId(), TEXT("/value"));
-					if (!IsPublicSource(Source)) Source = Workspace->GetUnitSources().Find(PropertyUnit.GetUnitId());
+					if (!IsPublicSource(Source)) Source = Workspace->FindUnitSource(PropertyUnit.GetUnitId());
 				}
 				FWorkspaceError Located;
 				Located.SetFailure(MoveTemp(Diagnostic));
@@ -1912,11 +1919,26 @@ namespace UE::UAI::Composition::HjsonImport
 		: Workspace(MoveTemp(InWorkspace))
 		, InputBaseline(MoveTemp(InInputBaseline))
 		, PropertyBaselines(MoveTemp(InPropertyBaselines))
-		, ChangeSetDraft(MoveTemp(InChangeSetDraft))
+		, ChangeSetDraft(MakeShared<const FChangeSetDraft>(MoveTemp(InChangeSetDraft)))
 		, PlanningRequest(MoveTemp(InPlanningRequest))
 		, PreflightResult(MoveTemp(InPreflightResult))
 	{
-		const auto& Changes = ChangeSetDraft.GetChanges();
+		InitializeValidation(true);
+	}
+
+	FPreparedAuthoringImport::FPreparedAuthoringImport(FResolvedSemanticWorkspaceRef InWorkspace,
+		TSharedRef<const FChangeSetDraft> InChangeSetDraft, FPlanningRequest InPlanningRequest,
+		FAuthoringModelPtr InInputBaseline, TMap<FString, FUeAgentCanonicalValueRef> InPropertyBaselines)
+		: Workspace(MoveTemp(InWorkspace)), InputBaseline(MoveTemp(InInputBaseline))
+		, PropertyBaselines(MoveTemp(InPropertyBaselines)), ChangeSetDraft(MoveTemp(InChangeSetDraft))
+		, PlanningRequest(MoveTemp(InPlanningRequest)), bPreflightAttempted(false), bLazyPropertyBaselines(true)
+	{
+		InitializeValidation(false);
+	}
+
+	void FPreparedAuthoringImport::InitializeValidation(bool bRequireProvidedPlan)
+	{
+		const auto& Changes = ChangeSetDraft->GetChanges();
 		for (int32 Index = 0; Index < Changes.Num(); ++Index)
 		{
 			const auto& Identity = Changes[Index].GetIdentity();
@@ -1925,9 +1947,9 @@ namespace UE::UAI::Composition::HjsonImport
 				if (!FirstChangeByTargetIdentity.Contains(Key)) FirstChangeByTargetIdentity.Add(Key, Index);
 		}
 		if (!Workspace->IsValid()) ValidationDiagnostic = Workspace->GetValidationDiagnostic();
-		else if (!ChangeSetDraft.IsValid()) ValidationDiagnostic = ChangeSetDraft.GetValidationDiagnostic();
+		else if (!ChangeSetDraft->IsValid()) ValidationDiagnostic = ChangeSetDraft->GetValidationDiagnostic();
 		else if (!PlanningRequest.IsValid()) ValidationDiagnostic = PlanningRequest.GetValidationDiagnostic();
-		else if (!PreflightResult.GetPlan().IsValid())
+		else if (bRequireProvidedPlan && !PreflightResult.GetPlan().IsValid())
 		{
 			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_import_execution_plan_missing"),
 				TEXT("The prepared import requires an execution plan from preflight."), TEXT("hjson_import"));
@@ -1946,13 +1968,13 @@ namespace UE::UAI::Composition::HjsonImport
 	const FChangeSetDraft&
 	FPreparedAuthoringImport::GetChangeSetDraft() const
 	{
-		return ChangeSetDraft;
+		return *ChangeSetDraft;
 	}
 
 	const PlanningPreflight::FChangeDraft* FPreparedAuthoringImport::FindChangeForTargetIdentity(const FString& Identity) const
 	{
 		const int32* Index = FirstChangeByTargetIdentity.Find(Identity);
-		return Index ? &ChangeSetDraft.GetChanges()[*Index] : nullptr;
+		return Index ? &ChangeSetDraft->GetChanges()[*Index] : nullptr;
 	}
 
 	const FPlanningRequest&
@@ -1964,7 +1986,54 @@ namespace UE::UAI::Composition::HjsonImport
 	const FPlanningResult&
 	FPreparedAuthoringImport::GetPreflightResult() const
 	{
+		if (!bPreflightAttempted) {
+			auto Resources = MakeSemanticWorkspaceResourceTracker();
+			PlanningPreflight::FPlanningPreflightPlanPtr Plan;
+			Contract::FDiagnostic Error;
+			TryGetExecutionPlan(Resources, Plan, Error);
+		}
 		return PreflightResult;
+	}
+
+	bool FPreparedAuthoringImport::TryGetExecutionPlan(FUeAgentResourceTracker& Resources,
+		PlanningPreflight::FPlanningPreflightPlanPtr& OutPlan, Contract::FDiagnostic& OutError) const
+	{
+		if (!bPreflightAttempted) {
+			bPreflightAttempted = true;
+			FPlanningPreflightError Error;
+			if (!TryPlanChanges(PlanningRequest, Resources, PreflightResult, Error)) ValidationDiagnostic = MoveTemp(Error);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_execution_plan changes=%d materialized=%s consumer=explicit_plan_request"),
+				PlanningRequest.GetDraft().GetChanges().Num(), PreflightResult.GetPlan() ? TEXT("true") : TEXT("false"));
+		}
+		OutPlan = PreflightResult.GetPlan();
+		if (!OutPlan) { OutError = ValidationDiagnostic; return false; }
+		OutError.Reset(); return true;
+	}
+
+	const FUeAgentCanonicalValueRef* FPreparedAuthoringImport::FindPropertyBaseline(const FString& Key) const
+	{
+		if (const auto* Existing = PropertyBaselines.Find(Key)) return Existing;
+		if (!bLazyPropertyBaselines) return nullptr;
+		const auto* Change = FindChangeForTargetIdentity(Key);
+		if (!Change || Change->GetIdentity().GetSelector(TEXT("property_path")).IsEmpty()) return nullptr;
+		const auto& Snapshot = ChangeSetDraft->GetSnapshot();
+		int32 SemanticCount = 0;
+		const auto Candidates = Snapshot->FindTargetEntryIndices(Change->GetIdentity().GetSemanticId(),
+			Key, CanonicalAuthoringTargetIdentitySelector, SemanticCount);
+		for (const int32 Index : Candidates) {
+			const auto Entry = Snapshot->ReadEntry(Index);
+			if (Entry.GetIdentity().GetCanonicalKey() != Key) continue;
+			auto Resources = MakeSemanticWorkspaceResourceTracker();
+			FUeAgentCanonicalValuePtr Value; FWorkspaceError Error;
+			if (!TryProjectAuthoringCaptureValue(Entry, Resources, Value, Error) || !Value) {
+				ValidationDiagnostic = ImportFailure(TEXT("hjson_import_property_baseline_invalid"), Error.GetDiagnostic(),
+					TEXT("The captured property baseline could not be projected to an authoring value."));
+				return nullptr;
+			}
+			PropertyBaselines.Add(Key, Value.ToSharedRef());
+			return PropertyBaselines.Find(Key);
+		}
+		return nullptr;
 	}
 
 	const TArray<FStructuralEdit>&
@@ -1982,12 +2051,16 @@ namespace UE::UAI::Composition::HjsonImport
 		TFunctionRef<bool(const PlanningPreflight::FChangeDraft&)> Include) const
 	{
 		TArray<PlanningPreflight::FChangeDraft> Selected;
-		for (const auto& Change : ChangeSetDraft.GetChanges())
+		for (const auto& Change : ChangeSetDraft->GetChanges())
 			if (Include(Change)) Selected.Add(Change);
-		FChangeSetDraft Draft(ChangeSetDraft.GetDescriptorIdentity(), ChangeSetDraft.GetRequestId(),
-			ChangeSetDraft.GetIdempotencyKey(), ChangeSetDraft.GetSnapshot(), MoveTemp(Selected));
-		return MakeShared<FPreparedAuthoringImport>(Workspace, MoveTemp(Draft), PlanningRequest, PreflightResult,
-			InputBaseline, PropertyBaselines);
+		const auto Draft = MakeShared<const FChangeSetDraft>(ChangeSetDraft->GetDescriptorIdentity(), ChangeSetDraft->GetRequestId(),
+			ChangeSetDraft->GetIdempotencyKey(), ChangeSetDraft->GetSnapshot(), MoveTemp(Selected));
+		auto Result = MakeShared<FPreparedAuthoringImport>(Workspace, Draft, PlanningRequest, InputBaseline, PropertyBaselines);
+		Result->bLazyPropertyBaselines = bLazyPropertyBaselines;
+		Result->bPreflightAttempted = bPreflightAttempted;
+		Result->PreflightResult = PreflightResult;
+		if (Result->ValidationDiagnostic.IsEmpty()) Result->ValidationDiagnostic = ValidationDiagnostic;
+		return Result;
 	}
 
 	bool TryProjectInitialRootObjectProperties(const UeAgentAuthoringState::FStateSnapshot& NativeDefaults,
@@ -2186,13 +2259,6 @@ namespace UE::UAI::Composition::HjsonImport
 			OutError.ActualValue = MakeShared<FJsonValueNumber>(Workspace->GetStructuralEdits().Num());
 			return false;
 		}
-		if (!TryValidateWorkspaceBindingForImport(
-				Workspace, CurrentModel, CurrentSnapshot->GetRevision(),
-				Workspace->GetSelectionFingerprint(),
-				Workspace->GetClosureFingerprint(), OutError))
-		{
-			return false;
-		}
 		TOptional<FChangeSetDraft> Draft;
 		if (!TryBuildSemanticChangeSetDraft(Workspace, CurrentSnapshot,
 				MoveTemp(DescriptorIdentity), MoveTemp(RequestId), MoveTemp(IdempotencyKey),
@@ -2203,7 +2269,7 @@ namespace UE::UAI::Composition::HjsonImport
 		}
 
 		FPreparedAuthoringImportPtr Prepared;
-		if (!TryPrepareResolvedAuthoringImport(Workspace, CurrentModel, CurrentSnapshot,
+		if (!PrepareRebasedAuthoringImport(Workspace, CurrentModel, CurrentSnapshot,
 				Draft.GetValue(), CallerContext, false, Workspace->GetSelectionFingerprint(),
 				Workspace->GetClosureFingerprint(), Resources, Prepared, OutError)
 			|| !Prepared.IsValid())
@@ -2226,27 +2292,31 @@ namespace UE::UAI::Composition::HjsonImport
 		FUeAgentResourceTracker& Resources,
 		FSemanticWorkspaceChangeProjection& OutProjection,
 		FPreparedAuthoringImportPtr& OutPrepared,
-		FSemanticWorkspaceImportError& OutError)
+		FSemanticWorkspaceImportError& OutError,
+		const TSet<FString>* NativeStructureSemanticIds)
 	{
 		OutProjection = FSemanticWorkspaceChangeProjection();
 		const double PrepareStart = FPlatformTime::Seconds();
 		OutPrepared.Reset();
 		OutError.Reset();
 		FResolvedSemanticWorkspaceRef Workspace = SourceWorkspace;
-		if (!TryRebaseSemanticWorkspace(SourceWorkspace, CurrentModel,
-			CurrentSnapshot->GetRevision(), Resources, Workspace, OutError)) return false;
-		if (!TryValidateWorkspaceBindingForImport(
-				Workspace, CurrentModel, CurrentSnapshot->GetRevision(),
-				Workspace->GetSelectionFingerprint(),
-				Workspace->GetClosureFingerprint(), OutError))
-		{
-			return false;
+		TOptional<FScopedCurrentCoverage> RootCoverage;
+		if (CurrentSnapshot->GetRevision().GetSourceId() == TEXT("authoring.capture.scoped")
+			&& SourceWorkspace->GetEditedUnitIds().IsSet()) {
+			auto& Scope = RootCoverage.Emplace();
+			for (const auto& Unit : CurrentModel->GetUnits()) {
+				Scope.BindingUnits.Add(Unit.GetUnitId());
+				if (Unit.GetRole() == TEXT("property_definition") || SourceWorkspace->GetEditedUnitIds()->Contains(Unit.GetUnitId()))
+					Scope.ValueUnits.Add(Unit.GetUnitId());
+			}
 		}
+		if (!TryRebaseSemanticWorkspace(SourceWorkspace, CurrentModel,
+			CurrentSnapshot->GetRevision(), Resources, Workspace, OutError, RootCoverage.IsSet() ? &RootCoverage.GetValue() : nullptr)) return false;
 		TOptional<FChangeSetDraft> Draft;
 		if (!TryBuildSemanticChangeSetDraft(
 				Workspace, CurrentSnapshot, MoveTemp(DescriptorIdentity),
 				MoveTemp(RequestId), MoveTemp(IdempotencyKey), Resources,
-				Draft, OutError, CurrentModel, &OutProjection.DocumentSourceBindings)
+				Draft, OutError, CurrentModel, &OutProjection.DocumentSourceBindings, NativeStructureSemanticIds)
 			|| !Draft.IsSet())
 		{
 			return false;
@@ -2255,8 +2325,8 @@ namespace UE::UAI::Composition::HjsonImport
 		FPreparedAuthoringImportPtr Prepared;
 		const double DraftFinished = FPlatformTime::Seconds();
 		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=change_set units=%d changes=%d total_s=%.6f"),
-			Workspace->GetModel()->GetUnits().Num(), Draft->GetChanges().Num(), DraftFinished - PrepareStart);
-		if (!TryPrepareResolvedAuthoringImport(
+			Workspace->GetModel()->GetUnitCount(), Draft->GetChanges().Num(), DraftFinished - PrepareStart);
+		if (!PrepareRebasedAuthoringImport(
 				Workspace, CurrentModel, CurrentSnapshot, Draft.GetValue(),
 				CallerContext, false, Workspace->GetSelectionFingerprint(),
 				Workspace->GetClosureFingerprint(), Resources,
@@ -2360,14 +2430,25 @@ namespace UE::UAI::Composition::HjsonImport
 		TOptional<FChangeSetDraft>& OutDraft,
 		FSemanticWorkspaceImportError& OutError,
 		const FAuthoringModelPtr& CurrentModel,
-		TArray<FDocumentValueSourceBinding>* OutDocumentSourceBindings)
+		TArray<FDocumentValueSourceBinding>* OutDocumentSourceBindings,
+		const TSet<FString>* NativeStructureSemanticIds)
 	{
 		const double DraftStart = FPlatformTime::Seconds();
+		const auto DraftCpu = UE::UAI::Timing::SampleThreadCpu();
 		OutDraft.Reset();
 		OutError.Reset();
 		FResolvedSemanticWorkspaceRef Workspace = SourceWorkspace;
 		if (CurrentModel && !TryRebaseSemanticWorkspace(SourceWorkspace, CurrentModel.ToSharedRef(),
 			CurrentSnapshot->GetRevision(), Resources, Workspace, OutError)) return false;
+		if (Workspace->GetSourceKind() == EWorkspaceSourceKind::Directory
+			&& Workspace->GetMode() == ESemanticWorkspaceMode::State && !Workspace->GetEditedUnitIds().IsSet()) {
+			FWorkspaceError Error;
+			FailWorkspaceDataflowHandoff(Error, TEXT("change_set_draft"), TEXT("edited_unit_ids"), GetAcceptedSemanticWorkspaceRoot(),
+				TEXT("unset"), TEXT("explicit resolved author edits; no complete-model candidate scan"),
+				TEXT("ReadDirectorySource / typed intent resolution"));
+			OutError = Error.GetDiagnostic(); return false;
+		}
+		const double RebaseFinished = FPlatformTime::Seconds();
 		if (OutDocumentSourceBindings) OutDocumentSourceBindings->Reset();
 		RequestId.TrimStartAndEndInline();
 		IdempotencyKey.TrimStartAndEndInline();
@@ -2404,7 +2485,16 @@ namespace UE::UAI::Composition::HjsonImport
 
 		TMap<FString, TArray<const FUeAgentStateEntry*>> EntriesBySemanticId;
 		TMap<FString, TMap<uint32, TArray<const FUeAgentStateEntry*>>> EntriesBySemanticTarget;
-		for (const FUeAgentStateEntry& Entry : CurrentSnapshot->GetEntries())
+		TMap<int32, TSharedPtr<FUeAgentStateEntry>> BoundEntries;
+		const bool bLazyCandidates = Workspace->GetEditedUnitIds().IsSet()
+			&& Workspace->GetEditedUnitIds().GetValue().Num() <= 4096;
+		const auto BindEntry = [&](const int32 Index) -> const FUeAgentStateEntry*
+		{
+			auto* Found = BoundEntries.Find(Index);
+			if (!Found) Found = &BoundEntries.Add(Index, MakeShared<FUeAgentStateEntry>(CurrentSnapshot->ReadEntry(Index)));
+			return Found->Get();
+		};
+		if (!bLazyCandidates) for (const FUeAgentStateEntry& Entry : CurrentSnapshot->GetEntries())
 		{
 			EntriesBySemanticId.FindOrAdd(Entry.GetIdentity().GetSemanticId()).Add(&Entry);
 			auto& Targets = EntriesBySemanticTarget.FindOrAdd(Entry.GetIdentity().GetSemanticId());
@@ -2413,20 +2503,39 @@ namespace UE::UAI::Composition::HjsonImport
 			if (const auto* AuthoringIdentity = Entry.GetIdentity().GetSelectors().Find(CanonicalAuthoringTargetIdentitySelector))
 			{
 				const uint32 AuthoringHash = GetTypeHash(*AuthoringIdentity);
-				// An entry belongs to each distinct bucket once. The matcher still
-				// compares full identities, including any hash collisions.
 				if (AuthoringHash != IdentityHash) Targets.FindOrAdd(AuthoringHash).Add(&Entry);
 			}
 		}
+		const auto SemanticCandidates = [&](const FString& Semantic) -> const TArray<const FUeAgentStateEntry*>&
+		{
+			auto* Found = EntriesBySemanticId.Find(Semantic);
+			if (!Found)
+			{
+				TArray<const FUeAgentStateEntry*> Candidates;
+				if (bLazyCandidates) for (const int32 Index : CurrentSnapshot->FindSemanticEntryIndices(Semantic)) Candidates.Add(BindEntry(Index));
+				Found = &EntriesBySemanticId.Add(Semantic, MoveTemp(Candidates));
+			}
+			return *Found;
+		};
 		int64 SemanticTargetLookups = 0;
 		int64 SemanticTargetCandidates = 0;
 		auto MatchTarget = [&](const FSemanticUnit& Unit, Contract::FDiagnostic& Error, bool bAllowMissing = false)
 		{
+			++SemanticTargetLookups;
+			if (bLazyCandidates)
+			{
+				int32 PoolCount = 0;
+				const auto Indices = CurrentSnapshot->FindTargetEntryIndices(Unit.GetSemanticTypeRef(), Unit.GetTargetIdentityKey(),
+					CanonicalAuthoringTargetIdentitySelector, PoolCount);
+				TArray<const FUeAgentStateEntry*> Candidates;
+				for (const int32 Index : Indices) Candidates.Add(BindEntry(Index));
+				SemanticTargetCandidates += Candidates.Num();
+				return MatchSemanticTargetEntry(Candidates, Unit, Error, bAllowMissing, PoolCount);
+			}
 			const auto* SemanticEntries = EntriesBySemanticId.Find(Unit.GetSemanticTypeRef());
 			const auto* TargetIndex = EntriesBySemanticTarget.Find(Unit.GetSemanticTypeRef());
 			const auto* Candidates = TargetIndex ? TargetIndex->Find(GetTypeHash(Unit.GetTargetIdentityKey())) : nullptr;
 			const TArray<const FUeAgentStateEntry*> EmptyCandidates;
-			++SemanticTargetLookups;
 			SemanticTargetCandidates += Candidates ? Candidates->Num() : 0;
 			return MatchSemanticTargetEntry(Candidates ? *Candidates : EmptyCandidates, Unit, Error,
 				bAllowMissing, SemanticEntries ? SemanticEntries->Num() : 0);
@@ -2445,6 +2554,8 @@ namespace UE::UAI::Composition::HjsonImport
 			OutDocumentSourceBindings->Add(MoveTemp(Binding));
 		};
 		TSet<FString> DocumentUnitIds;
+		int32 ProjectedDocumentCount = 0;
+		const double DocumentProjectionStarted = FPlatformTime::Seconds();
 		if (CurrentModel.IsValid())
 		{
 			TMap<FString, FUeAgentCanonicalValuePtr> Documents;
@@ -2461,13 +2572,17 @@ namespace UE::UAI::Composition::HjsonImport
 				OutError = ProjectionError.GetDiagnostic();
 				return false;
 			}
-			for (const FUeAgentStateEntry& Entry : CurrentSnapshot->GetEntries())
-				if (const auto* Proposed = Documents.Find(Entry.GetIdentity().GetCanonicalKey()))
-					Changes.Emplace(Entry.GetIdentity(), EChangeIntent::Update, Entry.GetValue(), *Proposed,
-						TArray<FString>({TEXT("authoring.write")}),
-						CurrentSnapshot->GetProvenance().GetEvidenceId(), TArray<FUeAgentCanonicalIdentity>());
+			if (!Documents.IsEmpty())
+				for (const FUeAgentStateEntry& Entry : CurrentSnapshot->GetEntries())
+					if (const auto* Proposed = Documents.Find(Entry.GetIdentity().GetCanonicalKey()))
+						Changes.Emplace(Entry.GetIdentity(), EChangeIntent::Update, Entry.GetValue(), *Proposed,
+							TArray<FString>({TEXT("authoring.write")}),
+							CurrentSnapshot->GetProvenance().GetEvidenceId(), TArray<FUeAgentCanonicalIdentity>());
+			ProjectedDocumentCount = Documents.Num();
 		}
+		const double DocumentProjectionFinished = FPlatformTime::Seconds();
 		TSet<FString> ExplicitEditedUnitIds;
+		TArray<const FSemanticUnit*> ExplicitUnits;
 		FWorkspaceError ValueDiagnostics;
 		if (Workspace->GetEditedUnitIds().IsSet())
 		{
@@ -2475,15 +2590,26 @@ namespace UE::UAI::Composition::HjsonImport
 			{
 				ExplicitEditedUnitIds.Add(UnitId);
 			}
+			// The resolver (and, when needed, rebase) has already proved this
+			// complete edit set against the current source. Reuse the model's
+			// validated index instead of hashing every unedited unit again.
+			// Positions retain the old model traversal/diagnostic order; missing
+			// ids remain ignored here exactly as in the former filtered scan.
+			ExplicitUnits.Reserve(ExplicitEditedUnitIds.Num());
+			for (const FString& UnitId : ExplicitEditedUnitIds)
+				if (const FSemanticUnit* Unit = Model->FindUnit(UnitId))
+					ExplicitUnits.Add(Unit);
+			ExplicitUnits.Sort([](const FSemanticUnit& A, const FSemanticUnit& B) { return A.GetUnitId() < B.GetUnitId(); });
 		}
-		for (const FSemanticUnit& Unit : Model->GetUnits())
+		const int32 CandidateUnitCount = Workspace->GetEditedUnitIds().IsSet()
+			? ExplicitUnits.Num() : Model->GetUnitCount();
+		const double UnitVisitStarted = FPlatformTime::Seconds();
+		const auto UnitVisitCpu = UE::UAI::Timing::SampleThreadCpu();
+		for (int32 CandidateIndex = 0; CandidateIndex < CandidateUnitCount; ++CandidateIndex)
 		{
+			const FSemanticUnit& Unit = Workspace->GetEditedUnitIds().IsSet()
+				? *ExplicitUnits[CandidateIndex] : Model->GetUnits()[CandidateIndex];
 			if (DocumentUnitIds.Contains(Unit.GetUnitId())) continue;
-			if (Workspace->GetEditedUnitIds().IsSet() &&
-				!ExplicitEditedUnitIds.Contains(Unit.GetUnitId()))
-			{
-				continue;
-			}
 			if (Unit.GetUnitKind() != ESemanticUnitKind::PropertySet)
 			{
 				if (Unit.GetTargetIdentityKey().IsEmpty())
@@ -2563,6 +2689,20 @@ namespace UE::UAI::Composition::HjsonImport
                     if (OutError.Source.SourceUnit.IsEmpty()) OutError.Source.SourceUnit = Unit.GetUnitId();
 					return false;
 				}
+				const bool bNativeStructureIntent = NativeStructureSemanticIds
+					&& NativeStructureSemanticIds->Contains(Unit.GetSemanticTypeRef())
+					&& IsGraphAuthoringStructureType(Unit.GetSemanticTypeRef());
+				if (bNativeStructureIntent) {
+					// This is an operation input, not a replacement of the query
+					// container's value. Source already resolved the authored graph.
+					// Keep the real container before for binding/existence; its native
+					// consumer checks nodes, ports and input conflicts separately.
+					Changes.Emplace(Current->GetIdentity(), EChangeIntent::Update,
+						Current->GetValue(), Proposed, TArray<FString>{TEXT("authoring.structure")},
+						CurrentSnapshot->GetProvenance().GetEvidenceId(), TArray<FUeAgentCanonicalIdentity>());
+					UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=native_structure_intent semantic=%s full_value_comparison=false"), *Unit.GetSemanticTypeRef());
+					continue;
+				}
 				const FUeAgentCanonicalValue* Type = nullptr;
 				const auto* Definition = PropertyValueDefinition(Unit, *Model, &Type);
 				CanonicalJson::FValueComparison Compared;
@@ -2600,7 +2740,7 @@ namespace UE::UAI::Composition::HjsonImport
 								? Difference.Source.InternalJsonPath.Mid(UnitRoot.Len()) : Difference.Source.InternalJsonPath;
 							const auto* Source = Workspace->FindValueSource(Unit.GetUnitId(), TEXT("/values") + Relative);
 							if (!Source) Source = Workspace->FindValueSource(Unit.GetUnitId(), Relative);
-							if (!Source) Source = Workspace->GetUnitSources().Find(Unit.GetUnitId());
+							if (!Source) Source = Workspace->FindUnitSource(Unit.GetUnitId());
 							FWorkspaceError Error;
 							Difference.Source.InternalJsonPath = TEXT("/values") + Relative;
 							Error.SetFailure(MoveTemp(Difference), Unit.GetUnitId());
@@ -2641,10 +2781,8 @@ namespace UE::UAI::Composition::HjsonImport
 					{
 						continue;
 					}
-					const TArray<const FUeAgentStateEntry*>* Candidates = EntriesBySemanticId.Find(FieldId);
-					const TArray<const FUeAgentStateEntry*> EmptyCandidates;
 					const FUeAgentStateEntry* Current = MatchPropertyEntry(
-						Candidates ? *Candidates : EmptyCandidates, Unit, FieldId, Model, OutError);
+						SemanticCandidates(FieldId), Unit, FieldId, Model, OutError);
 					if (!Current)
 					{
 						FWorkspaceError Located;
@@ -2787,6 +2925,8 @@ namespace UE::UAI::Composition::HjsonImport
 			}
 		}
 
+		const auto UnitVisitFinishedCpu = UE::UAI::Timing::SampleThreadCpu();
+		const double UnitVisitFinished = FPlatformTime::Seconds();
 		if (ValueDiagnostics.HasErrors())
 		{
 			ValueDiagnostics.MarkUnchecked(TEXT("change_planning"), FString(), TEXT("invalid_authoring_values"));
@@ -2816,8 +2956,15 @@ namespace UE::UAI::Composition::HjsonImport
 				CurrentSnapshot->GetProvenance().GetEvidenceId(),
 				TArray<FUeAgentCanonicalIdentity>());
 		}
-		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_draft units=%d changes=%d target_lookups=%lld target_candidates=%lld total_s=%.6f"),
-			Model->GetUnits().Num(), Changes.Num(), SemanticTargetLookups, SemanticTargetCandidates, FPlatformTime::Seconds() - DraftStart);
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_draft units=%d candidate_units=%d changes=%d target_lookups=%lld target_candidates=%lld lazy_candidates=%s bound_entries=%d total_s=%.6f"),
+			Model->GetUnitCount(), CandidateUnitCount, Changes.Num(), SemanticTargetLookups, SemanticTargetCandidates,
+			bLazyCandidates ? TEXT("true") : TEXT("false"), BoundEntries.Num(), FPlatformTime::Seconds() - DraftStart);
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_draft_parts rebase_s=%.6f document_projection_s=%.6f projected_documents=%d unit_selection_s=%.6f unit_visit_s=%.6f unit_visit_cpu_s=%.6f total_cpu_s=%.6f"),
+			RebaseFinished - DraftStart, DocumentProjectionFinished - DocumentProjectionStarted, ProjectedDocumentCount,
+			UnitVisitStarted - DocumentProjectionFinished, UnitVisitFinished - UnitVisitStarted,
+			UE::UAI::Timing::ThreadCpuSeconds(UnitVisitCpu, UnitVisitFinishedCpu),
+			UE::UAI::Timing::ThreadCpuSeconds(DraftCpu, UE::UAI::Timing::SampleThreadCpu()));
+		const double DraftFinalizeStarted = FPlatformTime::Seconds();
 		if (Changes.IsEmpty())
 		{
 			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_import_no_explicit_changes"), TEXT(
@@ -2843,10 +2990,12 @@ namespace UE::UAI::Composition::HjsonImport
 			OutDraft.Reset();
 			return false;
 		}
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_draft_finalize changes=%d total_s=%.6f"),
+			OutDraft->GetChanges().Num(), FPlatformTime::Seconds() - DraftFinalizeStarted);
 		return true;
 	}
 
-	bool TryPrepareResolvedAuthoringImport(
+	static bool PrepareRebasedAuthoringImport(
 		const FResolvedSemanticWorkspaceRef& SourceWorkspace,
 		const FAuthoringModelRef& CurrentModel,
 		const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
@@ -2859,11 +3008,11 @@ namespace UE::UAI::Composition::HjsonImport
 		FPreparedAuthoringImportPtr& OutPrepared,
 		FSemanticWorkspaceImportError& OutError)
 	{
+		const double PrepareStarted = FPlatformTime::Seconds();
 		OutPrepared.Reset();
 		OutError.Reset();
 		FResolvedSemanticWorkspaceRef Workspace = SourceWorkspace;
-		if (!TryRebaseSemanticWorkspace(SourceWorkspace, CurrentModel,
-			CurrentSnapshot->GetRevision(), Resources, Workspace, OutError)) return false;
+		const double RebaseFinished = FPlatformTime::Seconds();
 		if (!ChangeSetDraft.IsValid())
 		{
 			OutError = ChangeSetDraft.GetValidationDiagnostic();
@@ -2897,55 +3046,43 @@ namespace UE::UAI::Composition::HjsonImport
 			return false;
 		}
 
-		FPlanningRequest PlanningRequest(
-			ChangeSetDraft,
-			CallerContext,
-			bDryRun);
-		FPlanningResult Result;
-		FPlanningPreflightError PlanningError;
-		if (!TryPlanChanges(
-			PlanningRequest,
-			Resources,
-			Result,
-			PlanningError))
+		const double BindingFinished = FPlatformTime::Seconds();
+		const auto SharedDraft = MakeShared<const FChangeSetDraft>(ChangeSetDraft);
+		FPlanningRequest PlanningRequest(SharedDraft, CallerContext, bDryRun);
+		if (!PlanningRequest.IsValid())
 		{
-			OutError = PlanningError;
+			OutError = PlanningRequest.GetValidationDiagnostic();
 			return false;
 		}
-		TMap<FString, FUeAgentCanonicalValueRef> PropertyBaselines;
-		TMap<uint32, TArray<const FUeAgentStateEntry*>> EntriesByIdentityHash;
-		for (const auto& Entry : CurrentSnapshot->GetEntries())
-			EntriesByIdentityHash.FindOrAdd(GetTypeHash(Entry.GetIdentity().GetCanonicalKey())).Add(&Entry);
-		for (const auto& Change : ChangeSetDraft.GetChanges())
-		{
-			if (Change.GetIdentity().GetSelector(TEXT("property_path")).IsEmpty()) continue;
-			const FString& IdentityKey = Change.GetIdentity().GetCanonicalKey();
-			const FUeAgentStateEntry* Entry = nullptr;
-			if (const auto* Candidates = EntriesByIdentityHash.Find(GetTypeHash(IdentityKey)))
-				for (const auto* Candidate : *Candidates)
-					if (Candidate->GetIdentity().GetCanonicalKey() == IdentityKey) { Entry = Candidate; break; }
-			if (!Entry) continue;
-			FUeAgentCanonicalValuePtr Value;
-			FWorkspaceError ProjectionError;
-			if (!TryProjectAuthoringCaptureValue(*Entry, Resources, Value, ProjectionError) || !Value)
-			{
-				OutError = ImportFailure(TEXT("hjson_import_property_baseline_invalid"), ProjectionError.GetDiagnostic(), TEXT("The captured property baseline could not be projected to an authoring value."));
-				return false;
-			}
-			PropertyBaselines.Add(Entry->GetIdentity().GetCanonicalKey(), Value.ToSharedRef());
-		}
+		const double PlanningFinished = FPlatformTime::Seconds();
+		const double BaselinesFinished = FPlatformTime::Seconds();
 		OutPrepared = MakeShared<FPreparedAuthoringImport>(
-			Workspace,
-			ChangeSetDraft,
-			MoveTemp(PlanningRequest),
-			MoveTemp(Result), CurrentModel, MoveTemp(PropertyBaselines));
+			Workspace, SharedDraft, MoveTemp(PlanningRequest), CurrentModel);
 		if (!OutPrepared->IsValid())
 		{
 			OutError = OutPrepared->GetValidationDiagnostic();
 			OutPrepared.Reset();
 			return false;
 		}
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=semantic_prepare changes=%d baselines=0 plan_materialized=false rebase_s=%.6f binding_s=%.6f authority_s=%.6f baselines_s=%.6f seal_s=%.6f total_s=%.6f"),
+			ChangeSetDraft.GetChanges().Num(), RebaseFinished - PrepareStarted,
+			BindingFinished - RebaseFinished, PlanningFinished - BindingFinished, BaselinesFinished - PlanningFinished,
+			FPlatformTime::Seconds() - BaselinesFinished, FPlatformTime::Seconds() - PrepareStarted);
 		return true;
+	}
+
+	bool TryPrepareResolvedAuthoringImport(const FResolvedSemanticWorkspaceRef& Source,
+		const FAuthoringModelRef& CurrentModel, const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
+		const FChangeSetDraft& Draft, const FUeAgentCallerContext& Caller, bool bDryRun,
+		const FString& Selection, const FString& Closure, FUeAgentResourceTracker& Resources,
+		FPreparedAuthoringImportPtr& OutPrepared, FSemanticWorkspaceImportError& Error,
+		const FScopedCurrentCoverage* Coverage)
+	{
+		FResolvedSemanticWorkspaceRef Rebased = Source;
+		if (!TryRebaseSemanticWorkspace(Source, CurrentModel, CurrentSnapshot->GetRevision(),
+			Resources, Rebased, Error, Coverage)) return false;
+		return PrepareRebasedAuthoringImport(Rebased, CurrentModel, CurrentSnapshot, Draft,
+			Caller, bDryRun, Selection, Closure, Resources, OutPrepared, Error);
 	}
 
 	bool TryPrepareSemanticWorkspaceImport(
@@ -2962,18 +3099,27 @@ namespace UE::UAI::Composition::HjsonImport
 		const FString& ExpectedClosureFingerprint,
 		FUeAgentResourceTracker& Resources,
 		FPreparedAuthoringImportPtr& OutPrepared,
-		FSemanticWorkspaceImportError& OutError)
+		FSemanticWorkspaceImportError& OutError,
+		const FScopedCurrentCoverage* Coverage)
 	{
 		OutPrepared.Reset();
 		OutError.Reset();
 		FResolvedSemanticWorkspacePtr Workspace;
 		FWorkspaceError WorkspaceError;
-		if (!TryResolveEditedSemanticWorkspace(
+		const TOptional<bool> Accepted = TryConsumeAcceptedWorkspaceForPrepare(
+			Source, ExpectedMode, Resources, Workspace, WorkspaceError);
+		if (Source.GetKind() == EWorkspaceSourceKind::Directory && ExpectedMode == ESemanticWorkspaceMode::State && !Accepted.IsSet()) {
+			FailWorkspaceDataflowHandoff(WorkspaceError, TEXT("prepare.accepted_source"),
+				TEXT("domain-entry accepted Source handoff"), Source.GetPath(), TEXT("no accepted handoff"),
+				TEXT("same-request typed source and source byte checkpoint"), TEXT("SourceLoader/domain preflight"));
+			OutError = WorkspaceError.GetDiagnostic(); return false;
+		}
+		if ((Accepted.IsSet() ? !Accepted.GetValue() : !TryResolveEditedSemanticWorkspace(
 			Source,
 			ExpectedMode,
 			Resources,
 			Workspace,
-			WorkspaceError)
+			WorkspaceError))
 			|| !Workspace.IsValid())
 		{
 			OutError = ImportFailure(WorkspaceError.GetCode().IsEmpty()
@@ -2983,15 +3129,8 @@ namespace UE::UAI::Composition::HjsonImport
 		}
 		FResolvedSemanticWorkspaceRef Effective = Workspace.ToSharedRef();
 		if (!TryRebaseSemanticWorkspace(Effective, CurrentModel, CurrentSnapshot->GetRevision(),
-			Resources, Effective, OutError)) return false;
+			Resources, Effective, OutError, Coverage)) return false;
 		Workspace = Effective;
-		if (!TryValidateWorkspaceBindingForImport(
-				Workspace.ToSharedRef(), CurrentModel,
-				CurrentSnapshot->GetRevision(), ExpectedSelectionFingerprint,
-				ExpectedClosureFingerprint, OutError))
-		{
-			return false;
-		}
 		TOptional<FChangeSetDraft> Draft;
 		if (!TryBuildSemanticChangeSetDraft(
 			Workspace.ToSharedRef(),
@@ -3006,7 +3145,7 @@ namespace UE::UAI::Composition::HjsonImport
 		{
 			return false;
 		}
-		return TryPrepareResolvedAuthoringImport(
+		return PrepareRebasedAuthoringImport(
 			Workspace.ToSharedRef(),
 			CurrentModel,
 			CurrentSnapshot,

@@ -622,7 +622,7 @@ bool FUeAgentSemanticWorkspaceResolverRoundTripTest::RunTest(
 	}
 	const auto& PublicRefs = LiteralLayout->GetMachineManifest().PublicRefMapping;
 	if (!TestFalse(TEXT("literal fixture uses a real public reference mapping"), PublicRefs.IsEmpty())) return false;
-	const FString LiteralRef = PublicRefs.CreateConstIterator().Value();
+	const FString LiteralRef = (*PublicRefs.begin()).Value;
 	FScopedResolverWorkspace LiteralWorkspace;
 	if (!WritePlan(*LiteralPlan, LiteralWorkspace.Root)) return false;
 	const auto HasLiteral = [&](const FAuthoringModel& Model, const FString& Expected) {

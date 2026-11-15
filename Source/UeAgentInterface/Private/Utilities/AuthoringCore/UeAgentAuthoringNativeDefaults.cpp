@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -118,50 +119,6 @@ namespace UeAgentAuthoringNativeDefaults
 			case EProbeOutcome::Resolved: return TEXT("resolved");
 			case EProbeOutcome::Failed: return TEXT("failed");
 			default: return TEXT("unknown");
-			}
-		}
-
-		bool JsonValuesEqual(const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right)
-		{
-			if (!Left.IsValid() || !Right.IsValid()) return Left.IsValid() == Right.IsValid();
-			if (Left->Type != Right->Type) return false;
-			switch (Left->Type)
-			{
-			case EJson::None:
-			case EJson::Null:
-				return true;
-			case EJson::String:
-				return Left->AsString() == Right->AsString();
-			case EJson::Number:
-				return Left->AsNumber() == Right->AsNumber();
-			case EJson::Boolean:
-				return Left->AsBool() == Right->AsBool();
-			case EJson::Array:
-			{
-				const TArray<TSharedPtr<FJsonValue>>& LeftValues = Left->AsArray();
-				const TArray<TSharedPtr<FJsonValue>>& RightValues = Right->AsArray();
-				if (LeftValues.Num() != RightValues.Num()) return false;
-				for (int32 Index = 0; Index < LeftValues.Num(); ++Index)
-				{
-					if (!JsonValuesEqual(LeftValues[Index], RightValues[Index])) return false;
-				}
-				return true;
-			}
-			case EJson::Object:
-			{
-				const TSharedPtr<FJsonObject> LeftObject = Left->AsObject();
-				const TSharedPtr<FJsonObject> RightObject = Right->AsObject();
-				if (!LeftObject.IsValid() || !RightObject.IsValid()) return LeftObject.IsValid() == RightObject.IsValid();
-				if (LeftObject->Values.Num() != RightObject->Values.Num()) return false;
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : LeftObject->Values)
-				{
-					const TSharedPtr<FJsonValue>* OtherValue = RightObject->Values.Find(Pair.Key);
-					if (!OtherValue || !JsonValuesEqual(Pair.Value, *OtherValue)) return false;
-				}
-				return true;
-			}
-			default:
-				return false;
 			}
 		}
 
@@ -991,7 +948,7 @@ namespace UeAgentAuthoringNativeDefaults
 			{
 				if (!UniqueCandidates.IsEmpty()
 					&& UniqueCandidates.Last().Value.SourceIdentity.CanonicalKey == Candidate.Value.SourceIdentity.CanonicalKey
-					&& JsonValuesEqual(UniqueCandidates.Last().Value.Value, Candidate.Value.Value))
+					&& UE::UAI::StateSemantic::CanonicalJson::AreJsonValuesEquivalent(UniqueCandidates.Last().Value.Value, Candidate.Value.Value))
 				{
 					continue;
 				}

@@ -3,6 +3,7 @@
 #include "Core/Contract/UeAgentDiagnostic.h"
 
 class FJsonValue;
+namespace UE::UAI::StateSemantic { class FUeAgentCanonicalSnapshot; }
 
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaRoutes.h"
@@ -163,6 +164,9 @@ namespace UE::UAI::Composition::GraphCompound
 		TMap<int32, TArray<TSharedPtr<FJsonValue>>> Settings;
 		// Inline node properties have no captured index until native creation completes.
 		TMap<FString, TArray<TSharedPtr<FJsonValue>>> ElementSettings;
+		// The operation's observed pure-value scope, borrowed through write-before
+		// validation. No native object bindings or complete authoring model.
+		TSharedPtr<const StateSemantic::FUeAgentCanonicalSnapshot> BeforeSnapshot;
 
 		bool IsValid() const;
 	};

@@ -2,19 +2,19 @@
 
 ## Scope
 
-T07 establishes the common HJSON semantic model used after canonical state capture and before export, import, or domain mechanics. It is a module contract only: it does not claim that any asset domain or public command has completed migration.
+The production path shares HJSON parsing, native field descriptions, value codecs,
+semantic comparison, source diagnostics and native operation owners. A complete
+`FAuthoringModel` is an output/structure view, not admission for an ordinary
+property edit. Value-only directory imports use indexed admitted source rows and
+merged edit values; complete graph compilation and export fingerprints are
+created only for a consumer that requires the complete view.
 
-The only semantic direction is:
-
-`real UE state -> canonical snapshot -> FAuthoringModel -> FUnifiedHjsonSemanticModel -> FUnifiedHjsonWorkspace / FUnifiedHjsonSelectionPackage`
-
-Physical directory, single-file, and inline carriers are projections of the same semantic fingerprint. Token estimates provide telemetry for projection choices.
-
-## Common composition schema
-
-Every unified model carries the same twelve named composition slots: target, property set, member set, structure, item, endpoint, relation, order, layout, temporal contract, spatial contract, and external input. A slot may contain multiple units or be empty, but all source semantic units must have exactly one composition owner. Full-state, minimal-create, and local-edit are intents over this same model; they do not select separate parsers or semantic schemas.
-
-`TryCreateUnifiedHjsonSemanticModel` rejects missing slots, duplicate or unbound units, unknown units, incompatible unit kinds, and target bindings that do not match the core model. Its model fingerprint is independent of authoring intent.
+The former `FUnifiedHjsonSemanticModel`, `FUnifiedHjsonWorkspace`, unified field
+registry and edit-bundle/selection wrappers had no production caller in Plugin
+Source. They and their dedicated fixtures were retired with the purpose repair;
+the twelve composition slots are no longer an import or initialization
+requirement. This does not remove the actual source, field, native operation,
+committed export or ordinary incremental/full capabilities.
 
 An item whose capture provides a value definition publishes a read-only
 `unit.definition` reference to the shared `definitions.hjson` catalog. The common
@@ -32,9 +32,12 @@ the same type/definition distinction for root and nested properties.
 
 ## Field authority and intent
 
-`FExportFieldRegistry` remains the single field-owner authority. `FUnifiedHjsonFieldRegistry` adds authoring intent without creating a second field registry. Every exported field has exactly one unified contract.
-
-Omission always resolves to `preserve`. Mutation requires one explicit intent: `set_value`, `set_null`, `restore_default`, or `remove`. Null is allowed only for a declared nullable field; restore-default requires a reproducible default; remove requires presence-sensitive semantics. Unsupported combinations fail before mutation with a typed `hjson_field_*` error.
+Field authority is the reflected native field/codec or the registered domain
+owner for a real structural operation. Typed authoring intent is extracted once
+from the source against its accepted baseline. Omitted fields preserve current
+native members; omission is not deletion. Null/default/removal support follows
+the actual native type and operation contract, rather than an unused second
+field-intent registry. Errors retain the original source and field.
 
 ## Reflected editable values
 
@@ -83,8 +86,12 @@ state. The same typed definition follows recursive values, without treating
 business fields named `localized` as generic wrappers. See
 [the text source and identity contract](../UObjectPropertyValueV2.md).
 
-## Workspace index and selection
+## Source and complete-view consumers
 
-`FUnifiedHjsonWorkspaceIndex` records every unit, its composition, owner, field-set owner, and direct relations. `TryCreateUnifiedHjsonWorkspace` accepts a layout only when it carries the same core semantic fingerprint.
-
-`TryResolveUnifiedHjsonSelection` delegates owner, controlling-field, placement, and endpoint closure to the existing shared selection owner. It adds direct relation IDs from the resolved semantic units and then reuses that same owner for the final closure; it does not implement a parallel selection algorithm.
+The source resolver retains stable unit identity, original provenance, baseline
+and explicit edited-unit bindings. Rebase consumes current facts only for those
+edits and their real dependencies; its property result is an overlay over the
+admitted source rows. A complete view remains available on demand to actual
+structure/export consumers. Native after observation follows the domain's real
+scope. Observation differences/inability are public warnings and pending
+synchronization, not automatic native rollback or whole-world attribution.

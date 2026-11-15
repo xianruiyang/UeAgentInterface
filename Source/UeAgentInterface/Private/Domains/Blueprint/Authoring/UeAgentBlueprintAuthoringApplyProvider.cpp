@@ -577,6 +577,23 @@ namespace UeAgentBlueprintAuthoring
 					// Create before/restore reads observe absence; Remove expected reads describe a future state.
 					OutRequests.Last().Context.Add(TEXT("observe_absence"), TEXT("true"));
 				}
+				if (Root && Operation == EOperation::Update && Mutation) {
+					// The published workspace belongs to this target. Dependent package
+					// verification is appended separately and does not change its scope.
+					auto& Context = OutRequests.Last().Context;
+					if (Mutation->ReparentsBlueprint()) Context.Add(ObservedReparentHierarchy, TEXT("true"));
+					Mutation->AppendGraphObservationContext(bVerifyIntent, Context);
+					if (!Mutation->GetObservedVariableDefaults().IsEmpty()) {
+						Context.Add(ObservedMemberCapture, TEXT("defaults"));
+						for (const auto& Member : Mutation->GetObservedVariableDefaults())
+							Context.Add(ObservedDefaultMemberPrefix + Member.Key.ToString(EGuidFormats::DigitsWithHyphensLower), Member.Value.ToString());
+					}
+					Mutation->AppendMemberObservationContext(bVerifyIntent, Context);
+					if (!Mutation->AppendComponentObservationContext(bVerifyIntent, Context, Error)) {
+						SetFailure(OutFailure, MoveTemp(Error));
+						return false;
+					}
+				}
 				for (const auto& Entry : DependentBlueprints)
 					if (!BuildAssetSnapshotReadRequest(Entry.Target.Get(), Entry.PackagePath, Entry.AssetKind,
 						false, OutRequests, Error))

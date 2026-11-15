@@ -52,11 +52,20 @@ UMaterialInstanceConstant* ParameterOwner(UMaterialFunctionInstance& Asset, UE::
 }
 
 bool Read(UMaterialFunctionInstance& Asset, TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& Error,
-    TArray<TSharedPtr<FJsonValue>>* Definitions)
+    TArray<TSharedPtr<FJsonValue>>* Definitions, TArray<FInstanceParameterDefault>* Defaults)
 {
     auto* Preview = ParameterOwner(Asset, Error);
     TArray<TSharedPtr<FJsonValue>> Parameters;
-    if (!Preview || !CaptureInstanceParameters(*Preview, Parameters, Error, Definitions)) return false;
+    if (!Preview || !CaptureInstanceParameters(*Preview, Parameters, Error, Definitions, Defaults)) return false;
+    if (Defaults) {
+        // UE builds the preview's inheritance chain from the parent functions.
+        // Bind the native default observation to this public function owner,
+        // rather than claiming a particular ancestor supplied the resolved value.
+        for (auto& Default : *Defaults) {
+            Default.SourceIdentity = Asset.GetPathName();
+            Default.Provenance = TEXT("function preview UMaterialInterface.GetParameterDefaultValue; inherited overrides and native layer mapping; excludes local override");
+        }
+    }
     Value = MakeShared<FJsonValueArray>(Parameters);
     return true;
 }

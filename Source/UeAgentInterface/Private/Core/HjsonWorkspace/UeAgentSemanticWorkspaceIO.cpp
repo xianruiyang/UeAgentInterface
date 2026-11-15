@@ -46,7 +46,7 @@ namespace UE::UAI::HjsonWorkspace
 		}
 
 		bool TryMatchContract(const FAuthoringModel& Actual, const FAuthoringModel& Expected,
-			bool bAllowVerifiedRevisionDrift, Contract::FDiagnostic& Error)
+			Contract::FDiagnostic& Error)
 		{
 			auto Fail = [&](const TCHAR* Field, const TCHAR* Reason) {
 				Error = Contract::FDiagnostic::Failure(TEXT("semantic_workspace_base_revision_mismatch"), Reason, TEXT("workspace_binding"));
@@ -64,10 +64,6 @@ namespace UE::UAI::HjsonWorkspace
 				Fail(TEXT("profile_id"), TEXT("The workspace profile does not match the current authoring model."));
 				Error.ExpectedValue = MakeShared<FJsonValueString>(Expected.GetProfileId());
 				Error.ActualValue = MakeShared<FJsonValueString>(Actual.GetProfileId());
-			} else if (!bAllowVerifiedRevisionDrift && Actual.GetBaseRevision() != Expected.GetBaseRevision()) {
-				Fail(TEXT("base_revision"), TEXT("The workspace base revision differs from the current authoring model."));
-				Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetBaseRevision());
-				Error.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetBaseRevision());
 			} else return true;
 			return false;
 		}
@@ -199,11 +195,158 @@ namespace UE::UAI::HjsonWorkspace
 		return ValidationDiagnostic.IsEmpty();
 	}
 
+	const FSourceProvenance* FResolvedSemanticWorkspace::FindUnitSource(const FString& UnitId) const
+	{
+		if (const auto* Source = UnitSources.Find(UnitId)) return Source;
+		return UnitBindings ? UnitBindings->FindSource(UnitId) : nullptr;
+	}
+
+	static bool SelectBaselineMembers(const FSemanticUnit& Unit, const FString& RootField, const TSet<FString>& Keys,
+		ContextResource::FUeAgentResourceTracker& Resources, TOptional<FSemanticUnit>& Out, FWorkspaceError& Error)
+	{
+		const auto* Root = Unit.FindValue(RootField);
+		if (!Root || (*Root)->GetKind() != StateSemantic::EUeAgentValueKind::Object) return true;
+		TArray<TPair<FString, StateSemantic::FUeAgentCanonicalValueRef>> Members;
+		for (const auto& Member : (*Root)->GetObjectItems()) if (Keys.Contains(Member.Key)) Members.Add(Member);
+		StateSemantic::FUeAgentCanonicalValuePtr Selected;
+		StateSemantic::FUeAgentStateSemanticError Failure;
+		if (!StateSemantic::FUeAgentCanonicalValue::TryObject(MoveTemp(Members), Resources, Selected, Failure)) {
+			Error.SetFailure(MoveTemp(Failure)); return false;
+		}
+		auto Values = Unit.GetValues(); Values.Add(RootField, Selected.ToSharedRef());
+		Out.Emplace(Unit.WithValues(MoveTemp(Values))); return true;
+	}
+
+	bool FResolvedWorkspaceUnitBindings::TryReadBaselineMembers(const FString& UnitId, const FString& RootField, const TSet<FString>& Keys,
+		ContextResource::FUeAgentResourceTracker& Resources, TOptional<FSemanticUnit>& Out, FWorkspaceError& Error) const
+	{
+		Out.Reset();
+		if (const auto* Unit = FindBaseline(UnitId)) return SelectBaselineMembers(*Unit, RootField, Keys, Resources, Out, Error);
+		if (const auto* Failure = GetReadFailure()) { Error = *Failure; return false; }
+		return true;
+	}
+
+	void VisitCapturedKeyedMemberNames(const StateSemantic::FUeAgentCanonicalValue& Items, FKeyedMemberNameVisitor Visitor)
+	{
+		if (Items.GetKind() != StateSemantic::EUeAgentValueKind::Object) return;
+		const FString Empty;
+		for (const auto& Row : Items.GetObjectItems()) {
+			if (Row.Value->GetKind() != StateSemantic::EUeAgentValueKind::Object) continue;
+			const auto Field = [&](const TCHAR* Key) -> const FString& {
+				const auto* Value = Row.Value->GetObjectItems().FindByPredicate([&](const auto& Item) { return Item.Key == Key; });
+				return Value && Value->Value->GetKind() == StateSemantic::EUeAgentValueKind::String ? Value->Value->GetText() : Empty;
+			};
+			Visitor(Row.Key, Field(TEXT("unit_id")), Field(TEXT("actor_guid")), Field(TEXT("managed_id")), Field(TEXT("component_name")));
+		}
+	}
+	static void VisitCanonicalMemberNames(const FSemanticUnit& Unit, const FString& RootField, FKeyedMemberNameVisitor Visitor)
+	{
+		if (const auto* Root = Unit.FindValue(RootField)) VisitCapturedKeyedMemberNames(Root->Get(), Visitor);
+	}
+
+	bool FResolvedWorkspaceUnitBindings::VisitBaselineMemberNames(const FString& UnitId, const FString& RootField,
+		FKeyedMemberNameVisitor Visitor, ContextResource::FUeAgentResourceTracker&, FWorkspaceError& Error) const
+	{
+		if (const auto* Unit = FindBaseline(UnitId)) VisitCanonicalMemberNames(*Unit, RootField, Visitor);
+		else if (const auto* Failure = GetReadFailure()) { Error = *Failure; return false; }
+		return true;
+	}
+
+	bool FResolvedSemanticWorkspace::VisitBaselineMemberNames(const FString& UnitId, const FString& RootField,
+		FKeyedMemberNameVisitor Visitor, ContextResource::FUeAgentResourceTracker& Resources, FWorkspaceError& Error) const
+	{
+		// Bindings own the published namespace; the authored operation map does
+		// not replace it, and addressed before-values are not a complete namespace.
+		if (UnitBindings) return UnitBindings->VisitBaselineMemberNames(UnitId, RootField, Visitor, Resources, Error);
+		if (const auto* Unit = BaselineUnits.Find(UnitId)) VisitCanonicalMemberNames(*Unit, RootField, Visitor);
+		return true;
+	}
+
+	bool FResolvedSemanticWorkspace::TryReadBaselineMembers(const FString& UnitId, const FString& RootField, const TSet<FString>& Keys,
+		ContextResource::FUeAgentResourceTracker& Resources, TOptional<FSemanticUnit>& Out, FWorkspaceError& Error) const
+	{
+		Out.Reset();
+		if (const auto* Unit = BaselineUnits.Find(UnitId)) return SelectBaselineMembers(*Unit, RootField, Keys, Resources, Out, Error);
+		return !UnitBindings || UnitBindings->TryReadBaselineMembers(UnitId, RootField, Keys, Resources, Out, Error);
+	}
+
+	static bool BaselineContainsAnyString(const FSemanticUnit& Unit, TFunctionRef<bool(const FString&)> Matches)
+	{
+		return !Unit.VisitValues([&](const FString&, const auto& Value) { return !Value->ContainsStringMatching(Matches); });
+	}
+
+	bool FResolvedWorkspaceUnitBindings::TryBaselineContainsAnyString(const FString& UnitId, TFunctionRef<bool(const FString&)> Matches,
+		TOptional<bool>& Out, FWorkspaceError& Error) const
+	{
+		Out.Reset();
+		if (const auto* Unit = FindBaseline(UnitId)) Out = BaselineContainsAnyString(*Unit, Matches);
+		if (const auto* Failure = GetReadFailure()) { Error = *Failure; return false; }
+		return true;
+	}
+
+	bool FResolvedSemanticWorkspace::TryBaselineContainsAnyString(const FString& UnitId, TFunctionRef<bool(const FString&)> Matches,
+		TOptional<bool>& Out, FWorkspaceError& Error) const
+	{
+		Out.Reset();
+		if (const auto* Unit = BaselineUnits.Find(UnitId)) { Out = BaselineContainsAnyString(*Unit, Matches); return true; }
+		return !UnitBindings || UnitBindings->TryBaselineContainsAnyString(UnitId, Matches, Out, Error);
+	}
+
+	const FSemanticUnit* FResolvedSemanticWorkspace::FindBaselineUnit(const FString& UnitId) const
+	{
+		if (const auto* Unit = BaselineUnits.Find(UnitId)) return Unit;
+		return UnitBindings ? UnitBindings->FindBaseline(UnitId) : nullptr;
+	}
+
+	const TMap<FString, FSourceProvenance>& FResolvedSemanticWorkspace::GetUnitSources() const
+	{
+		if (!UnitBindings) return UnitSources;
+		if (!MaterializedUnitSources) {
+			auto All = MakeShared<TMap<FString, FSourceProvenance>>();
+			UnitBindings->CopySources(*All);
+			for (const auto& Pair : UnitSources) All->Add(Pair.Key, Pair.Value);
+			MaterializedUnitSources = MoveTemp(All);
+		}
+		return *MaterializedUnitSources;
+	}
+
+	const TMap<FString, FSemanticUnit>& FResolvedSemanticWorkspace::GetBaselineUnits() const
+	{
+		if (!UnitBindings) return BaselineUnits;
+		if (!MaterializedBaselineUnits) {
+			auto All = MakeShared<TMap<FString, FSemanticUnit>>();
+			UnitBindings->CopyBaselines(*All);
+			for (const auto& Pair : BaselineUnits) All->Add(Pair.Key, Pair.Value);
+			MaterializedBaselineUnits = MoveTemp(All);
+		}
+		return *MaterializedBaselineUnits;
+	}
+
+	const TMap<FString, FString>& FResolvedSemanticWorkspace::GetBaselineUnitHashes() const
+	{
+		if (!BaselineHashView) return BaselineUnitHashes;
+		if (!MaterializedBaselineHashes) {
+			auto All = MakeShared<TMap<FString, FString>>();
+			BaselineHashView->CopyTo(*All);
+			for (const auto& Pair : BaselineUnitHashes) All->Add(Pair.Key, Pair.Value);
+			MaterializedBaselineHashes = MoveTemp(All);
+		}
+		return *MaterializedBaselineHashes;
+	}
+
+	FString FResolvedSemanticWorkspace::ReadBaselineUnitHash(const FString& UnitId) const
+	{
+		if (const auto* Hash = BaselineUnitHashes.Find(UnitId)) return *Hash;
+		return UnitBindings ? UnitBindings->ReadBaselineHash(UnitId) : FString();
+	}
+
 	const FHjsonNode* FResolvedSemanticWorkspace::FindValueNode(
 		const FString& UnitId, const FString& JsonPointer) const
 	{
-		const FHjsonDocumentRef* Document = UnitSourceDocuments.Find(UnitId);
-		return Document ? (*Document)->Find(JsonPointer) : nullptr;
+		const FHjsonDocumentRef* Local = UnitSourceDocuments.Find(UnitId);
+		const FHjsonDocumentPtr Document = Local ? FHjsonDocumentPtr(*Local)
+			: (UnitBindings ? UnitBindings->FindSourceDocument(UnitId) : nullptr);
+		return Document ? Document->Find(JsonPointer) : nullptr;
 	}
 
 	const FSourceProvenance* FResolvedSemanticWorkspace::FindValueSource(
@@ -528,7 +671,32 @@ namespace UE::UAI::HjsonWorkspace
 		TMap<FString, FString> InBaselineUnitHashes,
 		TMap<FString, FHjsonDocumentRef> InUnitSourceDocuments,
 		TMap<FString, FSemanticUnit> InBaselineUnits,
-		TOptional<FSourceProvenance> InStructuralEditsSource)
+		TOptional<FSourceProvenance> InStructuralEditsSource,
+		TSharedPtr<const FResolvedWorkspaceUnitBindings> InUnitBindings)
+		: FResolvedSemanticWorkspace(InSourceKind, InMode, MoveTemp(InModel), MoveTemp(InBaseStateRevision),
+			MoveTemp(InStructuralEdits), MoveTemp(InManagedUnitPaths), MoveTemp(InSelectionFingerprint),
+			MoveTemp(InClosureFingerprint), MoveTemp(InClosureUnitIds), MoveTemp(InWorkspaceFingerprint),
+			MoveTemp(InEditedUnitIds), MoveTemp(InResolvedKeyedOperationRoots), MoveTemp(InUnitSources),
+			MoveTemp(InBaselineUnitHashes), MoveTemp(InUnitSourceDocuments), MoveTemp(InBaselineUnits),
+			MoveTemp(InStructuralEditsSource), MoveTemp(InUnitBindings), {})
+	{}
+
+	FResolvedSemanticWorkspace::FResolvedSemanticWorkspace(
+		EWorkspaceSourceKind InSourceKind, ESemanticWorkspaceMode InMode,
+		FAuthoringModelRef InModel, FUeAgentStateRevision InBaseStateRevision,
+		TArray<FStructuralEdit> InStructuralEdits, TArray<FString> InManagedUnitPaths,
+		FString InSelectionFingerprint, FString InClosureFingerprint,
+		TArray<FString> InClosureUnitIds, FString InWorkspaceFingerprint,
+		TOptional<TArray<FString>> InEditedUnitIds,
+		TMap<FString, TSet<FString>> InResolvedKeyedOperationRoots,
+		TMap<FString, FSourceProvenance> InUnitSources,
+		TMap<FString, FString> InBaselineUnitHashes,
+		TMap<FString, FHjsonDocumentRef> InUnitSourceDocuments,
+		TMap<FString, FSemanticUnit> InBaselineUnits,
+		TOptional<FSourceProvenance> InStructuralEditsSource,
+		TSharedPtr<const FResolvedWorkspaceUnitBindings> InUnitBindings,
+		TSharedPtr<const FResolvedWorkspaceBaselineHashes> InBaselineHashView,
+		FString InPublishedSemanticFingerprint)
 		: SourceKind(InSourceKind)
 		, Mode(InMode)
 		, Model(MoveTemp(InModel))
@@ -543,12 +711,15 @@ namespace UE::UAI::HjsonWorkspace
 		, ClosureUnitIds(MoveTemp(InClosureUnitIds))
 		, WorkspaceFingerprint(
 			Normalize(MoveTemp(InWorkspaceFingerprint)))
+		, PublishedSemanticFingerprint(MoveTemp(InPublishedSemanticFingerprint))
 		, EditedUnitIds(MoveTemp(InEditedUnitIds))
 		, ResolvedKeyedOperationRoots(MoveTemp(InResolvedKeyedOperationRoots))
 		, UnitSources(MoveTemp(InUnitSources))
 		, BaselineUnitHashes(MoveTemp(InBaselineUnitHashes))
+		, BaselineHashView(MoveTemp(InBaselineHashView))
 		, UnitSourceDocuments(MoveTemp(InUnitSourceDocuments))
 		, BaselineUnits(MoveTemp(InBaselineUnits))
+		, UnitBindings(MoveTemp(InUnitBindings))
 	{
 		Validate();
 	}
@@ -662,6 +833,24 @@ namespace UE::UAI::HjsonWorkspace
 		return ValidationDiagnostic.IsEmpty();
 	}
 
+	TSharedRef<const FResolvedSemanticWorkspace> FResolvedSemanticWorkspace::RebindUnconsumedAuthoring(
+		FAuthoringModelRef NewModel, TArray<FString> NewEdits,
+		TMap<FString, FSemanticUnit> ActualBaselines, TMap<FString, FString> ActualHashes,
+		TArray<FStructuralEdit> RemainingStructuralEdits) const
+	{
+		auto Result = MakeShared<FResolvedSemanticWorkspace>(*this);
+		Result->Model = MoveTemp(NewModel);
+		Result->EditedUnitIds = MoveTemp(NewEdits);
+		Result->StructuralEdits = MoveTemp(RemainingStructuralEdits);
+		for (auto& Pair : ActualBaselines) Result->BaselineUnits.Add(Pair.Key, MoveTemp(Pair.Value));
+		for (auto& Pair : ActualHashes) Result->BaselineUnitHashes.Add(Pair.Key, MoveTemp(Pair.Value));
+		Result->MaterializedBaselineUnits.Reset();
+		Result->MaterializedBaselineHashes.Reset();
+		Result->bResolvedAcceptedAuthoring = true;
+		Result->Validate();
+		return Result;
+	}
+
 	TSharedRef<const FResolvedSemanticWorkspace> FResolvedSemanticWorkspace::Rebind(
 		FAuthoringModelRef NewModel, const FUeAgentStateRevision& Revision) const
 	{
@@ -698,10 +887,21 @@ namespace UE::UAI::HjsonWorkspace
 			return false;
 		}
 		Contract::FDiagnostic ContractError;
-		if (!TryMatchContract(*Workspace->GetModel(), *CurrentModel, bAllowVerifiedRevisionDrift, ContractError))
+		if (!TryMatchContract(*Workspace->GetModel(), *CurrentModel, ContractError))
 		{
 			OutError.SetFailure(MoveTemp(ContractError));
 			return false;
+		}
+		// The complete authoring input keeps its own content header. A scoped
+		// rebase binds actual current facts on the workspace, not by rewriting
+		// that input. The model which must match this observation is Current.
+		if (!bAllowVerifiedRevisionDrift && CurrentModel->GetBaseRevision() != CurrentRevision.GetGeneration()) {
+			auto Failure = Contract::FDiagnostic::Failure(TEXT("semantic_workspace_base_revision_mismatch"),
+				TEXT("The current authoring model differs from its actual snapshot revision."), TEXT("workspace_binding"));
+			Failure.PropertyPath = TEXT("base_revision");
+			Failure.ExpectedEvidence = MakeShared<FJsonValueString>(CurrentRevision.GetGeneration());
+			Failure.ActualEvidence = MakeShared<FJsonValueString>(CurrentModel->GetBaseRevision());
+			OutError.SetFailure(MoveTemp(Failure)); return false;
 		}
 		if (!bAllowVerifiedRevisionDrift && !(Workspace->GetBaseStateRevision() == CurrentRevision))
 		{

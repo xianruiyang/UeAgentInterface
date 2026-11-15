@@ -148,6 +148,7 @@ namespace UeAgentAuthoringWorkspaceTransaction
 		Object->SetBoolField(TEXT("replayed"), bReplayed);
 		Object->SetNumberField(TEXT("artifact_count"), ArtifactCount);
 		if (!JournalPath.IsEmpty()) Object->SetStringField(TEXT("journal_path"), JournalPath);
+		if (!JournalPath.IsEmpty()) Object->SetStringField(TEXT("journal_id"), MakeDurableJournalRecoveryId(JournalPath));
 
 		TArray<TSharedPtr<FJsonValue>> HistoryValues;
 		for (const FString& Phase : PhaseHistory)
@@ -856,6 +857,13 @@ namespace UeAgentAuthoringWorkspaceTransaction
 		}
 
 		Failure = FOperationFailure();
+		if (!Durable.SealConsumerEvidence(Failure))
+		{
+			CompleteDiagnostic(Failure, TEXT("workspace_consumer_evidence_failed"), TEXT("workspace_final_readback"), nullptr);
+			FailExecution(OutResult, TEXT("final_readback"), TEXT("verification_failed"), Failure);
+			EndRollback(Prepared.Units.Num() - 1);
+			return false;
+		}
 		if (!Backend.EndWorkspace(true, Failure))
 		{
 			CompleteDiagnostic(Failure, TEXT("workspace_transaction_commit_failed"), TEXT("workspace_commit"), nullptr);

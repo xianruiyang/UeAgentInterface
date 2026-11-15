@@ -367,10 +367,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("native_result")));
 			}
 			UObject* Asset = nullptr;
-			FUeAgentContentGraphCapture TargetCapture;
-			if (!TryCaptureObject(
+			if (!TryLoadObjectTarget(
 					Target, TArray<FString>{MetaSoundSourceType, SoundCueType},
-					Asset, TargetCapture, OutError))
+					Asset, OutError))
 			{
 				return false;
 			}
@@ -395,8 +394,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				OutError.SetFailure(CaptureError);
 				return false;
 			}
+			SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
 			UeAgentAuthoringState::FCaptureResult Capture;
-			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+			if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 			{
 				OutError.SetFailure(Capture.Diagnostic);
 				return false;
@@ -406,7 +406,7 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				MakeSemanticWorkspaceResourceTracker();
 			StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 			FAuthoringModelPtr Model;
-			if (!TryBuildCanonicalAuthoringCapture(
+			if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(),
 					ResolveTargetCompositionKind(Profile->TargetKind, Profile->TypeId),
 					TEXT("llm_authoring"), Capture.Snapshot, Resources,
 					CanonicalSnapshot, Model, OutError))
@@ -420,9 +420,7 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			return TryCoordinateSemanticWorkspaceImport(
 				Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 				CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("audio_graph.semantic_workspace"), 1,
-					Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("audio_graph.semantic_workspace"), *Model),
 				TargetObjectPath,
 				Resources,
 				{
@@ -713,7 +711,8 @@ MakeShared<FJsonValueString>(ObjectPathFromPackageIdentity(Target))));
 			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -742,7 +741,7 @@ MakeShared<FJsonValueString>(ObjectPathFromPackageIdentity(Target))));
 			if (!EnsureAuthoringRegistered(OutError)) return false;
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
 			FString ExportError;
-			if (!UeAgentAudioAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentAudioAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic);
 				return false;
@@ -758,7 +757,8 @@ MakeShared<FJsonValueString>(ObjectPathFromPackageIdentity(Target))));
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -783,7 +783,7 @@ if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError))
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return TryExport(Target, Params, OutPayloadJson, OutError);
+			return TryExport(Target, Params, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

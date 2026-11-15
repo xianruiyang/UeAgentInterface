@@ -755,8 +755,20 @@ namespace UE::UAI::AssetPreview
 	bool AppendState(const FString& TargetKind,
 		TArray<UeAgentAuthoringState::FStateEntry>& Entries, UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		TArray<UeAgentAuthoringState::FStateEntry> Additional;
+		const bool bCaptured = CaptureAdditionalState(TargetKind, Entries, Additional, OutError);
+		Entries.Append(MoveTemp(Additional));
+		return bCaptured;
+	}
+
+	template <typename EntryRange>
+	static bool CaptureAdditionalStateFromEntries(const FString& TargetKind,
+		const EntryRange& SourceEntries,
+		TArray<UeAgentAuthoringState::FStateEntry>& Entries, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		Entries.Reset();
 		FString AssetPath;
-		for (const auto& Entry : Entries)
+		for (const auto& Entry : SourceEntries)
 		{
 			if (const auto* Path = Entry.TargetIdentity.Selectors.Find(TEXT("asset_path")))
 			{
@@ -906,5 +918,19 @@ namespace UE::UAI::AssetPreview
 		}
 		}
 		return true;
+	}
+
+	bool CaptureAdditionalState(const FString& TargetKind,
+		const TArray<UeAgentAuthoringState::FStateEntry>& SourceEntries,
+		TArray<UeAgentAuthoringState::FStateEntry>& Entries, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return CaptureAdditionalStateFromEntries(TargetKind, SourceEntries, Entries, OutError);
+	}
+
+	bool CaptureAdditionalState(const FString& TargetKind,
+		UeAgentAuthoringState::FStateSnapshot::FEntryView SourceEntries,
+		TArray<UeAgentAuthoringState::FStateEntry>& Entries, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return CaptureAdditionalStateFromEntries(TargetKind, SourceEntries, Entries, OutError);
 	}
 }

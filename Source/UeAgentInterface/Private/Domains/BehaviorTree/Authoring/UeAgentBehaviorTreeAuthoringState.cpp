@@ -12,6 +12,7 @@
 #include "EdGraph/EdGraph.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "UObject/Class.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
 
@@ -24,6 +25,8 @@ namespace UeAgentBehaviorTreeAuthoring
 		constexpr const TCHAR* NodeKind = TEXT("behavior_tree.node");
 		constexpr const TCHAR* PropertyKind = TEXT("behavior_tree.node_property");
 		constexpr const TCHAR* EdgeKind = TEXT("behavior_tree.edge");
+		struct FObservedNodeRead { const UeAgentAuthoringState::FReadRequest& Request; const FNodeCapture& Node; };
+		thread_local const FObservedNodeRead* ObservedNodeRead = nullptr;
 
 		FString IdentityModel(const FString& Kind) { return Kind + TEXT(".identity"); }
 
@@ -104,7 +107,17 @@ namespace UeAgentBehaviorTreeAuthoring
 			{
 				const auto* Node = Cast<UEdGraphNode>(Request.RootObject);
 				FNodeCapture Captured;
-				if (!Node || !CaptureNode(*Node, Captured, OutError))
+				if (ObservedNodeRead && &ObservedNodeRead->Request == &Request)
+				{
+					const auto& Original = ObservedNodeRead->Node;
+					if (!Node || Original.NativeNode != Node || Original.Id != Request.TargetIdentity.GetSelector(TEXT("node_id")))
+						return Failure(TEXT("behavior_tree_node_target_missing"), TEXT("The observed node does not match the requested native node."),
+							TEXT("/root_object"), MakeShared<FJsonValueString>(Original.Id), MakeShared<FJsonValueString>(Request.TargetIdentity.GetSelector(TEXT("node_id"))));
+					Captured = Original;
+					State->Values = Captured.State->Values;
+					State->SetField(TEXT("pins"), UeAgentAuthoringState::CloneCanonicalValue(Captured.State->TryGetField(TEXT("pins"))));
+				}
+				else if (!Node || !CaptureNode(*Node, Captured, OutError))
 				{
 					if (OutError.IsEmpty()) return Failure(TEXT("behavior_tree_node_target_missing"),
 						!Node ? TEXT("Node capture requires an EdGraphNode object.") : TEXT("The Behavior Tree node capture failed without providing a diagnostic."),
@@ -112,7 +125,7 @@ namespace UeAgentBehaviorTreeAuthoring
 						MakeShared<FJsonValueString>(TEXT("capturable EdGraphNode")));
 					return EOutcome::Failed;
 				}
-				State = Captured.State;
+				else State = Captured.State;
 				bool bReadOnly = false;
 				State->TryGetBoolField(TEXT("read_only"), bReadOnly);
 				OutValue.bEditable = !bReadOnly && (!Node->GetGraph() || Node->GetGraph()->bEditable);
@@ -238,12 +251,11 @@ namespace UeAgentBehaviorTreeAuthoring
 		return UeAgentAuthoringState::FStateAccessorRegistry::Get().RegisterAccessor(Accessor, ReadState, Result, OutError);
 	}
 
-	bool AppendGraphExportRequests(UBehaviorTree& Tree,
-		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError)
+	static bool AppendGraphRequests(UBehaviorTree& Tree, const FGraphCapture& Capture,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError,
+		TMap<const UObject*, const FNodeCapture*>* BoundNodes)
 	{
 		const FString AssetPath = Tree.GetOutermost()->GetName();
-		FGraphCapture Capture;
-		if (!CaptureGraph(Tree, Capture, OutError)) return false;
 		auto AppendGraph = [&](const FGraphContents& Contents, const FString& GraphId, const UObject* GraphObject,
 			const FString& OwnerId) -> bool {
 			TMap<FString, FString> GraphSelectors = {{TEXT("asset_path"), AssetPath}, {TEXT("graph_name"), GraphId}};
@@ -253,14 +265,12 @@ namespace UeAgentBehaviorTreeAuthoring
 			for (const FNodeCapture& Node : Contents.Nodes)
 			{
 				Nodes.Add(Node.Id, Node.NativeNode);
+				if (BoundNodes) BoundNodes->Add(Node.NativeNode, &Node);
 				TMap<FString, FString> Selectors = {{TEXT("asset_path"), AssetPath}, {TEXT("graph_name"), GraphId},
 					{TEXT("node_id"), Node.Id}, {TEXT("item_id"), GraphId + TEXT("|") + Node.Id}};
 				if (!Node.ParentId.IsEmpty()) Selectors.Add(TEXT("owner_item_id"), GraphId + TEXT("|") + Node.ParentId);
 				if (!AddRequest(NodeSemanticId, NodeKind, Selectors, Node.NativeNode, OutRequests, OutError)) return false;
-				if (const auto* BehaviorNode = Cast<UBehaviorTreeGraphNode>(Node.NativeNode); BehaviorNode && BehaviorNode->bInjectedNode)
-					continue;
-				if (Node.NativeNode->GetGraph() && !Node.NativeNode->GetGraph()->bEditable) continue;
-				const UObject* PropertyObject = GetNodePropertyObject(*Node.NativeNode);
+				const UObject* PropertyObject = GetExportedNodePropertyObject(*Node.NativeNode);
 				if (!PropertyObject) continue;
 				UeAgentAuthoringState::FEditablePropertyReadOptions Options;
 				Options.SemanticId = NodePropertySemanticId;
@@ -283,6 +293,56 @@ namespace UeAgentBehaviorTreeAuthoring
 		if (!AppendGraph(Capture, TEXT("main"), &Tree, FString())) return false;
 		for (const FOwnedGraphCapture& Graph : Capture.OwnedGraphs)
 			if (!AppendGraph(Graph, Graph.Id, Graph.NativeGraph, Graph.OwnerId)) return false;
+		return true;
+	}
+
+	bool AppendGraphExportRequests(UBehaviorTree& Tree,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		FGraphCapture Capture;
+		return CaptureGraph(Tree, Capture, OutError) && AppendGraphRequests(Tree, Capture, OutRequests, OutError, nullptr);
+	}
+
+	bool CaptureObservedGraph(UBehaviorTree& Tree, FGraphCapture& Capture,
+		UeAgentAuthoringState::FStateSnapshot& OutStructure, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		TArray<UeAgentAuthoringState::FReadRequest> Requests;
+		TMap<const UObject*, const FNodeCapture*> Nodes;
+		if (!AppendGraphRequests(Tree, Capture, Requests, OutError, &Nodes)) return false;
+		const auto Produce = [&](UeAgentAuthoringState::FReadRequestConsumer Consume, UE::UAI::Contract::FDiagnostic&) {
+			for (const auto& Request : Requests)
+			{
+				if (Request.SemanticId == NodeSemanticId)
+				{
+					const FObservedNodeRead Read{Request, *Nodes.FindChecked(Request.RootObject)};
+					TGuardValue<const FObservedNodeRead*> Bind(ObservedNodeRead, &Read);
+					if (!Consume(Request)) break;
+				}
+				else if (!Consume(Request)) break;
+			}
+			return true;
+		};
+		UeAgentAuthoringState::FCaptureResult Public;
+		if (!UeAgentAuthoringState::CaptureSnapshot(Produce, Public, UeAgentAuthoringState::ECaptureValueMode::Authoring))
+		{ OutError = Public.Diagnostic; return false; }
+		// The original verifier also needs these editable properties. Project
+		// its exact document from the same captured values and native defaults.
+		TMap<FString, TArray<UeAgentAuthoringState::FStateEntry>> ByNode;
+		const auto NodeKey = [](const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity) {
+			return Identity.GetSelector(TEXT("graph_name")) + TEXT("|") + Identity.GetSelector(TEXT("node_id"));
+		};
+		for (const auto& Entry : Public.Snapshot.ReadEntries()) if (Entry.SemanticId == NodePropertySemanticId)
+			ByNode.FindOrAdd(NodeKey(Entry.TargetIdentity)).Add(Entry);
+		for (const auto& Request : Requests)
+		{
+			if (Request.SemanticId != NodeSemanticId) continue;
+			const auto& Node = *Nodes.FindChecked(Request.RootObject);
+			if (!GetExportedNodePropertyObject(*Node.NativeNode)) continue;
+			TSharedPtr<FJsonObject> Properties;
+			if (!UeAgentDetailsAuthoringService::BuildPropertiesDocument(ByNode.FindOrAdd(NodeKey(Request.TargetIdentity)), {}, Properties, OutError)) return false;
+			Node.State->SetObjectField(TEXT("properties"), Properties);
+		}
+		OutStructure = MoveTemp(Public.Snapshot);
 		return true;
 	}
 }

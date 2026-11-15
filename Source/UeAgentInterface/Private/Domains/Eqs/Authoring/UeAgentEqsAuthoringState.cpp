@@ -224,9 +224,14 @@ namespace UeAgentEqsAuthoring
 	bool AppendGraphExportRequests(UEnvQuery& Query,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		const FString AssetPath = Query.GetOutermost()->GetName();
 		FGraphCapture Capture;
-		if (!CaptureGraph(Query, Capture, OutError)) return false;
+	return CaptureGraph(Query, Capture, OutError) && AppendGraphExportRequests(Query, Capture, OutRequests, OutError);
+}
+
+bool AppendGraphExportRequests(UEnvQuery& Query, const FGraphCapture& Capture,
+	TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError)
+{
+	const FString AssetPath = Query.GetOutermost()->GetName();
 		if (!AddRequest(GraphSemanticId, GraphKind, {{TEXT("asset_path"), AssetPath}, {TEXT("graph_name"), TEXT("main")}},
 			&Query, OutRequests, OutError)) return false;
 		TMap<FString, const UEdGraphNode*> Nodes;

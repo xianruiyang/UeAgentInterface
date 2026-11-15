@@ -95,15 +95,18 @@ namespace UE::UAI::PlanningPreflight
 			FChangeSetDraft InDraft,
 			FUeAgentCallerContext InCallerContext,
 			bool bInDryRun);
+		FPlanningRequest(TSharedRef<const FChangeSetDraft> InDraft,
+			FUeAgentCallerContext InCallerContext, bool bInDryRun);
 
 		const FChangeSetDraft& GetDraft() const;
+		const TSharedRef<const FChangeSetDraft>& GetSharedDraft() const { return Draft; }
 		const FUeAgentCallerContext& GetCallerContext() const;
 		bool IsDryRun() const;
 		bool IsValid() const;
 		const FPlanningPreflightError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
-		FChangeSetDraft Draft;
+		TSharedRef<const FChangeSetDraft> Draft;
 		FUeAgentCallerContext CallerContext;
 		bool bDryRun = false;
 		FPlanningPreflightError ValidationDiagnostic;
@@ -287,6 +290,14 @@ namespace UE::UAI::PlanningPreflight
 		FPlanningPreflightError& OutError);
 
 	UEAGENTINTERFACE_API bool TryRevalidatePlan(
+		const FPlanningPreflightPlanRef& Plan,
+		const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
+		const FUeAgentCallerContext& CallerContext,
+		FUeAgentResourceTracker& Resources,
+		FPlanningPreflightError& OutError);
+	// A field-only operation compares its actual target preconditions. A
+	// complete-asset capture revision is not a version of that field subset.
+	UEAGENTINTERFACE_API bool TryRevalidateFieldPlan(
 		const FPlanningPreflightPlanRef& Plan,
 		const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
 		const FUeAgentCallerContext& CallerContext,

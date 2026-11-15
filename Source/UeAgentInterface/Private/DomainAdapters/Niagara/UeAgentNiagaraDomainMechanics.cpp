@@ -597,7 +597,7 @@ namespace UE::UAI::DomainAdapters::Niagara
 				{
 					TSharedPtr<FJsonValue> Value;
 					UE::UAI::Contract::FDiagnostic Error;
-					if (!StateSemantic::CanonicalJson::TryToJsonValue(*Field.Value, Value, Error))
+					if (!StateSemantic::CanonicalJson::TryToAuthoringCodecJson(*Field.Value, Value, Error))
 					{
 						const FString FieldPointer = NiagaraPointer(FString(), Field.Key);
 						if (Error.IsValid()) UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, FieldPointer, false, true);
@@ -1329,10 +1329,9 @@ namespace UE::UAI::DomainAdapters::Niagara
 					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target));
 			}
 			UObject* Asset = nullptr;
-			DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture TargetCapture;
-			if (!TryCaptureObject(
+			if (!TryLoadObjectTarget(
 					Target, TArray<FString>{SystemType, EmitterType, ScriptType},
-					Asset, TargetCapture, OutError))
+					Asset, OutError))
 			{
 				return false;
 			}
@@ -1369,8 +1368,9 @@ namespace UE::UAI::DomainAdapters::Niagara
 				OutError.SetFailure(CaptureError, Target);
 				return false;
 			}
+			SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
 			UeAgentAuthoringState::FCaptureResult Capture;
-			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+			if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 			{
 				OutError.SetFailure(Capture.Diagnostic, Target);
 				return false;
@@ -1382,7 +1382,7 @@ namespace UE::UAI::DomainAdapters::Niagara
 			FAuthoringModelPtr Model;
 			const FString CompositionKind = ResolveTargetCompositionKind(
 				TEXT("niagara"), AssetKind);
-			if (!TryBuildCanonicalAuthoringCapture(
+			if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(),
 					CompositionKind, TEXT("llm_authoring"), Capture.Snapshot,
 					Resources, CanonicalSnapshot, Model, OutError)) return false;
 			if (!CanonicalSnapshot.IsValid())
@@ -1400,9 +1400,7 @@ namespace UE::UAI::DomainAdapters::Niagara
 			return TryCoordinateSemanticWorkspaceImport(
 				Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 				CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("niagara.semantic_workspace"), 1,
-					Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("niagara.semantic_workspace"), *Model),
 				TargetObjectPath, Resources,
 				{
 					TEXT("niagara-domain-provider"), Target, TargetObjectPath,
@@ -1431,7 +1429,8 @@ namespace UE::UAI::DomainAdapters::Niagara
 				{
 					UeAgentNiagaraAuthoring::FAssetApplyRequest ApplyRequest;
 					FWorkspaceError ProjectionError;
-					if (!TryProjectSemanticStages(Prepared.GetWorkspace()->GetModel(), Model.ToSharedRef(),
+					const bool bRootPropertiesOnly = HasOnlyRootPropertyIntents(*Prepared.GetWorkspace());
+					if (!bRootPropertiesOnly && !TryProjectSemanticStages(Prepared.GetWorkspace()->GetModel(), Model.ToSharedRef(),
 						Requests, Asset, Projection, ApplyRequest.Stages, ApplyRequest.Emitters, ApplyRequest.UserParameters, ProjectionError, Prepared.GetWorkspace().Get()))
 					{
 						OutOutcome.Diagnostic = ProjectionError.GetDiagnostic();
@@ -1450,7 +1449,7 @@ namespace UE::UAI::DomainAdapters::Niagara
 						OutOutcome.Phase = TEXT("candidate_resolution");
 						return false;
 					}
-					if (!NormalizeModuleCandidates(*Asset, Extension, ProjectionError, TargetPackage))
+					if (!bRootPropertiesOnly && !NormalizeModuleCandidates(*Asset, Extension, ProjectionError, TargetPackage))
 					{
 						OutOutcome.Diagnostic = ProjectionError.GetDiagnostic();
 						OutOutcome.Phase = TEXT("candidate_resolution");
@@ -1693,7 +1692,8 @@ namespace UE::UAI::DomainAdapters::Niagara
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -1756,7 +1756,7 @@ namespace UE::UAI::DomainAdapters::Niagara
 					TEXT("/authoring_registration/succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target));
 			}
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
-			if (!UeAgentNiagaraAuthoring::ExportAssetWorkspace(*Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentNiagaraAuthoring::ExportAssetWorkspace(*Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic, Target);
 				return false;

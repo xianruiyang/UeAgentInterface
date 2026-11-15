@@ -398,27 +398,27 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		}
 		FUeAgentResourceTracker Resources = MakeResources();
 		FResolvedContentGraphImportSourcePtr ResolvedSource;
+		FResolvedSemanticWorkspacePtr SemanticWorkspace;
 		if (!TryLoadNormalizedContentGraphImportSource(
 				*Source,
 				Target,
 				ExpectedRevision,
 				Resources,
 				ResolvedSource,
-				OutError)
+				OutError, SemanticWorkspace)
 			|| !ResolvedSource.IsValid())
 		{
 			return false;
 		}
 		if (ResolvedSource->IsSemanticWorkspaceDirectory())
 		{
-			FResolvedSemanticWorkspacePtr SemanticWorkspace;
-			if (!TryLoadHjsonImportSource(
+			if ((!SemanticWorkspace.IsValid() && !TryLoadHjsonImportSource(
 					FWorkspaceSource::Directory(
 						ResolvedSource->GetSourceUnit()),
 					ESemanticWorkspaceMode::State,
 					Resources,
 					SemanticWorkspace,
-					OutError)
+					OutError))
 				|| !SemanticWorkspace.IsValid())
 			{
 				return false;
@@ -680,6 +680,27 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		FUeAgentContentGraphCapture& OutCapture,
 		FWorkspaceError& OutError)
 	{
+		if (!TryLoadObjectTarget(TargetIdentity, ExpectedRootTypeIdentities, OutObject, OutError)) return false;
+		FUeAgentContentGraphReadError CaptureError;
+		if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(*OutObject, OutCapture, CaptureError))
+		{
+			if (CaptureError.IsEmpty()) CaptureError = NativeFailure(TEXT("domain_hjson_capture_failed"),
+				TEXT("The native content graph capture failed without reporting a cause."));
+			if (CaptureError.TargetPath.IsEmpty()) CaptureError.TargetPath = TargetIdentity;
+			return Fail(OutError, MoveTemp(CaptureError));
+		}
+		return true;
+	}
+
+	bool TryLoadObjectTarget(const FString& TargetIdentity, const FString& ExpectedRootTypeIdentity,
+		UObject*& OutObject, FWorkspaceError& OutError)
+	{
+		return TryLoadObjectTarget(TargetIdentity, TArray<FString>{ExpectedRootTypeIdentity}, OutObject, OutError);
+	}
+
+	bool TryLoadObjectTarget(const FString& TargetIdentity, const TArray<FString>& ExpectedRootTypeIdentities,
+		UObject*& OutObject, FWorkspaceError& OutError)
+	{
 		OutObject = StaticLoadObject(
 			UObject::StaticClass(), nullptr,
 			*ObjectPathFromPackageIdentity(TargetIdentity));
@@ -703,15 +724,6 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 				Error.ActualEvidence = MakeShared<FJsonValueString>(OutObject->GetClass()->GetPathName());
 			}
 			return Fail(OutError, MoveTemp(Error));
-		}
-		FUeAgentContentGraphReadError CaptureError;
-		if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-			*OutObject, OutCapture, CaptureError))
-		{
-			if (CaptureError.IsEmpty()) CaptureError = NativeFailure(TEXT("domain_hjson_capture_failed"),
-				TEXT("The native content graph capture failed without reporting a cause."));
-			if (CaptureError.TargetPath.IsEmpty()) CaptureError.TargetPath = TargetIdentity;
-			return Fail(OutError, MoveTemp(CaptureError));
 		}
 		return true;
 	}
@@ -1083,113 +1095,6 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		return true;
 	}
 
-	bool TryVerifyDomainHjsonStagedWorkspace(
-		const FString& StagedWorkspacePath,
-		const FString& TargetIdentity,
-		const FDomainHjsonDocumentContract& Contract,
-		const FString& BaseRevision,
-		const FString& EntryFile,
-		FUeAgentResourceTracker& Resources,
-		FWorkspaceError& OutError)
-	{
-		OutError.Reset();
-		if (const auto ContractError = ValidateDocumentContract(Contract); !ContractError.IsEmpty())
-			return Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("domain_hjson_staging_identity_invalid"), ContractError));
-		if (StagedWorkspacePath.IsEmpty()
-			|| TargetIdentity.IsEmpty()
-			|| BaseRevision.IsEmpty())
-		{
-			const TCHAR* Field = StagedWorkspacePath.IsEmpty() ? TEXT("staged_workspace") : TargetIdentity.IsEmpty() ? TEXT("target") : TEXT("base_revision");
-			auto Error = NativeFailure(TEXT("domain_hjson_staging_identity_invalid"),
-				*FString::Printf(TEXT("The staged workspace has a missing or invalid %s."), Field), FString(TEXT("/")) + Field);
-			Error.TargetPath = TargetIdentity;
-			Error.ActualValue = MakeShared<FJsonValueString>(FString());
-			return Fail(OutError, MoveTemp(Error));
-		}
-		if (const auto EntryError = ValidateEntryFile(EntryFile); !EntryError.IsEmpty())
-			return Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("domain_hjson_staging_identity_invalid"), EntryError));
-		const TSharedRef<FJsonObject> Source = MakeShared<FJsonObject>();
-		Source->SetStringField(TEXT("kind"), TEXT("directory"));
-		Source->SetStringField(
-			TEXT("path"), FPaths::ConvertRelativePathToFull(StagedWorkspacePath));
-		FResolvedContentGraphImportSourcePtr Resolved;
-		if (!TryLoadContentGraphImportSource(
-			Source, TargetIdentity, Resources, Resolved, OutError)
-			|| !Resolved.IsValid())
-		{
-			return false;
-		}
-		if (Resolved->GetKind() != EWorkspaceSourceKind::Directory
-			|| Resolved->GetTargetIdentity() != TargetIdentity
-			|| Resolved->GetBaseRevision() != BaseRevision
-			|| Resolved->GetEntryFile() != EntryFile)
-		{
-			const bool bKindMismatch = Resolved->GetKind() != EWorkspaceSourceKind::Directory;
-			const bool bTargetMismatch = Resolved->GetTargetIdentity() != TargetIdentity;
-			const TCHAR* Field = bKindMismatch ? TEXT("source_kind") : bTargetMismatch ? TEXT("target") : Resolved->GetBaseRevision() != BaseRevision ? TEXT("base_revision") : TEXT("entry_file");
-			auto Error = NativeFailure(TEXT("domain_hjson_staging_identity_mismatch"),
-				*FString::Printf(TEXT("The staged workspace %s does not match the export plan."), Field), FString(TEXT("/")) + Field);
-			Error.TargetPath = TargetIdentity;
-			if (bKindMismatch)
-			{
-				Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("directory"));
-				Error.ActualValue = MakeShared<FJsonValueString>(Resolved->GetKind() == EWorkspaceSourceKind::SingleFile ? TEXT("single_file") : TEXT("inline"));
-			}
-			else if (bTargetMismatch)
-			{
-				Error.ExpectedValue = MakeShared<FJsonValueString>(TargetIdentity);
-				Error.ActualEvidence = MakeShared<FJsonValueString>(Resolved->GetTargetIdentity());
-			}
-			else if (Resolved->GetBaseRevision() != BaseRevision)
-			{
-				Error.ExpectedEvidence = MakeShared<FJsonValueString>(BaseRevision);
-				Error.ActualEvidence = MakeShared<FJsonValueString>(Resolved->GetBaseRevision());
-			}
-			else if (Resolved->GetEntryFile() != EntryFile)
-			{
-				Error.ExpectedValue = MakeShared<FJsonValueString>(EntryFile);
-				Error.ActualValue = MakeShared<FJsonValueString>(Resolved->GetEntryFile());
-			}
-			return Fail(OutError, MoveTemp(Error));
-		}
-		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
-		Params->SetStringField(TEXT("target"), TargetIdentity);
-		Params->SetStringField(TEXT("expected_revision"), BaseRevision);
-		Params->SetObjectField(TEXT("source"), Resolved->MakeNormalizedSourceObject());
-		FString CanonicalParams;
-		if (!TryCanonicalizeObject(Params, CanonicalParams, OutError))
-		{
-			return false;
-		}
-		FResolvedDomainHjsonDocument Decoded;
-		if (!TryDecodeResolvedDocument(
-			TargetIdentity, CanonicalParams, Contract, Decoded, OutError))
-		{
-			return false;
-		}
-		if (Decoded.BaseRevision != BaseRevision
-			|| Decoded.EntryFile != EntryFile)
-		{
-			const bool bRevisionMismatch = Decoded.BaseRevision != BaseRevision;
-			auto Error = NativeFailure(TEXT("domain_hjson_staging_identity_mismatch"),
-				bRevisionMismatch ? TEXT("The decoded staged workspace base revision does not match the export plan.") : TEXT("The decoded staged workspace entry file does not match the export plan."),
-				bRevisionMismatch ? TEXT("/base_revision") : TEXT("/entry_file"));
-			Error.TargetPath = TargetIdentity;
-			if (bRevisionMismatch)
-			{
-				Error.ExpectedEvidence = MakeShared<FJsonValueString>(BaseRevision);
-				Error.ActualEvidence = MakeShared<FJsonValueString>(Decoded.BaseRevision);
-			}
-			else
-			{
-				Error.ExpectedValue = MakeShared<FJsonValueString>(EntryFile);
-				Error.ActualValue = MakeShared<FJsonValueString>(Decoded.EntryFile);
-			}
-			return Fail(OutError, MoveTemp(Error));
-		}
-		return true;
-	}
-
 	void SetWorkspaceErrorFromCommandFailure(
 		const UE::UAI::Contract::FDiagnostic& Failure,
 		FString FallbackCode,
@@ -1443,6 +1348,25 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		return true;
 	}
 
+	Contract::FUeAgentDescriptorIdentity BuildSemanticWorkspaceImportDescriptor(
+		const FString& DescriptorId, const FAuthoringModel& Model, int32 DescriptorVersion)
+	{
+		// These are the declaration fields actually selected by the adapter.
+		// A content fingerprint/source stamp is neither a schema nor a descriptor.
+		const auto Declaration = MakeShared<FJsonObject>();
+		Declaration->SetStringField(TEXT("descriptor_id"), DescriptorId);
+		Declaration->SetNumberField(TEXT("descriptor_version"), DescriptorVersion);
+		Declaration->SetStringField(TEXT("workspace_schema"), GetSemanticWorkspaceSchemaId());
+		Declaration->SetStringField(TEXT("contract_id"), Model.GetContractId());
+		Declaration->SetNumberField(TEXT("contract_version"), Model.GetContractVersion());
+		Declaration->SetStringField(TEXT("profile_id"), Model.GetProfileId());
+		FString Canonical;
+		Contract::FDiagnostic Error;
+		const bool bCanonical = Contract::Json::TryCanonicalize(Declaration, Canonical, Error);
+		return Contract::FUeAgentDescriptorIdentity(DescriptorId, DescriptorVersion,
+			bCanonical ? Contract::Json::Sha256Utf8(Canonical) : FString());
+	}
+
 	bool TryCoordinateRootPropertyImport(
 		const FResolvedSemanticWorkspaceRef& Workspace,
 		const FAuthoringModelRef& CurrentModel,
@@ -1485,7 +1409,15 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		ApplyOutcome.FinalReadback = [&](UeAgentAuthoringWorkspaceTransaction::FOperationFailure& Failure)
 		{
 			FWorkspaceError ReadError;
-			bFinalReadbackCompleted = TryReadbackImportPayload(
+			if (HasOnlyRootPropertyIntents(*Workspace)) {
+				// The operation has already observed the persisted native fields. The
+				// legacy complete-asset readback was only validated and discarded by
+				// TryBuildImportSuccessPayload; it adds no result to this consumer.
+				const auto Result = MakeShared<FJsonObject>();
+				Result->SetStringField(TEXT("status"), TEXT("succeeded"));
+				bFinalReadbackCompleted = TryCanonicalizeObject(Result, OutPayloadJson, ReadError);
+			}
+			else bFinalReadbackCompleted = TryReadbackImportPayload(
 				ImportContract.ProviderId, ImportContract.TargetIdentity, ImportContract.ObjectPath,
 				nullptr, ImportContract.ReadbackPayloadErrorCode,
 				ImportContract.CompileNotSettledErrorCode, TryReadback, OutPayloadJson, ReadError);
@@ -1510,15 +1442,158 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		}
 		if (!bFinalReadbackCompleted)
 		{
-			auto Error = NativeFailure(TEXT("domain_hjson_atomic_readback_not_executed"), TEXT("The asset operation reported applied without completing its required final readback."), TEXT("/final_readback"));
-			Error.Stage = ApplyOutcome.Phase;
-			Error.TargetPath = ImportContract.TargetIdentity;
-			Error.MutationStarted = true;
-			Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
-			Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
-			return Fail(OutError, MoveTemp(Error));
+			auto Notice = Contract::FDiagnostic::Failure(TEXT("domain_hjson_observation_pending"),
+				TEXT("The native operation was applied; its final observation is incomplete. Do not replay the mutation."), ApplyOutcome.Phase);
+			Notice.TargetPath = ImportContract.TargetIdentity;
+			UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Notice.Code, Notice, TEXT("final_readback"));
+			OutPayloadJson = TEXT("{\"status\":\"succeeded\",\"readback_status\":\"pending\",\"retry_import\":false}");
+			return AppendRecoveryNotice(RecoveryNotice, OutPayloadJson, OutError);
 		}
 		return true;
+	}
+
+	static bool IsPropertyImportTarget(const UeAgentAuthoringState::FReadRequest& Request, const FString& TargetSemanticId)
+	{
+		return TargetSemanticId.IsEmpty() ? Request.IsExportTarget() : Request.SemanticId == TargetSemanticId;
+	}
+
+	static TArray<int32> RootObservationRequests(const FResolvedSemanticWorkspace& Workspace,
+		const TArray<UeAgentAuthoringState::FReadRequest>& Requests, const FString& TargetSemanticId, bool bIncludeTarget)
+	{
+		using UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer;
+		TArray<int32> Selected;
+		if (!FScopedDurableConsumer::HasActualStateConsumer() || !HasOnlyRootPropertyIntents(Workspace)) return Selected;
+		const auto IsRoot = [&](const UeAgentAuthoringState::FReadRequest& Request) {
+			return IsPropertyImportTarget(Request, TargetSemanticId);
+		};
+		TSet<const UObject*> RootObjects;
+		for (const auto& Request : Requests)
+			if (IsRoot(Request)) RootObjects.Add(Request.RootObject);
+		TSet<FString> Edited;
+		for (const auto& Id : *Workspace.GetEditedUnitIds())
+			if (const auto* Unit = Workspace.GetModel()->FindUnit(Id)) Edited.Add(Unit->GetTargetIdentityKey());
+		for (int32 Index = 0; Index < Requests.Num(); ++Index) {
+			const auto& Request = Requests[Index];
+			const FString& Key = Request.SnapshotIdentityOverride.IsSet()
+				? Request.SnapshotIdentityOverride->CanonicalKey : Request.TargetIdentity.CanonicalKey;
+			if ((bIncludeTarget && IsRoot(Request)) || (Request.SemanticId == TEXT("core.property") && Request.RootObject
+				&& RootObjects.Contains(Request.RootObject) && !Edited.Contains(Key))) Selected.Add(Index);
+		}
+		return Selected;
+	}
+
+	static void ObserveOtherRootProperties(const FResolvedSemanticWorkspace& Workspace,
+		TArray<UeAgentAuthoringState::FReadRequest>& Requests, const bool bBefore, const FString& TargetSemanticId = FString())
+	{
+		using UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer;
+		const TArray<int32> Selected = RootObservationRequests(Workspace, Requests, TargetSemanticId, !bBefore);
+		TArray<UeAgentAuthoringState::FReadRequest> OtherFields;
+		for (int32 I = Selected.Num() - 1; I >= 0; --I) {
+			OtherFields.Add(MoveTemp(Requests[Selected[I]]));
+			Requests.RemoveAt(Selected[I], 1, EAllowShrinking::No);
+		}
+		if (OtherFields.IsEmpty()) return;
+		UeAgentAuthoringState::FCaptureResult Capture;
+		if (!UeAgentAuthoringState::CaptureSnapshot(OtherFields, Capture)) {
+			FScopedDurableConsumer::MarkObservationPending();
+			UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("root_property_observation_pending"),
+				Capture.Diagnostic, TEXT("root_property_observation"));
+			return;
+		}
+		const UeAgentAuthoringState::FStateSnapshot Empty;
+		FScopedDurableConsumer::ObserveActualState(bBefore ? Capture.Snapshot : Empty, bBefore ? Empty : Capture.Snapshot);
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=root_property_observation stage=%s entries=%d edited_fields_reused_from_native=true complete_asset_model=false"),
+			bBefore ? TEXT("before") : TEXT("persisted"), Capture.Snapshot.Num());
+	}
+
+	void SelectPropertyImportReadRequests(const FResolvedSemanticWorkspace& Workspace,
+		TArray<UeAgentAuthoringState::FReadRequest>& Requests, const FString& TargetSemanticId)
+	{
+		if (Workspace.GetModel()->IsCompiled() || !Workspace.GetEditedUnitIds().IsSet()) return;
+		ObserveOtherRootProperties(Workspace, Requests, true, TargetSemanticId);
+		TMap<FString, TSet<FString>> Fields;
+		for (const FString& Id : *Workspace.GetEditedUnitIds()) {
+			const auto* Unit = Workspace.GetModel()->FindUnit(Id);
+			if (Unit) Fields.FindOrAdd(Unit->GetTargetIdentityKey()).Add(Unit->GetSemanticTypeRef());
+		}
+		const int32 Candidates = Requests.Num();
+		Requests.RemoveAll([&](const UeAgentAuthoringState::FReadRequest& Request) {
+			if (IsPropertyImportTarget(Request, TargetSemanticId)) return false;
+			const FString& Key = Request.SnapshotIdentityOverride.IsSet()
+				? Request.SnapshotIdentityOverride->CanonicalKey : Request.TargetIdentity.CanonicalKey;
+			const auto* Semantics = Fields.Find(Key);
+			return !Semantics || !Semantics->Contains(Request.SemanticId);
+		});
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=property_current_requests candidates=%d selected=%d edited=%d"),
+			Candidates, Requests.Num(), Workspace.GetEditedUnitIds()->Num());
+	}
+
+	bool CapturePropertyImportState(const FResolvedSemanticWorkspace& Workspace,
+		const TArray<UeAgentAuthoringState::FReadRequest>& Requests, UeAgentAuthoringState::FCaptureResult& OutCapture,
+		const FString& TargetSemanticId)
+	{
+		using namespace UeAgentAuthoringState;
+		using UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer;
+		if (!CaptureSnapshot(Requests, OutCapture)) return false;
+		const TArray<int32> Selected = RootObservationRequests(Workspace, Requests, TargetSemanticId, true);
+		if (Selected.IsEmpty()) return true;
+
+		// Uncompiled property input already handed off its neighbouring fields before planning.
+		// A complete planning capture still owns them. Borrow exactly the facts in this real read.
+		TArray<int32> Indices;
+		Indices.Reserve(Selected.Num());
+		for (const int32 Index : Selected) {
+			const auto& Request = Requests[Index];
+			const auto& Identity = Request.SnapshotIdentityOverride.IsSet()
+				? Request.SnapshotIdentityOverride.GetValue() : Request.TargetIdentity;
+			Indices.Add(OutCapture.Snapshot.FindEntryIndex(Request.SemanticId, Identity.CanonicalKey));
+		}
+		FStateSnapshot Before;
+		if (!OutCapture.Snapshot.TrySelectEntries(Indices, Before)) {
+			FScopedDurableConsumer::MarkObservationPending();
+			auto Error = Contract::FDiagnostic::Failure(TEXT("root_property_observation_pending"),
+				TEXT("The native root-property observation could not bind its captured request identities."), TEXT("root_property_observation"));
+			UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Error.Code, Error, TEXT("root_property_observation"));
+		} else {
+			FScopedDurableConsumer::ObserveActualState(Before, FStateSnapshot());
+		}
+		return true;
+	}
+
+	bool HasOnlyRootPropertyIntents(const FResolvedSemanticWorkspace& Workspace)
+	{
+		// A compiler/cache representation is not an operation kind. The same
+		// addressed root properties use the same native reads and final consumer.
+		if (!Workspace.GetEditedUnitIds().IsSet() || Workspace.GetEditedUnitIds()->IsEmpty()) return false;
+		for (const auto& Id : *Workspace.GetEditedUnitIds()) {
+			const auto* Unit = Workspace.GetModel()->FindUnit(Id);
+			if (!Unit || Unit->GetSemanticTypeRef() != TEXT("core.property")) return false;
+			const auto* Owner = Workspace.GetModel()->FindUnit(Unit->GetOwnerRef());
+			TSet<FString> Seen;
+			while (Owner && Owner->GetUnitKind() != ESemanticUnitKind::TargetState) {
+				if (Owner->GetUnitKind() == ESemanticUnitKind::ItemState || Seen.Contains(Owner->GetUnitId())) return false;
+				Seen.Add(Owner->GetUnitId());
+				Owner = Workspace.GetModel()->FindUnit(Owner->GetOwnerRef());
+			}
+			if (!Owner) return false;
+		}
+		return true;
+	}
+
+	void SelectRootPropertyImportReadRequests(const FResolvedSemanticWorkspace& Workspace,
+		TArray<UeAgentAuthoringState::FReadRequest>& Requests)
+	{
+		if (HasOnlyRootPropertyIntents(Workspace)) SelectPropertyImportReadRequests(Workspace, Requests);
+	}
+
+	bool TryBuildPropertyImportCurrentCapture(const FResolvedSemanticWorkspace* Workspace, const FString& TargetKind,
+		const FString& ProfileId, const UeAgentAuthoringState::FStateSnapshot& Snapshot, FUeAgentResourceTracker& Resources,
+		StateSemantic::FUeAgentCanonicalSnapshotPtr& OutSnapshot, FAuthoringModelPtr& OutModel, FWorkspaceError& OutError)
+	{
+		if (Workspace && !Workspace->GetModel()->IsCompiled() && HasOnlyRootPropertyIntents(*Workspace))
+			return TryBuildScopedCanonicalAuthoringCapture(TargetKind, ProfileId, Snapshot, Resources, OutSnapshot,
+				OutModel, OutError, &Workspace->GetModel().Get());
+		return TryBuildCanonicalAuthoringCapture(TargetKind, ProfileId, Snapshot, Resources, OutSnapshot, OutModel, OutError);
 	}
 
 	bool TryCoordinateSemanticWorkspaceImport(
@@ -1556,7 +1631,7 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		if (!TryPrepareSemanticWorkspaceChanges(
 				Workspace, CurrentModel, CurrentSnapshot, MoveTemp(DescriptorIdentity),
 				RequestId, IdempotencyKey, Caller, ExpectedRootOwnerPath, Resources,
-				Projection, Prepared, ImportError)
+				Projection, Prepared, ImportError, &ImportContract.NativeStructureSemanticIds)
 			|| !Prepared.IsValid())
 		{
 			return Fail(OutError, ImportError.IsValid() ? ImportError
@@ -1586,7 +1661,12 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		ApplyOutcome.FinalReadback = [&](UeAgentAuthoringWorkspaceTransaction::FOperationFailure& Failure)
 		{
 			FWorkspaceError ReadError;
-			bFinalReadbackCompleted = TryReadbackImportPayload(
+			if (HasOnlyRootPropertyIntents(*Workspace)) {
+				const auto Result = MakeShared<FJsonObject>();
+				Result->SetStringField(TEXT("status"), TEXT("succeeded"));
+				bFinalReadbackCompleted = TryCanonicalizeObject(Result, OutPayloadJson, ReadError);
+			}
+			else bFinalReadbackCompleted = TryReadbackImportPayload(
 				ImportContract.ProviderId, ImportContract.TargetIdentity, ImportContract.ObjectPath,
 				nullptr, ImportContract.ReadbackPayloadErrorCode,
 				ImportContract.CompileNotSettledErrorCode, TryReadback, OutPayloadJson, ReadError);
@@ -1623,7 +1703,21 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 					&& Change.GetExpectedBefore().IsValid() && Change.GetProposedAfter().IsValid()
 					&& !Change.GetIdentity().GetSelector(CanonicalAuthoringTargetIdentitySelector).IsEmpty();
 			}) || !NativeNormalization.GetCreatedProperties().IsEmpty();
-			if (ImportContract.BuildFinalReadRequests && bHasValueIntent)
+			if (ImportContract.BuildFinalReadRequests && HasOnlyRootPropertyIntents(*Workspace)) {
+				TArray<UeAgentAuthoringState::FReadRequest> RootRequests;
+				Contract::FDiagnostic Detail;
+				if (ImportContract.BuildFinalReadRequests(RootRequests, Detail)) ObserveOtherRootProperties(*Workspace, RootRequests, false);
+				else {
+					UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer::MarkObservationPending();
+					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("root_property_observation_pending"), Detail, TEXT("root_property_observation"));
+				}
+			}
+			// Root property descriptors are decoded, applied and read back by the
+			// shared native ObjectApply owner. Do not recapture a complete asset
+			// solely to compare those same fields a second time. Structured domain
+			// intents and newly created properties retain their semantic observation.
+			if (ImportContract.BuildFinalReadRequests && bHasValueIntent
+				&& (!HasOnlyRootPropertyIntents(*Workspace) || !NativeNormalization.GetCreatedProperties().IsEmpty()))
 			{
 				TArray<UeAgentAuthoringState::FReadRequest> Requests;
 				Contract::FDiagnostic CaptureError;
@@ -1639,7 +1733,7 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 				{
 					FWorkspaceError IntentError;
 					if (!TryVerifySemanticWorkspaceValueIntent(*Prepared, Capture.Snapshot, IntentError, IntentDocumentSources,
-						&NativeNormalization, &Requests, ApplyOutcome.GraphReferenceBindings))
+						&NativeNormalization, &Requests, ApplyOutcome.GraphReferenceBindings, ImportContract.ProjectObservedGraphNodeFields))
 						UeAgentAuthoringDiagnostics::ReportConsistencyWarning(IntentError.GetCode(),
 							IntentError.GetDiagnostic(), TEXT("final_intent_readback"));
 				}
@@ -1744,13 +1838,12 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		}
 		if (!bFinalReadbackCompleted)
 		{
-			auto Error = NativeFailure(TEXT("domain_hjson_atomic_readback_not_executed"), TEXT("The semantic workspace operation reported applied without completing its required final readback."), TEXT("/final_readback"));
-			Error.Stage = ApplyOutcome.Phase;
-			Error.TargetPath = ImportContract.TargetIdentity;
-			Error.MutationStarted = true;
-			Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
-			Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
-			return Fail(OutError, MoveTemp(Error));
+			auto Notice = Contract::FDiagnostic::Failure(TEXT("domain_hjson_observation_pending"),
+				TEXT("The native operation was applied; its final observation is incomplete. Do not replay the mutation."), ApplyOutcome.Phase);
+			Notice.TargetPath = ImportContract.TargetIdentity;
+			UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Notice.Code, Notice, TEXT("final_readback"));
+			OutPayloadJson = TEXT("{\"status\":\"succeeded\",\"readback_status\":\"pending\",\"retry_import\":false}");
+			return AppendRecoveryNotice(RecoveryNotice, OutPayloadJson, OutError);
 		}
 		return true;
 	}

@@ -12,6 +12,7 @@ class FJsonValue;
 namespace UE::UAI::HjsonWorkspace { class FWorkspaceError; struct FGraphNodeReferenceBinding; }
 namespace UE::UAI::Composition::HjsonImport { class FPreparedAuthoringImport; struct FSemanticWorkspaceChangeProjection; }
 namespace UeAgentDetailsAuthoringService { struct FScopedPropertyIntent; }
+namespace UeAgentAuthoringState { class FStateSnapshot; }
 
 namespace UeAgentEqsAuthoring
 {
@@ -19,6 +20,8 @@ namespace UeAgentEqsAuthoring
 		UAIGraphNode*& OutNode, UE::UAI::HjsonWorkspace::FWorkspaceError& OutError);
 	bool ValidateGraphDocument(const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool ReadGraphDocument(UEnvQuery& Query, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError);
+	bool ReadGraphDocument(UEnvQuery& Query, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError,
+		TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure);
 	bool ApplyGraphDocument(UEnvQuery& Query, const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError);
 	bool ApplyGraphDocument(UEnvQuery& Query, const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError,
 		TArray<UeAgentDetailsAuthoringService::FScopedPropertyIntent>* OutPropertyIntents);

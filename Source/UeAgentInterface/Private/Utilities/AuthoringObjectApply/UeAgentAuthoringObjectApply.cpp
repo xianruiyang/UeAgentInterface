@@ -642,10 +642,20 @@ bool ResolveReadableOwnedProperties(UObject* NativeObject,
     UeAgentDetailsAuthoringService::FCapturePolicy Policy;
     Policy.bShowDefaultsOnly = Options.bShowDefaultsOnly;
     Policy.bUseInstanceEditability = Options.bUseInstanceEditability;
+    TSet<FString> RequestedProperties;
+    if (ReadableProperties->Type == EJson::Object) {
+      for (const auto& Category : ReadableProperties->AsObject()->Values) {
+        if (!Category.Value.IsValid() || Category.Value->Type != EJson::Object) continue;
+        for (const auto& Property : Category.Value->AsObject()->Values) RequestedProperties.Add(Property.Key);
+      }
+    }
+    Policy.IncludeProperty = [RequestedProperties = MoveTemp(RequestedProperties)](
+        const FProperty* Property, const void*, const UObject*) {
+      return Property && RequestedProperties.Contains(Property->GetName());
+    };
     UeAgentAuthoringState::FStateSnapshot Snapshot;
-    TSharedPtr<FJsonObject> Document;
     FDiagnostic Error;
-    if (!UeAgentDetailsAuthoringService::CaptureObjectProperties(NativeObject, Policy, Snapshot, Document, Error)
+    if (!UeAgentDetailsAuthoringService::CaptureObjectSnapshot(NativeObject, Policy, Snapshot, Error)
         || !UeAgentDetailsAuthoringService::DecodeReadableProperties(Snapshot, ReadableProperties, Properties, Error)) {
       SetFailure(OutFailure, MoveTemp(Error), FString(), PropertyPath);
       return false;

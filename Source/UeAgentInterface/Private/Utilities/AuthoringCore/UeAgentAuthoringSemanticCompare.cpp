@@ -372,6 +372,11 @@ namespace UeAgentAuthoringSemanticCompare
 		TOptional<FValueComparison> CompareCollection(const FDeclaredValue& AType, const TSharedPtr<FJsonValue>& A,
 			const FDeclaredValue& BType, const TSharedPtr<FJsonValue>& B)
 		{
+			// A public type_id-only declaration still supplies child policies, but
+			// does not select one of the native codec collection representations.
+			FString TypeId;
+			if (!AType.Type->HasField(TEXT("kind")) && AType.Type->TryGetStringField(TEXT("type_id"), TypeId) && !TypeId.IsEmpty())
+				return {};
 			const FString Kind = AType.Type->GetStringField(TEXT("kind"));
 			const auto JsonKind = [](const TSharedPtr<FJsonValue>& Value) -> FString {
 				if (!Value) return TEXT("absent");

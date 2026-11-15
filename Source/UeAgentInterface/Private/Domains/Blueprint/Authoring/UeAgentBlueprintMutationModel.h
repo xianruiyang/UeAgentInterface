@@ -112,6 +112,12 @@ namespace UeAgentBlueprintAuthoring
 			FDiagnostic& OutError);
 
 		bool RequiresCompile() const;
+		/** Graph identities and presence on the requested side of the prepared edit. */
+		bool ReparentsBlueprint() const;
+		void AppendGraphObservationContext(bool bAfter, TMap<FString, FString>& Context) const;
+		const TMap<FGuid, FName>& GetObservedVariableDefaults() const;
+		void AppendMemberObservationContext(bool bAfter, TMap<FString, FString>& Context) const;
+		bool AppendComponentObservationContext(bool bAfter, TMap<FString, FString>& Context, FDiagnostic& Error) const;
 		bool VerifyPropertyIntent(UBlueprint& Blueprint, FDiagnostic& OutError) const;
 		/** Frozen property and relationship intent, rebound to the current native owner. */
 		bool VerifyIntent(UBlueprint& Blueprint, FDiagnostic& OutError) const;

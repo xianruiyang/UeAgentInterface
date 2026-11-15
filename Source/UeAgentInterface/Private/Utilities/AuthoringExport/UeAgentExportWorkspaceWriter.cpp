@@ -371,7 +371,16 @@ namespace UeAgentExportWorkspaceWriter
 		const FUTF8ToTCHAR Decoded(
 			reinterpret_cast<const ANSICHAR*>(Utf8Text.GetData()),
 			Utf8Text.Num());
-		return MeasureText(FString(Decoded.Length(), Decoded.Get()));
+		// The input is the actual UTF-8 formatter/file body. Its byte length is
+		// already known: do not allocate a second FString and encode it again.
+		FTextMetrics Result;
+		Result.CharacterCount = Decoded.Length();
+		Result.Utf8Bytes = Utf8Text.Num();
+		for (int32 Index = 0; Index < Decoded.Length(); ++Index)
+			if (Decoded.Get()[Index] == TEXT('\n')) ++Result.LineCount;
+		if (Decoded.Length() && Decoded.Get()[Decoded.Length() - 1] != TEXT('\n')) ++Result.LineCount;
+		Result.TokenProxy = (Result.CharacterCount + 3) / 4;
+		return Result;
 	}
 
 	void FTextMetrics::Add(const FTextMetrics& Other)

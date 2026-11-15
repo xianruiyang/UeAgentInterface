@@ -17,6 +17,7 @@
 #include "Dom/JsonValue.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h"
+#include "QueryOwners/AiBehavior/UeAgentSmartObjectMenu.h"
 #include "UObject/StrongObjectPtr.h"
 #include "SmartObjectDefinition.h"
 #include "SmartObjectAnnotation.h"
@@ -340,13 +341,19 @@ namespace UeAgentSmartObjectAuthoring
 				&& (!Items->HasField(Parent) || Items->GetObjectField(Parent)->GetStringField(TEXT("kind")) != TEXT("slot")))
 				return Reject(TEXT("smart_object_parent_invalid"), TEXT("The item's parent must identify the root settings or an existing slot."), TEXT("parent"), nullptr, MakeShared<FJsonValueString>(TEXT("root settings or an existing slot")));
 			if (Kind == TEXT("slot") && Parent != TEXT("root")) return Reject(TEXT("smart_object_slot_parent_invalid"), TEXT("SmartObject slots must belong directly to the root settings."), TEXT("parent"), nullptr, MakeShared<FJsonValueString>(TEXT("root settings")));
-			if (Kind == TEXT("definition_data") && Parent == TEXT("root")
+			if (Kind == TEXT("definition_data")
 				&& (NewItems.Contains(Pair.Key) || !Before->HasField(Pair.Key)
 					|| Before->GetObjectField(Pair.Key)->GetStringField(TEXT("parent")) != Parent))
 			{
 				const auto* Type = LoadObject<UScriptStruct>(nullptr, *Item->GetStringField(TEXT("class_path")));
-				if (Type && Type->IsChildOf(FSmartObjectSlotAnnotation::StaticStruct()))
+				if (Parent == TEXT("root") && Type && Type->IsChildOf(FSmartObjectSlotAnnotation::StaticStruct()))
 					return Reject(TEXT("smart_object_slot_annotation_requires_slot_parent"), TEXT("A slot annotation must belong to a slot."), TEXT("parent"), nullptr, MakeShared<FJsonValueString>(TEXT("slot")));
+				bool bAvailable = false;
+				QueryOwners::AiBehavior::VisitSmartObjectDataMenu(Definition, Parent != TEXT("root"),
+					[&](UScriptStruct& Choice) { bAvailable |= Type == &Choice; });
+				if (Type && !bAvailable) return Reject(TEXT("smart_object_data_candidate_invalid"),
+					TEXT("The selected definition data type is unavailable at the destination."),
+					TEXT("candidate"), Item->TryGetField(TEXT("class_path")), nullptr);
 			}
 			Orders.FindOrAdd(Kind + TEXT(":") + Parent).Add(Item);
 		}

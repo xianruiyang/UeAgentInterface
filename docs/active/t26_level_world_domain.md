@@ -178,8 +178,9 @@ An optional top-level `analysis_ref` on semantic Level Import validates the edit
 workspace, canonical prepared native changes, relevant live objects/assets and
 neighborhood membership before mutation. Supported structure edits use the formal
 hierarchy/collection path. Unsupported raw manifest edit kinds are rejected by
-formal preparation before mutation, not enabled by analysis. A normal persistent
-import reloads the World for independent readback; a related snapshot survives an
+formal preparation before mutation, not enabled by analysis. Persistent import
+independently reads the saved World, using the isolated-package scope below where
+eligible and the existing World reload otherwise; a related snapshot survives an
 unrelated reload only after exact identities, measured state, asset dependencies
 and neighborhood membership have been rechecked. The package name alone is not
 proof that geometry is unchanged.
@@ -327,13 +328,17 @@ runtime state or name-based gameplay lookups. Inspect affected known owners usin
 their existing domain entry; report uncovered consumers without claiming a global
 reference scan. Native deletion is not a generic reference-remapping service.
 
-Keep existing attachment state when only changing a mesh. The current Actor
-attachment apply path uses the exported `parent_managed_id`, not the hierarchy
-key or native `object_ref`. It has no general readable-parent selector here;
-without a valid public value for a new parent, do not invent an internal identifier
-or treat a path as that identifier. Preserve a needed existing logical parent or
-identify the unsupported attachment migration separately. Ordinary reflected
-`object_ref` rebinding does not validate this different relation type.
+Keep existing attachment state when only changing a mesh. Actor attachment uses
+the exported `parent_managed_id`, not the hierarchy key or native `object_ref`.
+For a new parent, query that Actor through `content_graph.items` with
+`fields: ["name", "managed_id"]` and copy its non-empty `managed_id` into the
+child's existing attachment field. This is a read-only lookup of the Actor's
+existing managed ownership, not permission to assign or change its identity.
+Actors without managed ownership return an empty string and cannot serve as a
+new parent through this contract; do not invent an identifier or substitute a
+path. An empty `parent_managed_id` on the child keeps its existing detach meaning.
+Old workspaces and already exported parent identifiers remain valid. Ordinary
+reflected `object_ref` rebinding uses its separate relation contract.
 
 The SDK examples and scoped property queries are in
 [CMD T26](../../../../UeAgentInterfaceCMD/docs/active/t26_level_world_domain.md#component-properties-and-same-actor-replacement).
@@ -345,11 +350,120 @@ transactions, persistence and readback are shared. Generated Level units carry a
 source resolver for their original semantic Actor rows, so candidate errors report the
 actual HJSON file and field location instead of the intermediate inline bundle.
 
+The default `export_mode="committed"` and automatic import refresh publish the
+workspace's accumulated successful HJSON commits and their actual native side
+effects. Independent UE edits remain for explicit `incremental` or `full` export.
+The common durable journal and publisher bind the consumption watermark to the
+successful complete workspace publication; generated writeback is not a second
+authored edit. Empty workspaces still initialize fully. See the common
+[export contract](../hjson-authoring/07_ImplementationConsistency.md#current-entry-points).
+For an existing valid directory workspace, typed empty intent stops before native
+capture and execution-model preparation. A pending successful commit is consumed
+by export; this no-op import does not advance its watermark. Current namespace,
+source bytes and required schema/reference checks still run.
+
+Supported ordinary component property edits select the addressed stable component
+and lightweight Actor identity/state prerequisites before building requests. Both
+native observations include that component's exported fields and actual collision
+side effects, without reading every sibling component. Metadata transforms include
+their attachment closure. Actor-wide edits and registered Blueprint component
+property notifications that rerun construction include the complete affected Actor.
+Known direct references and attachment relations expand that declared closure.
+The same preflight Before observation is used for attributable readback after save
+and reopen; actual values, rather than requested values, advance the baseline.
+Component membership and attachment transforms use the semantic delta of these
+scoped observations. The scalar property projection requires component property
+input and actual changes represented by numeric or Boolean literals on both sides.
+
+Component membership/reparent and supported Actor keyed create/remove operations
+use current complete membership of their affected owners plus actual added/removed
+unit evidence. Shared committed composition overlays those differences on the full
+accepted baseline, including stable ordering and derived dependency paths. An empty
+observation subset preserves an already accepted ordering binding with zero observed
+members; it does not claim that unobserved workspace members disappeared. Deletion
+includes known direct reference owners and publishes their actual native clearing.
+These are attribution boundaries, not claims about arbitrary global notification
+receivers: unrelated outside effects remain for explicit incremental/full export.
+World/WorldSettings, partitioned Worlds, unsupported native classes, unresolved
+collection identity and unclosed membership/attachment changes retain
+their named broader path. Optional cache/projection failure does not select that
+native business scope.
+
 The inactive authoring scratch world initializes a native scene so reflected editor
 property callbacks can inspect lighting/atmosphere state during preflight. It remains
 outside engine world contexts, with audio, physics simulation, navigation, AI and FX
 disabled. The same scratch owner releases the world after preparation/readback; native
 property notifications are not skipped to work around missing preview context.
+Native preview still needs an isolated owner context. Component updates keep
+their lifecycle image/checkpoint as well as shared prepared-property OriginalValue
+rollback and explicit original scene state. The lifecycle image is not counted as
+additional business capture or exported changes to sibling components.
+
+Persistent readback keeps the same semantic verifier. Besides the existing native
+Light/PostProcess property case, a closed single-Level, non-streaming, non-partitioned
+Engine-native scene can map StaticMesh/Light state and supported component properties
+to an independently loaded saved package. This includes external mesh/material
+references, CPD and collision state; current references and collision side effects
+are still observed. The mapped property accessor is rebuilt for the loaded object.
+Actor world transforms are derived from the persisted relative hierarchy without
+running construction or substituting requested values. Unknown/Blueprint classes,
+structure edits, multiple packages, unknown reference closures and mixed complex
+PostProcess Settings keep the existing full reload path. This is internal selection,
+with no import option or change to the default profile or persistence guarantees.
+For the existing Intensity/AttenuationRadius case, companion ComponentState reads
+on an unattached known Engine-native Light with a closed native component set use
+the same isolated reader. Unrelated Blueprint actors do not turn this into a whole
+World reload. Other fields, attachments and unknown affected owners retain the
+existing broader eligibility checks and full fallback.
+
+Semantic directory preparation also checks aggregate Actor updates against the
+actual current capture at the Level native-input boundary. For an unattached native
+StaticMeshActor with matching complete target selectors and no other Actor state or
+property edit, strictly equal converted native inputs do not schedule an Actor
+mutation. This accepts different decimal spellings of the same native double
+without changing the common exact-decimal comparator or adding a tolerance.
+Unknown classes, attachment, identity conflicts or conversion failures keep the
+existing path; explicit native bundle behavior is unchanged.
+
+During a native incremental capture, each request's actual owner is resolved once
+for that capture. Strict snapshot overlay reports the indices whose observations
+changed, so owner-closure expansion does not copy or scan every old observation
+again. Current field/schema/value/reference checks and the forced semantic probes
+remain; these local lookup results do not replace discovery of external edits.
+For a matching snapshot membership token, a bounded weak-membership/int32 position
+table can locate the prior entry without rebuilding a string-key map. Every current
+request still checks its complete semantic and target identity at that position;
+a mismatch uses the original exact lookup, and missing or duplicate entries reject
+the candidate. Current owners, schema, values and references are still observed.
+The table is replaced only after a successful capture, holds no UObject or snapshot
+strong reference, and is cleared with the capture candidate on Stop/PreExit.
+The successful observation candidate can transfer directly into the pending apply
+candidate only when World identity/path, profile, facts and the complete sealed
+snapshot storage match. This avoids rebuilding the same owner/schema indices from
+the same BeforeCapture; otherwise the original preparation runs. Snapshot storage
+uses copy-on-write for overlay/native-value release. The public snapshot separates
+immutable authoring entries from bounded current native bindings; Level reads both
+explicitly, while compatibility entry readers still return the current combined
+entry. Replacing a binding releases the obsolete native storage and does not retain
+an ancestor snapshot or an additional generation of whole probes.
+When the current capture proves the complete safe Engine-native root/field/schema
+subset, its unique indices feed candidate sealing directly. Unknown owners remain
+in the complete snapshot and are fully probed, but do not invalidate an independently
+proved native subset. After canonical consumers finish, each unique safe root and
+field is checked again; incomplete membership or changed declarations use the
+original index builder for the affected scope. Temporary weak
+root/field indices are then cleared. With no changed owner, probe selection consumes
+the ordered indices collected by actual observation and skips an empty closure pass;
+real owner changes still expand the full closure. The public baseline-aware reader
+may reuse a proven empty owned-array or builtin scalar authoring payload before encoding, while Level
+continues to discover all current requests and observe current values and references.
+This transfer does not restrict side effects to the edited IDs: collision profile
+changes still observe enabled/type/response changes and any resulting definition
+or unit membership changes. Unknown callbacks, Blueprint construction and incomplete
+impact proofs retain the broader capture path.
+Semantic-fact reuse compares the exact exported string spelling, including Actor
+labels, selectors, context and tags. Native FName identity remains unchanged; it
+cannot by itself prove that two exported text values have identical case.
 
 Actor transforms and their component properties can be edited in one import.
 Dependencies resolve the actual owning Actor even when the Actor and Component

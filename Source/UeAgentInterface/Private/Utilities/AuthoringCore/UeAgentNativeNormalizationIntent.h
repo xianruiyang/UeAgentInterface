@@ -30,6 +30,7 @@ namespace UeAgentNativeNormalizationIntent
 	struct FValueProof
 	{
 		FString Path;
+		FString ProposalPath;
 		EValueCompletion Completion = EValueCompletion::NativeProposal;
 		TSharedPtr<FJsonValue> SourceValue;
 		TSharedPtr<FJsonValue> NormalizedValue;
@@ -80,7 +81,7 @@ namespace UeAgentNativeNormalizationIntent
 		friend UEAGENTINTERFACE_API bool Record(const UeAgentAuthoringIdentity::FCanonicalIdentity&,
 			const TSharedPtr<FJsonValue>&, const TSharedPtr<FJsonValue>&,
 			const TSharedPtr<FJsonValue>&, UE::UAI::Contract::FDiagnostic&);
-		friend UEAGENTINTERFACE_API bool RecordValue(const FString&, const TSharedPtr<FJsonValue>&,
+		friend UEAGENTINTERFACE_API bool RecordValue(const FString&, const FString&, const TSharedPtr<FJsonValue>&,
 			const TSharedPtr<FJsonValue>&, UE::UAI::Contract::FDiagnostic&, const UeAgentAuthoringTypeDescriptors::FDescriptor*, const TSharedPtr<FJsonValue>&, EValueCompletion);
 		friend UEAGENTINTERFACE_API bool FinalizeValues(const UeAgentAuthoringState::FStateSnapshot&, UE::UAI::Contract::FDiagnostic&);
 	};
@@ -126,6 +127,11 @@ namespace UeAgentNativeNormalizationIntent
 	UEAGENTINTERFACE_API void RecordDecodedProperties(const FString& RootOwnerPath, const FString& RootTypePath,
 		const TArray<TSharedPtr<FJsonValue>>& Descriptors, const UeAgentAuthoringObjectApply::FPropertyIntent& Intent);
 	UEAGENTINTERFACE_API bool RecordValue(const FString& Path,
+		const TSharedPtr<FJsonValue>& SourceValue, const TSharedPtr<FJsonValue>& NormalizedValue, UE::UAI::Contract::FDiagnostic& Error,
+		const UeAgentAuthoringTypeDescriptors::FDescriptor* Type = nullptr, const TSharedPtr<FJsonValue>& ValueDefinition = nullptr,
+		EValueCompletion Completion = EValueCompletion::NativeProposal);
+	// The final verifier may key rows by captured identity while the proposal is still an ordered native array.
+	UEAGENTINTERFACE_API bool RecordValue(const FString& Path, const FString& ProposalPath,
 		const TSharedPtr<FJsonValue>& SourceValue, const TSharedPtr<FJsonValue>& NormalizedValue, UE::UAI::Contract::FDiagnostic& Error,
 		const UeAgentAuthoringTypeDescriptors::FDescriptor* Type = nullptr, const TSharedPtr<FJsonValue>& ValueDefinition = nullptr,
 		EValueCompletion Completion = EValueCompletion::NativeProposal);

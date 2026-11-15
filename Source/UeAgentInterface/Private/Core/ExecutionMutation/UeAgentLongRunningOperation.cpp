@@ -3,6 +3,7 @@
 #include "Dom/JsonValue.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
+#include <atomic>
 
 namespace UE::UAI::ExecutionMutation
 {
@@ -553,13 +554,17 @@ namespace UE::UAI::ExecutionMutation
 			bool bAdvanceInProgress = false;
 			bool bPortCallInFlight = false;
 			bool bRetrySafe = false;
+			FString SnapshotWire, ReceiptWire;
+			int64 WireBytes = 0;
+			bool bMetadataValid = false;
 		};
 
 		FState(
 			TSharedRef<ILongRunningOperationPort, ESPMode::ThreadSafe> InPort,
-			FUeAgentMonotonicClock InClock)
+			FUeAgentMonotonicClock InClock, FMetadataProjector InMetadataProjector)
 			: DefaultPort(MoveTemp(InPort))
 			, Clock(MoveTemp(InClock))
+			, MetadataProjector(MoveTemp(InMetadataProjector))
 		{
 		}
 
@@ -625,6 +630,55 @@ namespace UE::UAI::ExecutionMutation
 			return true;
 		}
 
+		void SealMetadata(FOperation& Operation)
+		{
+			if (!MetadataProjector) return;
+			const auto Snapshot = MakeSnapshot(Operation);
+			TOptional<FLongRunningOperationReceipt> Receipt;
+			if (Snapshot.IsTerminal()) Receipt.Emplace(Operation.Request.GetOperationId(), Operation.WorkIdentity,
+				Operation.Status, Operation.Diagnostic, Operation.bRetrySafe);
+			FString SnapshotWire, ReceiptWire;
+			bool bValid = MetadataProjector(Snapshot, Receipt.IsSet() ? &Receipt.GetValue() : nullptr, SnapshotWire, ReceiptWire);
+			int64 Bytes = SnapshotWire.GetAllocatedSize() + ReceiptWire.GetAllocatedSize();
+			// One current wire generation, never history. Oversized results keep
+			// the original GT path; this is a cache budget, not a public limit.
+			if (Bytes > 1024 * 1024) bValid = false;
+			if (!bValid) { SnapshotWire.Empty(); ReceiptWire.Empty(); Bytes = 0; }
+			const int64 OldBytes = Operation.WireBytes;
+			int64 Total = MetadataBytes.load();
+			while (true) {
+				if (Total - OldBytes + Bytes > 8 * 1024 * 1024) {
+					bValid = false; SnapshotWire.Empty(); ReceiptWire.Empty(); Bytes = 0;
+				}
+				if (MetadataBytes.compare_exchange_weak(Total, Total - OldBytes + Bytes)) break;
+			}
+			Operation.SnapshotWire = MoveTemp(SnapshotWire);
+			Operation.ReceiptWire = MoveTemp(ReceiptWire);
+			Operation.WireBytes = Bytes;
+			Operation.bMetadataValid = bValid;
+		}
+
+		class FMetadataReadScope final : public Contract::IUeAgentOperationReadScope
+		{
+		public:
+			FMetadataReadScope(const FState& InState, const FString& Id) : Owner(InState)
+			{
+				bStateLocked = Owner.Mutex.TryLock();
+				if (!bStateLocked) return;
+				const auto* Found = Owner.Operations.Find(Id);
+				if (Found) { Operation = &Found->Get(); bOperationLocked = Operation->Mutex.TryLock(); }
+			}
+			~FMetadataReadScope() override {
+				if (bOperationLocked) Operation->Mutex.Unlock();
+				if (bStateLocked) Owner.Mutex.Unlock();
+			}
+			bool IsAvailable() const { return bStateLocked && (!Operation || (bOperationLocked && Operation->bMetadataValid)); }
+		private:
+			const FState& Owner;
+			FOperation* Operation = nullptr;
+			bool bStateLocked = false, bOperationLocked = false;
+		};
+
 		static void SetTerminal(FOperation& Operation, const ELongRunningOperationStatus Status,
 			FExecutionMutationError Diagnostic, const bool bRetrySafe)
 		{
@@ -653,6 +707,8 @@ namespace UE::UAI::ExecutionMutation
 
 		TSharedRef<ILongRunningOperationPort, ESPMode::ThreadSafe> DefaultPort;
 		FUeAgentMonotonicClock Clock;
+		FMetadataProjector MetadataProjector;
+		std::atomic<int64> MetadataBytes{0};
 		mutable FCriticalSection Mutex;
 		TMap<
 			FString,
@@ -661,15 +717,41 @@ namespace UE::UAI::ExecutionMutation
 
 	FLongRunningOperationOwner::FLongRunningOperationOwner(
 		TSharedRef<ILongRunningOperationPort, ESPMode::ThreadSafe> InPort,
-		FUeAgentMonotonicClock InClock)
+		FUeAgentMonotonicClock InClock, FMetadataProjector InMetadataProjector)
 		: State(MakeShared<FState, ESPMode::ThreadSafe>(
 			MoveTemp(InPort),
-			MoveTemp(InClock)))
+			MoveTemp(InClock), MoveTemp(InMetadataProjector)))
 	{
 		checkf(State->Clock, TEXT("Long-running clock must be provided."));
 	}
 
 	FLongRunningOperationOwner::~FLongRunningOperationOwner() = default;
+
+	TUniquePtr<Contract::IUeAgentOperationReadScope> FLongRunningOperationOwner::TryBeginMetadataRead(const FString& OperationId) const
+	{
+		auto Scope = MakeUnique<FState::FMetadataReadScope>(*State, NormalizeText(OperationId));
+		if (!Scope->IsAvailable()) return {};
+		return Scope;
+	}
+	bool FLongRunningOperationOwner::TryCopyMetadata(const FString& OperationId, const FString& OwnerLeaseId,
+		const FString& ServerSessionId, bool bReceipt, FString& OutWire, FExecutionMutationError& OutError) const
+	{
+		OutError.Reset(); OutWire.Reset();
+		// Do not acquire an owning FOperation ref on the reader thread: removal
+		// and destruction of its native request/resources remain on the writer.
+		FScopeLock StateLock(&State->Mutex);
+		const auto* Found = State->Operations.Find(NormalizeText(OperationId));
+		if (!Found) { SetError(OutError, TEXT("operation_not_found"), TEXT("The referenced operation is no longer registered in this session."), TEXT("operation_ref")); return false; }
+		const auto& Operation = Found->Get();
+		FScopeLock OperationLock(&Operation.Mutex);
+		if (!FState::ValidateAccess(Operation, OwnerLeaseId, ServerSessionId, OutError)) return false;
+		if (bReceipt && Operation.Phase != ELongRunningOperationPhase::Terminal) {
+			SetError(OutError, TEXT("operation_not_terminal"), TEXT("The operation must reach a terminal state before its receipt can be read or its resources released."), TEXT("phase")); return false;
+		}
+		if (!Operation.bMetadataValid) return false;
+		OutWire = bReceipt ? Operation.ReceiptWire : Operation.SnapshotWire;
+		return true;
+	}
 
 	bool FLongRunningOperationOwner::Accept(
 		const FLongRunningOperationRequest& Request,
@@ -712,6 +794,7 @@ namespace UE::UAI::ExecutionMutation
 					MoveTemp(OperationPort),
 					State->Clock);
 		State->Operations.Add(Request.GetOperationId(), Operation);
+		State->SealMetadata(*Operation);
 		OutSnapshot = FState::MakeSnapshot(*Operation);
 		return true;
 	}
@@ -943,6 +1026,7 @@ namespace UE::UAI::ExecutionMutation
 
 			{
 				FScopeLock Lock(&Operation->Mutex);
+				ON_SCOPE_EXIT { State->SealMetadata(*Operation); };
 				Operation->bPortCallInFlight = false;
 				if (!bPortSucceeded)
 				{
@@ -1208,6 +1292,7 @@ namespace UE::UAI::ExecutionMutation
 		bool bDeliverStop = false;
 		{
 			FScopeLock Lock(&Operation->Mutex);
+			ON_SCOPE_EXIT { State->SealMetadata(*Operation); };
 			if (!FState::ValidateAccess(
 				*Operation,
 				OwnerLeaseId,
@@ -1278,6 +1363,7 @@ namespace UE::UAI::ExecutionMutation
 			PortError);
 		{
 			FScopeLock Lock(&Operation->Mutex);
+			ON_SCOPE_EXIT { State->SealMetadata(*Operation); };
 			Operation->bPortCallInFlight = false;
 			if (bStopped)
 			{
@@ -1382,6 +1468,7 @@ namespace UE::UAI::ExecutionMutation
 			return false;
 		}
 		State->Operations.Remove(NormalizedOperationId);
+		State->MetadataBytes.fetch_sub(Operation->WireBytes);
 		return true;
 	}
 
@@ -1452,6 +1539,7 @@ namespace UE::UAI::ExecutionMutation
 			return false;
 		}
 		FScopeLock Lock(&Operation->Mutex);
+		ON_SCOPE_EXIT { State->SealMetadata(*Operation); };
 		if (CallerId.IsEmpty() || Operation->Request.GetOrigin().CallerId != CallerId)
 		{
 			SetError(OutError, TEXT("operation_caller_mismatch"),

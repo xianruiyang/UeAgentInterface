@@ -45,6 +45,11 @@ namespace UE::UAI::HjsonWorkspace
 		int32 CapturedIndex = INDEX_NONE;
 		FString RelativePath;
 		StateSemantic::FUeAgentCanonicalValuePtr Value;
+		UEAGENTINTERFACE_API bool TryBuildApplyItem(const StateSemantic::FUeAgentCanonicalValueRef& Business,
+			ContextResource::FUeAgentResourceTracker& Resources, StateSemantic::FUeAgentCanonicalValuePtr& Out,
+			StateSemantic::FUeAgentStateSemanticError& Error) const;
+		// Keep the original JSON leaves for native field-level diagnostics and deferred text identities.
+		UEAGENTINTERFACE_API TSharedPtr<FJsonValue> BuildReadableApplyItem(const TSharedPtr<FJsonValue>& Source) const;
 	};
 
 	UEAGENTINTERFACE_API bool TryResolveOrderedOwnedItems(
@@ -82,6 +87,8 @@ namespace UE::UAI::HjsonWorkspace
 		TMap<FString, TSet<FString>> BranchFields;
 		/** A branch containing these alternatives requires exactly one, rather than every member. */
 		TArray<TSet<FString>> ExclusiveBranchFields;
+		// Hidden context for an authored object absent from the captured record and its factory default.
+		FString ParentObjectContextField;
 		bool IsValid() const { return !VisibleTopLevelFields.IsEmpty(); }
 		bool Allows(const FString& Name) const
 		{
@@ -160,6 +167,8 @@ namespace UE::UAI::HjsonWorkspace
 		FString OrderRankField;
 		TArray<FString> OrderRankGroupFields;
 		TSet<FString> UnorderedKinds;
+		/** Some rows expose the native index of their owning relationship. Use the resolved original relationships and ranks. */
+		TFunction<void(const FJsonObject& Baseline, const FJsonObject& Input, FJsonObject& Resolved)> ProjectDerivedOrder;
 	/** Native identities derived from these semantic fields may change on update.
 	 * Their aliases are resolved from the original request's normalized fields. */
 	TMap<FString, TArray<FString>> DerivedIdentityFieldsByKind;

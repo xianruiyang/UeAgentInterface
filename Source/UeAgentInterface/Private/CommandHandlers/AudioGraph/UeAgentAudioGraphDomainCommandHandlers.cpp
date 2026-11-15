@@ -88,7 +88,8 @@ namespace UE::UAI::CommandHandlers::AudioGraph
 		bool bReadOnly = false;
 		if (!DomainAdapters::AudioGraph::TryExecuteContentGraph(
 			Request.GetCommandId(), Request.GetTargetIdentity(),
-			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
+			Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

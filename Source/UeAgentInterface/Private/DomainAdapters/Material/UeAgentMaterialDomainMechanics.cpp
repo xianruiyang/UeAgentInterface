@@ -400,7 +400,7 @@ namespace UE::UAI::DomainAdapters::Material
 			UeAgentMaterialAuthoring::FMaterialAuthoringCapture Capture;
 			UE::UAI::Contract::FDiagnostic CaptureError;
 			if (!UeAgentMaterialAuthoring::TryCaptureMaterialAuthoringState(
-					*Asset, TEXT("llm_authoring"), Capture, CaptureError))
+					*Asset, TEXT("llm_authoring"), Capture, CaptureError, Document.SemanticWorkspace.Get()))
 			{
 				CompleteNative(CaptureError, Target);
 				OutError.SetFailure(MoveTemp(CaptureError));
@@ -417,10 +417,7 @@ namespace UE::UAI::DomainAdapters::Material
 				Document.SemanticWorkspace.ToSharedRef(),
 				Capture.Model.ToSharedRef(),
 				Capture.CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("material.semantic_workspace"),
-					1,
-					Capture.Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("material.semantic_workspace"), *Capture.Model),
 				Asset->GetPathName(),
 				Resources,
 				{
@@ -432,7 +429,7 @@ namespace UE::UAI::DomainAdapters::Material
 					TEXT("material_semantic_apply_failed"),
 					TEXT("material_domain_json_invalid"),
 					TEXT("material_domain_compile_not_settled"),
-					[TargetObjectPath](TArray<UeAgentAuthoringState::FReadRequest>& Requests, UE::UAI::Contract::FDiagnostic& Error)
+					[TargetObjectPath, bRootOnly = HasOnlyRootPropertyIntents(*Document.SemanticWorkspace)](TArray<UeAgentAuthoringState::FReadRequest>& Requests, UE::UAI::Contract::FDiagnostic& Error)
 					{
 						UObject* Native = StaticLoadObject(UObject::StaticClass(), nullptr, *TargetObjectPath);
 						if (!Native)
@@ -441,7 +438,8 @@ namespace UE::UAI::DomainAdapters::Material
 								TEXT("The material target could not be loaded for semantic readback."), TargetObjectPath, TEXT("/target_present"));
 							return false;
 						}
-						return UeAgentMaterialAuthoring::BuildAssetExportSnapshotReadRequests(*Native, Requests, Error);
+						return bRootOnly ? UeAgentMaterialAuthoring::BuildRootPropertyReadRequests(*Native, Requests, Error)
+							: UeAgentMaterialAuthoring::BuildAssetExportSnapshotReadRequests(*Native, Requests, Error);
 					}},
 				[AssetKind, TargetPackage, &Asset, &Document](
 					const FString& RequestId,
@@ -467,24 +465,11 @@ namespace UE::UAI::DomainAdapters::Material
 					FWorkspaceError GraphError;
 					if (AssetKind == TEXT("material_instance"))
 					{
-						const auto& Units = Prepared.GetWorkspace()->GetModel()->GetUnits();
-						TMap<FString, int32> UnitsByTarget;
-						for (int32 Index = 0; Index < Units.Num(); ++Index)
-						{
-							const auto& Unit = Units[Index];
-							if ((Unit.GetSemanticTypeRef() == UeAgentMaterialAuthoring::ExportInstanceParameterSemanticId
-								|| Unit.GetSemanticTypeRef() == UeAgentMaterialAuthoring::ExportInstanceLayersSemanticId)
-								&& !UnitsByTarget.Contains(Unit.GetTargetIdentityKey()))
-								UnitsByTarget.Add(Unit.GetTargetIdentityKey(), Index);
-						}
 						for (const auto& Change : Prepared.GetChangeSetDraft().GetChanges())
 						{
-							const int32* Canonical = UnitsByTarget.Find(Change.GetIdentity().GetCanonicalKey());
-							const int32* Selector = UnitsByTarget.Find(Change.GetIdentity().GetSelector(CanonicalAuthoringTargetIdentitySelector));
-							const int32 UnitIndex = Canonical && Selector ? FMath::Min(*Canonical, *Selector)
-								: Canonical ? *Canonical : Selector ? *Selector : INDEX_NONE;
-							const auto* Unit = UnitIndex == INDEX_NONE ? nullptr : &Units[UnitIndex];
-							if (!Unit) continue;
+							const auto& Semantic = Change.GetIdentity().GetSemanticId();
+							if (Semantic != UeAgentMaterialAuthoring::ExportInstanceParameterSemanticId
+								&& Semantic != UeAgentMaterialAuthoring::ExportInstanceLayersSemanticId) continue;
 							TSharedPtr<FJsonValue> Value;
 							UE::UAI::Contract::FDiagnostic Error;
 							if (!Change.GetProposedAfter().IsValid() || !StateSemantic::CanonicalJson::TryToJsonValue(*Change.GetProposedAfter(), Value, Error)
@@ -499,7 +484,7 @@ namespace UE::UAI::DomainAdapters::Material
 								OutOutcome.Diagnostic = MoveTemp(Error);
 								return false;
 							}
-							if (Unit->GetSemanticTypeRef() == UeAgentMaterialAuthoring::ExportInstanceLayersSemanticId)
+							if (Semantic == UeAgentMaterialAuthoring::ExportInstanceLayersSemanticId)
 							{ InstanceLayers = MoveTemp(Value); continue; }
 							const auto Parameter = Value->AsObject();
 							for (const TCHAR* Field : {TEXT("parameter_name"), TEXT("parameter_kind"), TEXT("association")})
@@ -533,10 +518,10 @@ namespace UE::UAI::DomainAdapters::Material
 							InstanceParameters.Add(MoveTemp(Value));
 						}
 					}
-					else if (!TryBuildMaterialGraphDocument(
+					else if (!HasOnlyRootPropertyIntents(*Prepared.GetWorkspace()) && (!TryBuildMaterialGraphDocument(
 							Document.SemanticWorkspace->GetModel(), GraphDocument, GraphContext, GraphError, &Prepared.GetWorkspace().Get(), TargetPackage)
 						|| !GraphDocument.IsValid()
-						|| !AppendResolvedExpressionProperties(Prepared, Projection, GraphDocument, GraphContext, GraphError, TargetPackage))
+						|| !AppendResolvedExpressionProperties(Prepared, Projection, GraphDocument, GraphContext, GraphError, TargetPackage)))
 					{
 						OutOutcome.Phase = TEXT("semantic_projection");
 						OutOutcome.Diagnostic = GraphError.HasErrors() ? GraphError.GetDiagnostic() : NativeCondition(TEXT("material_semantic_graph_projection_failed"),
@@ -763,7 +748,7 @@ namespace UE::UAI::DomainAdapters::Material
 			const FString& RootType,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError, FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -791,7 +776,7 @@ namespace UE::UAI::DomainAdapters::Material
 			if (!EnsureAuthoringRegistered(OutError)) return false;
 
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
-						if (!UeAgentMaterialAuthoring::ExportAssetWorkspace(*Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentMaterialAuthoring::ExportAssetWorkspace(*Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic, Target);
 				return false;
@@ -808,7 +793,7 @@ namespace UE::UAI::DomainAdapters::Material
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError, FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -857,7 +842,7 @@ namespace UE::UAI::DomainAdapters::Material
 		{
 			bOutReadOnly = true;
 			return TryExport(
-				Target, RootTypeIdentity, Params, OutPayloadJson, OutError);
+				Target, RootTypeIdentity, Params, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

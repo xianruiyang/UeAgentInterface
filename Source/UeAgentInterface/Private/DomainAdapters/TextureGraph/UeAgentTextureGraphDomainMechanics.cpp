@@ -348,12 +348,9 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 			}
 			if (ExistingClassPath && !ExistingClassPath->IsEmpty())
 			{
-				UClass* ExistingClass = LoadObject<UClass>(
-					nullptr, **ExistingClassPath);
-				Batch.Invalidate();
-				if (ExistingClass
-					&& ExistingClass->IsChildOf(UTG_Expression::StaticClass())
-					&& ExistingClass->GetName() == NodeType)
+				// This path came from the actual expression capture. Keep its class
+				// without loading it again for every retained context node.
+				if (FPackageName::ObjectPathToObjectName(*ExistingClassPath) == NodeType)
 				{
 					OutClass = *ExistingClassPath;
 					return true;
@@ -401,13 +398,11 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 			OutBindings.NodeIndices.Reset();
 			OutError.Reset();
 			const FSemanticUnit* GraphUnit = nullptr;
-			for (const FSemanticUnit& Unit : Model->GetUnits())
+			for (const FSemanticUnit* Unit : Model->FindUnitsForSemanticType(TEXT("uai.semantic.texture_graph.graph")))
 			{
-				if (Unit.GetUnitKind() == ESemanticUnitKind::StructureState
-					&& Unit.GetSemanticTypeRef()
-						== TEXT("uai.semantic.texture_graph.graph"))
+				if (Unit->GetUnitKind() == ESemanticUnitKind::StructureState)
 				{
-					GraphUnit = &Unit;
+					GraphUnit = Unit;
 					break;
 				}
 			}
@@ -459,15 +454,20 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 			TMap<FString, int32> IndexByNodeId;
 			TMap<FString, FString> OperationByAlias;
 			TMap<FString, FString> ExistingClassByNodeId;
+			TMap<FString, const FUeAgentContentGraphItem*> ExistingNodes;
 			TSet<FString> ReplacedElements;
 			for (const FUeAgentContentGraphItem& Item : CurrentCapture.Items)
 			{
 				if (Item.ItemKind == TEXT("texture_graph_node"))
 				{
 					ExistingClassByNodeId.Add(Item.ItemId, Item.ClassPath);
+					ExistingNodes.Add(Item.ItemId, &Item);
+					int32 Index = INDEX_NONE;
+					if (LexTryParseString(Index, *Item.SemanticIdentity.Selectors.FindRef(TEXT("node_index"))) && Index >= 0)
+						IndexByNodeId.Add(Item.ItemId, Index);
 				}
 			}
-			if (const UTG_Graph* NativeGraph = CurrentAsset.Graph())
+			if (const UTG_Graph* NativeGraph = CurrentCapture.Items.IsEmpty() ? CurrentAsset.Graph() : nullptr)
 			{
 				NativeGraph->ForEachNodes(
 					[&IndexByNodeId](const UTG_Node* NativeNode, const uint32)
@@ -519,6 +519,7 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 					OutError.SetFailure(MoveTemp(Diagnostic));
 					return false;
 				}
+				if (Operation == TEXT("update") && !bClassChanged && !Node->HasField(TEXT("properties"))) continue;
 				const TSharedRef<FJsonObject> Mutation = MakeShared<FJsonObject>();
 				Mutation->SetStringField(TEXT("element_id"), ElementId);
 				Mutation->SetStringField(TEXT("expression_class_ref"), ExpressionClass);
@@ -640,6 +641,21 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 				}
 				for (const TPair<FString, TSharedPtr<FJsonValue>>& InputPair : Inputs->Values)
 				{
+					bool bUnchangedInput = false;
+					if (Operation == TEXT("update") && !ReplacedElements.Contains(ElementByNodeId.FindChecked(NodeId))) {
+						const auto* Existing = ExistingNodes.FindRef(NodeId);
+						const StateSemantic::FUeAgentCanonicalValue* OldInputs = nullptr;
+						if (Existing && Existing->State) for (const auto& Field : Existing->State->GetObjectItems())
+							if (Field.Key == TEXT("inputs")) { OldInputs = &Field.Value.Get(); break; }
+						if (OldInputs && OldInputs->GetKind() == StateSemantic::EUeAgentValueKind::Object)
+							for (const auto& Old : OldInputs->GetObjectItems()) if (Old.Key == InputPair.Key) {
+								TSharedPtr<FJsonValue> OldValue;
+								if (!TryCanonicalValueToJson(Old.Value, OldValue, OutError)) return false;
+								bUnchangedInput = StateSemantic::CanonicalJson::AreJsonValuesEquivalent(OldValue, InputPair.Value);
+								break;
+							}
+					}
+					if (bUnchangedInput) continue;
 					if (!InputPair.Value.IsValid() || InputPair.Value->Type != EJson::Object)
 						{
 							auto Diagnostic = TextureDomainFact(TEXT("texture_graph_domain_semantic_parameter_invalid"),
@@ -762,8 +778,10 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 						}
 					OutRequest.ElementSettings.Add(ElementId, Properties->GetArrayField(TEXT("properties")));
 				}
-				OutRequest.Nodes.Emplace(
-					MoveTemp(ElementId), MoveTemp(ClassRef), MutationIntent);
+				// Retained context has no node setter. Its existence/class/ports are
+				// checked from the observed before scope, not sent as fake updates.
+				if (MutationIntent != EAudioMediaGraphMutationIntent::Update)
+					OutRequest.Nodes.Emplace(MoveTemp(ElementId), MoveTemp(ClassRef), MutationIntent);
 			}
 			for (const TSharedPtr<FJsonObject>& Link : LinkObjects)
 			{
@@ -888,18 +906,8 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 				UeAgentAuthoringDiagnostics::FDiagnostic Location; UeAgentAuthoringDiagnostics::LocateAuthoringSource(Location, *Parameter);
 				OutRequest.Parameters.Last().SetSource(MoveTemp(Location.Source));
 			}
-			if (!OutRequest.IsValid())
-			{
-				auto Facts = MakeShared<FJsonObject>();
-				Facts->SetBoolField(TEXT("target_present"), !OutRequest.TargetRef.IsEmpty());
-				Facts->SetNumberField(TEXT("node_operations"), OutRequest.Nodes.Num());
-				Facts->SetNumberField(TEXT("link_operations"), OutRequest.Links.Num());
-				Facts->SetNumberField(TEXT("parameter_operations"), OutRequest.Parameters.Num());
-				Facts->SetNumberField(TEXT("setting_operations"), OutRequest.Settings.Num());
-				return Fail(OutError, TextureDomainFact(TEXT("texture_graph_domain_semantic_composite_empty"),
-					TEXT("The TextureGraph composite requires a target and at least one node, link, parameter or setting operation."),
-					TEXT("/composite"), MakeShared<FJsonValueObject>(Facts), MakeShared<FJsonValueString>(TEXT("a target and at least one operation")), TEXT("native_result")));
-			}
+			// Reflected settings are attached by the prepared-change consumer.
+			// Validate the final request there, after all real mutations are bound.
 			return true;
 		}
 
@@ -935,14 +943,62 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 				}
 				UObject* Asset = nullptr;
 				FUeAgentContentGraphCapture TargetCapture;
-				if (!TryCaptureObject(
-						Target,
-						TArray<FString>{TextureGraphType},
-						Asset,
-						TargetCapture,
-						OutError))
-				{
-					return false;
+				TMap<int32, TSet<FString>> SettingFields;
+				TArray<const FSemanticUnit*> UnaddressedSettings;
+				// Compilation is a storage choice, not the edit's native scope.
+				bool bSettingsOnly = Document.SemanticWorkspace->GetStructuralEdits().IsEmpty()
+					&& Document.SemanticWorkspace->GetEditedUnitIds().IsSet()
+					&& !Document.SemanticWorkspace->GetEditedUnitIds()->IsEmpty();
+				TArray<const FSemanticUnit*> Candidates;
+				if (Document.SemanticWorkspace->GetEditedUnitIds().IsSet()) {
+					for (const auto& Id : *Document.SemanticWorkspace->GetEditedUnitIds())
+						Candidates.Add(Document.SemanticWorkspace->GetModel()->FindUnit(Id));
+				} else Candidates = Document.SemanticWorkspace->GetModel()->FindUnitsForSemanticType(TEXT("uai.semantic.texture_graph.setting"));
+				for (const auto* Unit : Candidates) {
+					const auto* Owner = Unit ? Document.SemanticWorkspace->GetModel()->FindUnit(Unit->GetOwnerRef()) : nullptr;
+					const auto* NativeId = Owner ? Owner->GetValues().Find(TEXT("id")) : nullptr;
+					if (!NativeId && Owner) if (const auto* BaselineOwner = Document.SemanticWorkspace->FindBaselineUnit(Owner->GetUnitId()))
+						NativeId = BaselineOwner->GetValues().Find(TEXT("id"));
+					FString Text = NativeId && (*NativeId)->GetKind() == StateSemantic::EUeAgentValueKind::String ? (*NativeId)->GetText() : FString();
+					int32 NodeIndex = INDEX_NONE;
+					if (!Unit || Unit->GetSemanticTypeRef() != TEXT("uai.semantic.texture_graph.setting")) { bSettingsOnly = false; continue; }
+					if (!Text.RemoveFromStart(TEXT("texture_graph.node:")) || !LexTryParseString(NodeIndex, *Text) || NodeIndex < 0) {
+						UnaddressedSettings.Add(Unit);
+						continue;
+					}
+					SettingFields.FindOrAdd(NodeIndex).Add(Unit->GetFieldSetRef());
+				}
+				if (!TryLoadObjectTarget(Target, TextureGraphType, Asset, OutError)) return false;
+				if (!UnaddressedSettings.IsEmpty()) {
+					// Legacy rows may omit the readable node id. Recover only their
+					// native identity directory, never every expression setting value.
+					FUeAgentContentGraphCapture AddressCapture;
+					FUeAgentContentGraphReadError Detail;
+					StateSemantic::FUeAgentCanonicalSnapshotPtr Addresses;
+					auto AddressResources = MakeSemanticWorkspaceResourceTrackerOwner();
+					if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureTextureGraphSettings(*Asset, {}, AddressCapture, Detail, true)
+						|| !TryBuildContentGraphAuthoringSnapshot(AddressCapture, AddressResources, Addresses, Detail)) {
+						OutError.SetFailure(MoveTemp(Detail)); return false;
+					}
+					for (const auto* Setting : UnaddressedSettings) {
+						const auto* Owner = Document.SemanticWorkspace->GetModel()->FindUnit(Setting->GetOwnerRef());
+						bool bFound = false;
+						if (Owner) for (const auto& Entry : Addresses->GetEntries()) {
+							if (!Entry.GetIdentity().WithCapturedBinding(Owner->GetTargetIdentityKey()).IsSet()) continue;
+							int32 Index = INDEX_NONE;
+							if (!LexTryParseString(Index, *Entry.GetIdentity().GetSelector(TEXT("node_index"))) || Index < 0) continue;
+							SettingFields.FindOrAdd(Index).Add(Setting->GetFieldSetRef()); bFound = true; break;
+						}
+						if (!bFound) return Fail(OutError, TextureDomainFact(TEXT("texture_graph_setting_identity_unresolved"),
+							TEXT("The setting's captured native node binding no longer resolves; inspect the node identity before retrying."),
+							TEXT("/setting/owner"), MakeShared<FJsonValueString>(Setting->GetOwnerRef()),
+							MakeShared<FJsonValueString>(TEXT("an existing matching native node")), TEXT("native_result")));
+					}
+				}
+				FUeAgentContentGraphReadError CurrentError;
+				if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureTextureGraphSettings(
+					*Asset, SettingFields, TargetCapture, CurrentError, !bSettingsOnly)) {
+					OutError.SetFailure(MoveTemp(CurrentError)); return false;
 				}
 				const FString ActualRootType = Asset
 					? Asset->GetClass()->GetPathName() : FString();
@@ -970,17 +1026,17 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 					OutError.SetFailure(SnapshotError);
 					return false;
 				}
-				if (!TryComposeSnapshotAuthoringModel(
-						FSnapshotCompositionRequest(
-							TEXT("ue.texture_graph.asset"),
-							TEXT("llm_authoring"),
-							CanonicalSnapshot.ToSharedRef()),
-						*Resources,
-						Model,
-						OutError))
+				FCompositionUnitSet Observed;
+				if (!TryComposeScopedAuthoringUnits(TEXT("ue.texture_graph.asset"), TEXT("llm_authoring"),
+					CanonicalSnapshot, *Resources, Observed, OutError, &Document.SemanticWorkspace->GetModel().Get()))
 				{
 					return false;
 				}
+				Model = FAuthoringModel::MakePropertySourceView(MoveTemp(Observed.ContractId), Observed.ContractVersion,
+					MoveTemp(Observed.ProfileId), MoveTemp(Observed.BaseRevision), MoveTemp(Observed.Units),
+					MoveTemp(Observed.TargetUnitIds), CanonicalSnapshot->GetSnapshotId());
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=texture_current_scope setting_nodes=%d topology=%s observed_units=%d current_compile=false"),
+					SettingFields.Num(), bSettingsOnly ? TEXT("false") : TEXT("true"), Model->GetUnitCount());
 				const FString TargetObjectPath = ObjectPathFromPackage(Target);
 				const UTextureGraph* TextureGraph = Cast<UTextureGraph>(Asset);
 				if (!TextureGraph)
@@ -994,23 +1050,16 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 				}
 				Composition::GraphCompound::FTextureGraphSemanticCompositeRequest
 					Composite;
-				if (!TryBuildSemanticComposite(
-						Document.SemanticWorkspace->GetModel(),
-						TargetCapture,
-						*TextureGraph,
-						TargetObjectPath,
-						Composite,
-						OutError, Document.SemanticWorkspace.Get()))
-				{
-					return false;
+				if (bSettingsOnly) {
+					Composite.TargetRef = TargetObjectPath;
+					for (const auto& Pair : SettingFields) Composite.NodeBindings.NodeIndices.Add(
+						FString::Printf(TEXT("texture_graph.node:%d"), Pair.Key), Pair.Key);
 				}
 				return TryCoordinateSemanticWorkspaceImport(
 					Document.SemanticWorkspace.ToSharedRef(),
 					Model.ToSharedRef(),
 					CanonicalSnapshot.ToSharedRef(),
-					Contract::FUeAgentDescriptorIdentity(
-						TEXT("texture_graph.semantic_workspace"), 1,
-						Model->GetSemanticFingerprint()),
+					BuildSemanticWorkspaceImportDescriptor(TEXT("texture_graph.semantic_workspace"), *Model),
 					TargetObjectPath,
 					*Resources,
 					{
@@ -1021,18 +1070,32 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 						TEXT("texture_graph_domain_semantic_prepare_failed"),
 						TEXT("texture_graph_domain_semantic_apply_failed"),
 						TEXT("texture_graph_domain_semantic_readback_payload_invalid"),
-						TEXT("texture_graph_domain_compile_not_settled"),},
-				[&Asset, &Composite, &TargetObjectPath](
+						TEXT("texture_graph_domain_compile_not_settled"), {},
+						{TEXT("uai.semantic.texture_graph.graph")}},
+					[&Asset, &Composite, &TargetObjectPath, &TargetCapture, &CanonicalSnapshot, bSettingsOnly](
 						const FString& RequestId,
 						const Composition::HjsonImport::FPreparedAuthoringImport& Prepared,
 						Composition::HjsonImport::FSemanticWorkspaceChangeProjection&& Projection,
 						FRootPropertyApplyOutcome& OutOutcome)
 					{
 						UE::UAI::Contract::FDiagnostic SettingError;
+						if (!bSettingsOnly) {
+							FWorkspaceError CompositeError;
+							if (!TryBuildSemanticComposite(Prepared.GetWorkspace()->GetModel(), TargetCapture,
+								*CastChecked<UTextureGraph>(Asset), TargetObjectPath, Composite, CompositeError, &Prepared.GetWorkspace().Get())) {
+								OutOutcome.Phase = TEXT("semantic_projection"); OutOutcome.Diagnostic = CompositeError.GetDiagnostic(); return false;
+							}
+							Composite.BeforeSnapshot = CanonicalSnapshot;
+						}
 						if (!TryBindSettingChanges(Prepared, Projection, Composite, SettingError))
 						{ OutOutcome.Phase = TEXT("semantic_projection"); OutOutcome.Diagnostic = SettingError; return false; }
-						const PlanningPreflight::FPlanningPreflightPlanPtr& Plan =
-							Prepared.GetPreflightResult().GetPlan();
+						UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=texture_prepared_composite nodes=%d links=%d parameters=%d setting_nodes=%d context_node_updates=0"),
+							Composite.Nodes.Num(), Composite.Links.Num(), Composite.Parameters.Num(), Composite.Settings.Num());
+						auto PlanningResources = MakeSemanticWorkspaceResourceTracker();
+						PlanningPreflight::FPlanningPreflightPlanPtr Plan;
+						if (!Prepared.TryGetExecutionPlan(PlanningResources, Plan, SettingError)) {
+							OutOutcome.Phase = TEXT("semantic_preparation"); OutOutcome.Diagnostic = SettingError; return false;
+						}
 						if (Asset == nullptr || !Plan.IsValid())
 						{
 							auto Facts = MakeShared<FJsonObject>();
@@ -1187,12 +1250,11 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 		if (bBuilt) OutComposite.NodeBindings = MoveTemp(Bindings);
 		else if (Workspace)
 		{
-			for (const auto& Unit : ResolvedModel->GetUnits())
+			for (const auto* Unit : ResolvedModel->FindUnitsForSemanticType(TEXT("uai.semantic.texture_graph.graph")))
 			{
-				if (Unit.GetUnitKind() == ESemanticUnitKind::StructureState
-					&& Unit.GetSemanticTypeRef() == TEXT("uai.semantic.texture_graph.graph"))
+				if (Unit->GetUnitKind() == ESemanticUnitKind::StructureState)
 				{
-					LocateTextureSemanticFailure(OutError, Workspace, Unit.GetUnitId());
+					LocateTextureSemanticFailure(OutError, Workspace, Unit->GetUnitId());
 					break;
 				}
 			}

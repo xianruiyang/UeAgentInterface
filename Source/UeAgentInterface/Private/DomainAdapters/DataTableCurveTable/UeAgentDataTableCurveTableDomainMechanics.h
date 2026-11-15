@@ -2,6 +2,8 @@
 
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UE::UAI::DomainAdapters::DataTableCurveTable
 {
 	UEAGENTINTERFACE_API bool TryExecuteContentGraph(
@@ -11,5 +13,6 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		HjsonWorkspace::FWorkspaceError& OutError);
+		HjsonWorkspace::FWorkspaceError& OutError,
+		HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

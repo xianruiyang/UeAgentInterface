@@ -17,6 +17,7 @@ namespace UeAgentNativeNormalizationIntent { class FScope; }
 
 namespace UE::UAI::Composition::HjsonImport
 {
+	struct FScopedCurrentCoverage;
 	using UE::UAI::ContextResource::FUeAgentResourceTracker;
 	using UE::UAI::Contract::FUeAgentCallerContext;
 	using UE::UAI::HjsonWorkspace::FAuthoringModelRef;
@@ -67,7 +68,8 @@ namespace UE::UAI::Composition::HjsonImport
 		const TArray<HjsonWorkspace::FDocumentValueSourceBinding>& DocumentSources = {},
 		const UeAgentNativeNormalizationIntent::FScope* NativeNormalization = nullptr,
 		const TArray<UeAgentAuthoringState::FReadRequest>* CurrentReadRequests = nullptr,
-		const TArray<HjsonWorkspace::FGraphNodeReferenceBinding>& GraphReferenceBindings = {});
+		const TArray<HjsonWorkspace::FGraphNodeReferenceBinding>& GraphReferenceBindings = {},
+		HjsonWorkspace::FProjectObservedGraphNodeFields ProjectObservedGraphNodeFields = nullptr);
 
 	class UEAGENTINTERFACE_API FPreparedAuthoringImport final
 	{
@@ -79,14 +81,22 @@ namespace UE::UAI::Composition::HjsonImport
 			FPlanningResult InPreflightResult,
 			FAuthoringModelPtr InInputBaseline = nullptr,
 			TMap<FString, StateSemantic::FUeAgentCanonicalValueRef> InPropertyBaselines = {});
+		// Ordinary native consumers need the validated draft, not a materialized
+		// execution Plan. A real Plan consumer requests its view explicitly.
+		FPreparedAuthoringImport(FResolvedSemanticWorkspaceRef InWorkspace,
+			TSharedRef<const FChangeSetDraft> InChangeSetDraft, FPlanningRequest InPlanningRequest,
+			FAuthoringModelPtr InInputBaseline = nullptr,
+			TMap<FString, StateSemantic::FUeAgentCanonicalValueRef> InPropertyBaselines = {});
 
 		const FResolvedSemanticWorkspaceRef& GetWorkspace() const;
 		const FChangeSetDraft& GetChangeSetDraft() const;
 		const FAuthoringModelPtr& GetInputBaseline() const { return InputBaseline; }
-		const StateSemantic::FUeAgentCanonicalValueRef* FindPropertyBaseline(const FString& Key) const { return PropertyBaselines.Find(Key); }
+		const StateSemantic::FUeAgentCanonicalValueRef* FindPropertyBaseline(const FString& Key) const;
 		const PlanningPreflight::FChangeDraft* FindChangeForTargetIdentity(const FString& Identity) const;
 		const FPlanningRequest& GetPlanningRequest() const;
 		const FPlanningResult& GetPreflightResult() const;
+		bool TryGetExecutionPlan(FUeAgentResourceTracker& Resources,
+			PlanningPreflight::FPlanningPreflightPlanPtr& OutPlan, Contract::FDiagnostic& OutError) const;
 		const TArray<FStructuralEdit>& GetStructuralEdits() const;
 		bool IsValid() const;
 		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
@@ -99,12 +109,15 @@ namespace UE::UAI::Composition::HjsonImport
 		FResolvedSemanticWorkspaceRef Workspace;
 		// Frozen input bindings identify effective edits. Final native readback never recomposes an export.
 		FAuthoringModelPtr InputBaseline;
-		TMap<FString, StateSemantic::FUeAgentCanonicalValueRef> PropertyBaselines;
-		FChangeSetDraft ChangeSetDraft;
+		mutable TMap<FString, StateSemantic::FUeAgentCanonicalValueRef> PropertyBaselines;
+		TSharedRef<const FChangeSetDraft> ChangeSetDraft;
 		TMap<FString, int32> FirstChangeByTargetIdentity;
 		FPlanningRequest PlanningRequest;
-		FPlanningResult PreflightResult;
-		Contract::FDiagnostic ValidationDiagnostic;
+		mutable FPlanningResult PreflightResult;
+		mutable bool bPreflightAttempted = true;
+		bool bLazyPropertyBaselines = false;
+		mutable Contract::FDiagnostic ValidationDiagnostic;
+		void InitializeValidation(bool bRequireProvidedPlan);
 	};
 
 	UEAGENTINTERFACE_API bool TryBuildSemanticChangeSetDraft(
@@ -117,7 +130,8 @@ namespace UE::UAI::Composition::HjsonImport
 		TOptional<FChangeSetDraft>& OutDraft,
 		FSemanticWorkspaceImportError& OutError,
 		const FAuthoringModelPtr& CurrentModel = nullptr,
-		TArray<HjsonWorkspace::FDocumentValueSourceBinding>* OutDocumentSourceBindings = nullptr);
+		TArray<HjsonWorkspace::FDocumentValueSourceBinding>* OutDocumentSourceBindings = nullptr,
+		const TSet<FString>* NativeStructureSemanticIds = nullptr);
 
 	UEAGENTINTERFACE_API bool TryProjectRootObjectPropertyChanges(
 		const FPreparedAuthoringImport& Prepared,
@@ -167,7 +181,8 @@ namespace UE::UAI::Composition::HjsonImport
 		FUeAgentResourceTracker& Resources,
 		FSemanticWorkspaceChangeProjection& OutProjection,
 		FPreparedAuthoringImportPtr& OutPrepared,
-		FSemanticWorkspaceImportError& OutError);
+		FSemanticWorkspaceImportError& OutError,
+		const TSet<FString>* NativeStructureSemanticIds = nullptr);
 
 	UEAGENTINTERFACE_API bool TryPrepareResolvedAuthoringImport(
 		const FResolvedSemanticWorkspaceRef& Workspace,
@@ -180,7 +195,8 @@ namespace UE::UAI::Composition::HjsonImport
 		const FString& ExpectedClosureFingerprint,
 		FUeAgentResourceTracker& Resources,
 		FPreparedAuthoringImportPtr& OutPrepared,
-		FSemanticWorkspaceImportError& OutError);
+		FSemanticWorkspaceImportError& OutError,
+		const FScopedCurrentCoverage* Coverage = nullptr);
 
 	UEAGENTINTERFACE_API bool TryPrepareSemanticWorkspaceImport(
 		const HjsonWorkspace::FWorkspaceSource& Source,
@@ -196,5 +212,6 @@ namespace UE::UAI::Composition::HjsonImport
 		const FString& ExpectedClosureFingerprint,
 		FUeAgentResourceTracker& Resources,
 		FPreparedAuthoringImportPtr& OutPrepared,
-		FSemanticWorkspaceImportError& OutError);
+		FSemanticWorkspaceImportError& OutError,
+		const FScopedCurrentCoverage* Coverage = nullptr);
 }

@@ -578,17 +578,14 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
                     TEXT("The resolved workspace does not contain a semantic workspace document."), Target, TEXT("semantic_workspace_available"),
                     MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 			}
-			UObject* ProbedAsset = LoadObject<UOptimusDeformer>(
-				nullptr, *ObjectPathFromPackageIdentity(Target));
-			FUeAgentContentGraphCapture ProbedCapture;
-			if (!ProbedAsset && !TryCaptureObject(Target,
+			UObject* Asset = nullptr;
+			if (!TryLoadObjectTarget(Target,
 				TArray<FString>{ControlRigBlueprintType, IKRigDefinitionType,
 					IKRetargeterType, SkeletonType, DeformerGraphType},
-				ProbedAsset, ProbedCapture, OutError)) return false;
-			if (ProbedAsset && ProbedAsset->GetClass()->GetPathName() == DeformerGraphType)
+				Asset, OutError)) return false;
+			if (UOptimusDeformer* Deformer = Cast<UOptimusDeformer>(Asset))
 			{
-				UOptimusDeformer* Deformer = Cast<UOptimusDeformer>(ProbedAsset);
-				if (!Deformer || !EnsureDeformerAuthoringRegistered(OutError)) return false;
+				if (!EnsureDeformerAuthoringRegistered(OutError)) return false;
 				TArray<UeAgentAuthoringState::FReadRequest> Requests;
 				UE::UAI::Contract::FDiagnostic CaptureError;
 				if (!UeAgentDeformerAuthoring::BuildExportSnapshotReadRequests(
@@ -597,8 +594,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
                 OutError.SetFailure(WithTarget(CaptureError, Target));
 						return false;
 					}
+				SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
 				UeAgentAuthoringState::FCaptureResult Capture;
-				if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+				if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 					{
                 OutError.SetFailure(WithTarget(Capture.Diagnostic, Target));
 						return false;
@@ -606,7 +604,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				ContextResource::FUeAgentResourceTracker Resources = MakeSemanticWorkspaceResourceTracker();
 				StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 				FAuthoringModelPtr Model;
-				if (!TryBuildCanonicalAuthoringCapture(UeAgentDeformerAuthoring::CompositionKind,
+				if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(), UeAgentDeformerAuthoring::CompositionKind,
 					TEXT("llm_authoring"), Capture.Snapshot, Resources,
 					CanonicalSnapshot, Model, OutError)) return false;
 				Capture.Snapshot.ReleaseNativeValues();
@@ -614,12 +612,11 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				const FString TargetObjectPath = ObjectPathFromPackageIdentity(Target);
 				// The public transaction releases and reloads the target before final readback.
 				Deformer = nullptr;
-				ProbedAsset = nullptr;
+				Asset = nullptr;
 				return TryCoordinateSemanticWorkspaceImport(
 					Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 					CanonicalSnapshot.ToSharedRef(),
-					Contract::FUeAgentDescriptorIdentity(TEXT("deformer.semantic_workspace"), 1,
-						Model->GetSemanticFingerprint()), TargetObjectPath, Resources,
+					BuildSemanticWorkspaceImportDescriptor(TEXT("deformer.semantic_workspace"), *Model), TargetObjectPath, Resources,
 					{TEXT("deformer-domain-provider"), Target, TargetObjectPath,
 						TEXT("deformer-semantic"), TEXT("deformer_semantic_prepare_failed"),
 						TEXT("deformer_semantic_apply_failed"),
@@ -667,18 +664,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 					{ return TryReadDeformerSemanticState(Target, Payload, Revision, Error); },
 					OutPayload, OutError);
 			}
-			UObject* Asset = nullptr;
-			FUeAgentContentGraphCapture TargetCapture;
-			if (!TryCaptureObject(
-					Target,
-					TArray<FString>{ControlRigBlueprintType, IKRigDefinitionType,
-						IKRetargeterType, SkeletonType},
-					Asset, TargetCapture, OutError))
-			{
-				return false;
-			}
-			const FString RootType = Asset
-				? Asset->GetClass()->GetPathName() : FString();
+			const FString RootType = Asset->GetClass()->GetPathName();
 			if (RootType == SkeletonType)
 			{
 				UE::UAI::Contract::FDiagnostic Error;
@@ -711,8 +697,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
                 OutError.SetFailure(WithTarget(CaptureError, Target));
 				return false;
 			}
+			SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
 			UeAgentAuthoringState::FCaptureResult Capture;
-			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+			if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 			{
                 OutError.SetFailure(WithTarget(Capture.Diagnostic, Target));
 				return false;
@@ -722,7 +709,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				MakeSemanticWorkspaceResourceTracker();
 			StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 			FAuthoringModelPtr Model;
-			if (!TryBuildCanonicalAuthoringCapture(
+			if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(),
 					ResolveTargetCompositionKind(Profile->TargetKind, Profile->TypeId),
 					TEXT("llm_authoring"), Capture.Snapshot, Resources,
 					CanonicalSnapshot, Model, OutError)
@@ -749,9 +736,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			return TryCoordinateSemanticWorkspaceImport(
 				Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 				CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("animation_rig_graph.semantic_workspace"), 1,
-					Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("animation_rig_graph.semantic_workspace"), *Model),
 				TargetObjectPath, Resources,
 				{TEXT("animation-rig-graph-domain-provider"), Target,
 					TargetObjectPath, TEXT("animation-rig-graph-semantic"),
@@ -1045,7 +1030,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -1055,14 +1041,12 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
                     TEXT("Export requires a non-empty workspace_path."), TEXT("/workspace_path"),
                     Params->TryGetField(TEXT("workspace_path")), MakeShared<FJsonValueString>(TEXT("non-empty string")), Target));
 			}
-			UObject* Asset = LoadObject<UOptimusDeformer>(
-				nullptr, *ObjectPathFromPackageIdentity(Target));
-			FUeAgentContentGraphCapture Capture;
-			if (!Asset && !TryCaptureObject(
+			UObject* Asset = nullptr;
+			if (!TryLoadObjectTarget(
 					Target,
 					TArray<FString>{ControlRigBlueprintType, IKRigDefinitionType,
 						IKRetargeterType, SkeletonType, DeformerGraphType},
-					Asset, Capture, OutError))
+					Asset, OutError))
 			{
 				return false;
 			}
@@ -1071,7 +1055,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				if (!EnsureDeformerAuthoringRegistered(OutError)) return false;
 				UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
 				FString ExportError;
-				if (!UeAgentDeformerAuthoring::ExportWorkspace(*Deformer, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+				if (!UeAgentDeformerAuthoring::ExportWorkspace(*Deformer, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 					{
                 OutError.SetFailure(WithTarget(ExportResult.Diagnostic, Target));
 						return false;
@@ -1085,7 +1069,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
                     return Fail(OutError, WithTarget(Error, Target));
 				const auto* SkeletonProfile = UeAgentAnimationAuthoring::FindProfile(UeAgentAnimationAuthoring::EAssetKind::Skeleton);
 				UeAgentExportWorkspaceWriter::FWorkspaceResult Result;
-				if (!UeAgentAnimationAuthoring::ExportAssetWorkspace(*SkeletonProfile, *Asset, WorkspacePath, TEXT("llm_authoring"), Result))
+				if (!UeAgentAnimationAuthoring::ExportAssetWorkspace(*SkeletonProfile, *Asset, WorkspacePath, TEXT("llm_authoring"), Result, PreparedExport))
                     return Fail(OutError, WithTarget(Result.Diagnostic, Target));
 				return TryCanonicalizeObject(Result.ToPublicJsonObject(), OutPayload, OutError);
 			}
@@ -1101,7 +1085,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			if (!EnsureAuthoringRegistered(OutError)) return false;
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
 			FString ExportError;
-			if (!UeAgentRiggingAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentRiggingAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
                 OutError.SetFailure(WithTarget(ExportResult.Diagnostic, Target));
 				return false;
@@ -1117,7 +1101,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -1142,7 +1127,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return TryExport(Target, Params, OutPayloadJson, OutError);
+			return TryExport(Target, Params, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

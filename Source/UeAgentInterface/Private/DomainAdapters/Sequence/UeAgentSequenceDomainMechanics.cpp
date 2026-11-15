@@ -280,7 +280,8 @@ namespace UE::UAI::DomainAdapters::Sequence
 			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayloadJson,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			FString ProfileId(TEXT("llm_authoring"));
@@ -333,7 +334,7 @@ namespace UE::UAI::DomainAdapters::Sequence
 					MakeShared<FJsonValueString>(RootType), Target), Target);
 			}
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
-			if (!UeAgentReflectionAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, ProfileId, ExportResult))
+			if (!UeAgentReflectionAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, ProfileId, ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic, Target);
 				return false;
@@ -387,8 +388,9 @@ namespace UE::UAI::DomainAdapters::Sequence
 				OutError.SetFailure(CaptureError, Target);
 				return false;
 			}
+			SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
 			UeAgentAuthoringState::FCaptureResult Capture;
-			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+			if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 			{
 				OutError.SetFailure(Capture.Diagnostic, Target);
 				return false;
@@ -398,7 +400,7 @@ namespace UE::UAI::DomainAdapters::Sequence
 				MakeSemanticWorkspaceResourceTracker();
 			StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 			FAuthoringModelPtr Model;
-			const bool bCaptureBuilt = TryBuildCanonicalAuthoringCapture(
+			const bool bCaptureBuilt = TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(),
 					ResolveTargetCompositionKind(
 						Profile->TargetKind, Profile->TypeId),
 					TEXT("llm_authoring"),
@@ -430,9 +432,7 @@ namespace UE::UAI::DomainAdapters::Sequence
 			return TryCoordinateSemanticWorkspaceImport(
 				Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 				CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("sequence.semantic_workspace"), 1,
-					Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("sequence.semantic_workspace"), *Model),
 				TargetObjectPath,
 				Resources,
 				{
@@ -718,7 +718,8 @@ namespace UE::UAI::DomainAdapters::Sequence
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -749,7 +750,7 @@ namespace UE::UAI::DomainAdapters::Sequence
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return TryExport(Target, Params, OutPayloadJson, OutError);
+			return TryExport(Target, Params, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

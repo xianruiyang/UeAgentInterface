@@ -164,12 +164,13 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 				{
 					return Fail(OutError, MoveTemp(CaptureError), Target);
 				}
+				SelectRootPropertyImportReadRequests(*Resolved.SemanticWorkspace, Requests);
 				UeAgentAuthoringState::FCaptureResult Capture;
-				if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+				if (!CapturePropertyImportState(*Resolved.SemanticWorkspace, Requests, Capture))
 				{
 					return Fail(OutError, MoveTemp(Capture.Diagnostic), Target);
 				}
-				if (!TryBuildCanonicalAuthoringCapture(
+				if (!TryBuildPropertyImportCurrentCapture(Resolved.SemanticWorkspace.Get(),
 						TEXT("ue.blueprint.asset"),
 						TEXT("llm_authoring"),
 						Capture.Snapshot,
@@ -187,9 +188,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			return TryCoordinateSemanticWorkspaceImport(
 				Resolved.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 				CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("blueprint.semantic_workspace"), 1,
-					Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("blueprint.semantic_workspace"), *Model),
 				TargetObjectPath,
 				Resources,
 				{
@@ -211,7 +210,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 							return false;
 						}
 						return UeAgentBlueprintAuthoring::BuildAssetExportSnapshotReadRequests(*Native, Requests, Error);
-					}},
+					}, {}, &UeAgentBlueprintAuthoring::ProjectObservedNodePinDefaults},
 				[Target,
 					TargetPackage,
 					SemanticWorkspace = Resolved.SemanticWorkspace.ToSharedRef(),
@@ -223,9 +222,10 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 					FRootPropertyApplyOutcome& OutOutcome)
 				{
 					(void)Prepared;
-					TSharedPtr<FJsonObject> ProviderExtension;
+					TSharedPtr<FJsonObject> ProviderExtension = MakeShared<FJsonObject>();
 					FWorkspaceError ProjectionError;
-					if (!UeAgentBlueprintAuthoring::TryProjectSemanticProviderExtension(
+					const bool bRootPropertiesOnly = HasOnlyRootPropertyIntents(*Prepared.GetWorkspace());
+					if (!bRootPropertiesOnly && !UeAgentBlueprintAuthoring::TryProjectSemanticProviderExtension(
 							SemanticWorkspace->GetModel(), Projection.ChangedUnitIds,
 							Projection.PropertyChangesByUnitId,
 							Projection.StructuralEdits, ProviderExtension, ProjectionError, &SemanticWorkspace.Get(), &CurrentModel.Get()))
@@ -234,7 +234,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 						OutOutcome.Phase = TEXT("semantic_projection");
 						return false;
 					}
-					if (!TryNormalizeBlueprintCandidateBindings(
+					if (!bRootPropertiesOnly && !TryNormalizeBlueprintCandidateBindings(
 							Target, ProviderExtension, ProjectionError))
 					{
 						OutOutcome.Diagnostic = ProjectionError.GetDiagnostic();
@@ -425,7 +425,8 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -446,7 +447,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 			}
 			if (!EnsureAuthoringRegistered(OutError)) return false;
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
-			if (!UeAgentBlueprintAuthoring::ExportAssetWorkspace(*Blueprint, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentBlueprintAuthoring::ExportAssetWorkspace(*Blueprint, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				return Fail(OutError, MoveTemp(ExportResult.Diagnostic), Target);
 			}
@@ -461,7 +462,8 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -493,7 +495,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return TryExport(Target, Params, OutPayloadJson, OutError);
+			return TryExport(Target, Params, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

@@ -298,10 +298,15 @@ namespace UE::UAI::ExecutionMutation
 	class UEAGENTINTERFACE_API FLongRunningOperationOwner final
 	{
 	public:
+		using FMetadataProjector = TFunction<bool(const FLongRunningOperationSnapshot&,
+			const FLongRunningOperationReceipt*, FString&, FString&)>;
 		FLongRunningOperationOwner(
 			TSharedRef<ILongRunningOperationPort, ESPMode::ThreadSafe> InPort,
-			FUeAgentMonotonicClock InClock);
+			FUeAgentMonotonicClock InClock, FMetadataProjector InMetadataProjector = {});
 		~FLongRunningOperationOwner();
+		TUniquePtr<Contract::IUeAgentOperationReadScope> TryBeginMetadataRead(const FString& OperationId) const;
+		bool TryCopyMetadata(const FString& OperationId, const FString& OwnerLeaseId, const FString& ServerSessionId,
+			bool bReceipt, FString& OutWire, FExecutionMutationError& OutError) const;
 
 		bool Accept(
 			const FLongRunningOperationRequest& Request,

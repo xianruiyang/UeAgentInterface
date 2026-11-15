@@ -663,13 +663,10 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 						TEXT("/workspace_model"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("loaded semantic workspace")), Target, TEXT("workspace_decode")));
 				}
 				UObject* Asset = nullptr;
-				DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture
-					TargetCapture;
-				if (!TryCaptureObject(
+				if (!TryLoadObjectTarget(
 						Target,
 						TArray<FString>{BehaviorTreeType, BlackboardType, StateTreeType, EqsType, SmartObjectType},
 						Asset,
-						TargetCapture,
 						OutError))
 				{
 					return false;
@@ -695,8 +692,9 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 					OutError.SetFailure(CaptureError, Target);
 					return false;
 				}
+				SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
 				UeAgentAuthoringState::FCaptureResult Capture;
-				if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+				if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 				{
 					OutError.SetFailure(Capture.Diagnostic, Target);
 					return false;
@@ -706,7 +704,7 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 					MakeSemanticWorkspaceResourceTracker();
 				StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 				FAuthoringModelPtr Model;
-				if (!TryBuildCanonicalAuthoringCapture(
+				if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(),
 						ResolveTargetCompositionKind(
 							Profile->TargetKind, Profile->TypeId),
 						TEXT("llm_authoring"),
@@ -735,7 +733,7 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 				{
 					return TryCoordinateSemanticWorkspaceImport(
 						Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(), CanonicalSnapshot.ToSharedRef(),
-						Contract::FUeAgentDescriptorIdentity(TEXT("ai_behavior.semantic_workspace"), 1, Model->GetSemanticFingerprint()),
+						BuildSemanticWorkspaceImportDescriptor(TEXT("ai_behavior.semantic_workspace"), *Model),
 						TargetObjectPath, Resources,
 						{TEXT("ai-behavior-domain-provider"), Target, TargetObjectPath, TEXT("ai-behavior-semantic"),
 							TEXT("ai_behavior_domain_semantic_prepare_failed"), TEXT("ai_behavior_domain_semantic_apply_failed"), TEXT("ai_behavior_domain_semantic_readback_payload_invalid"),
@@ -981,7 +979,8 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -1013,7 +1012,7 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 			if (!EnsureReflectionAuthoringRegistered(OutError)) return false;
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
 			FString ExportError;
-			if (!UeAgentReflectionAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentReflectionAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic, Target);
 				return false;
@@ -1030,7 +1029,8 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -1064,7 +1064,7 @@ namespace UE::UAI::DomainAdapters::AiBehavior
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return TryExport(Target, Params, OutPayloadJson, OutError);
+			return TryExport(Target, Params, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

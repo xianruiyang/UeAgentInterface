@@ -107,6 +107,19 @@ namespace UE::UAI::CommandEdge
 		return true;
 	}
 
+	TOptional<FUeAgentCommandResult> FUeAgentExactCommandDispatch::TrySubmitConcurrent(
+		const FUeAgentCommandRequest& Request, const FUeAgentCallerContext& CallerContext,
+		const TSharedRef<IUeAgentCancellationSignal>& Cancellation) const
+	{
+		const auto* Handler = Handlers.Find(Request.GetCommandId());
+		if (!Handler) return {};
+		auto Scope = (*Handler)->TryBeginConcurrentRead(Request);
+		if (!Scope) return {};
+		// Same exact validation and handler as the GT path. No request/result
+		// JSON is handed to another thread, and no native operation is advanced.
+		return Submit(Request, CallerContext, Cancellation);
+	}
+
 	FUeAgentCommandResult FUeAgentExactCommandDispatch::Submit(
 		const FUeAgentCommandRequest& Request,
 		const FUeAgentCallerContext& CallerContext,

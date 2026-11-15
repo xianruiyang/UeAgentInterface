@@ -8,6 +8,7 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringDurableTransaction.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -185,6 +186,12 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 					return Failure(Request, Diagnostic);
 				}
 
+				if (UeAgentAuthoringWorkspaceTransaction::IsAuthoringDurableJournalId(JournalId)) {
+					TSharedPtr<FJsonObject> Recovery; FDiagnostic Error; FString Json;
+					if (!UeAgentAuthoringWorkspaceTransaction::TryInspectAuthoringJournal(JournalId, Recovery, Error)
+						|| !Canonical(Recovery, Json, Error)) return Failure(Request, Error);
+					return FUeAgentCommandResult::Success(Request, MoveTemp(Json));
+				}
 				FUeAgentResourceTracker Resources = MakeResources();
 				FAssetDurableSessionPtr Session;
 				TArray<FDurableArtifactState> ObservedStates;
@@ -338,6 +345,12 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 					return Failure(Request, Diagnostic);
 				}
 
+				if (UeAgentAuthoringWorkspaceTransaction::IsAuthoringDurableJournalId(JournalId)) {
+					TSharedPtr<FJsonObject> Recovery; FDiagnostic Error; FString Json;
+					if (!UeAgentAuthoringWorkspaceTransaction::TryReconcileAuthoringJournal(JournalId, OwnerId, FencingToken, Recovery, Error)
+						|| !Canonical(Recovery, Json, Error)) return Failure(Request, Error);
+					return FUeAgentCommandResult::Success(Request, MoveTemp(Json));
+				}
 				FUeAgentResourceTracker Resources = MakeResources();
 				FDurableReceipt Receipt;
 				FAssetDurableError Error;

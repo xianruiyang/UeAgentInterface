@@ -7,6 +7,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintMutationModel.h"
 #include "Engine/Blueprint.h"
 #include "Editor.h"
@@ -629,6 +630,8 @@ private:
           TEXT("The animation snapshot read requests could not be constructed."), PackagePath) : Error);
       return false;
     }
+    if (Asset && BlueprintMutation && Operation == EOperation::Update)
+      BlueprintMutation->AppendGraphObservationContext(bVerifyIntent, OutRequests.Last().Context);
     return true;
   }
 

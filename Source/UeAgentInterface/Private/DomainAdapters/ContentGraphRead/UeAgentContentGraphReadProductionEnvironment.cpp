@@ -20,7 +20,10 @@
 #include "Domains/SmartObject/Authoring/UeAgentSmartObjectAuthoringState.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringDescriptors.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringExport.h"
+#include "Domains/Level/Authoring/UeAgentLevelPartitionReadScope.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringRegistration.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
+#include "EngineUtils.h"
 #include "Core/HjsonWorkspace/UeAgentKeyedItemAuthoringProjection.h"
 #include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringDescriptors.h"
 #include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringRegistration.h"
@@ -524,20 +527,8 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			return TEXT("scalar");
 		}
 
-		bool AddProperties(
-			UObject& Object,
-			FUeAgentResourceTracker& Resources,
-			TArray<FUeAgentContentGraphProperty>& OutProperties,
-			int32& OutPropertyCount,
-			FUeAgentContentGraphReadError& OutError,
-			TArray<FString>* OutRevisionFacts = nullptr,
-			const TSet<FName>* Excluded = nullptr)
+		void CollectProperties(UObject& Object, TArray<FProperty*>& Properties, const TSet<FName>* Excluded = nullptr)
 		{
-			UeAgentPropertyValueCodec::FOptions Options;
-			Options.bCompareStoredValues = true;
-			Options.bAllowPartialStructFields = false;
-
-			TArray<FProperty*> Properties;
 			const auto* ReflectionProfile = UeAgentReflectionAuthoring::FindProfileByTypeId(DomainId(Object));
 			for (TFieldIterator<FProperty> It(
 				Object.GetClass(),
@@ -571,6 +562,19 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				{
 					return Left.GetName() < Right.GetName();
 				});
+		}
+
+		bool AddProperties(
+			UObject& Object, FUeAgentResourceTracker& Resources,
+			TArray<FUeAgentContentGraphProperty>& OutProperties, int32& OutPropertyCount,
+			FUeAgentContentGraphReadError& OutError, TArray<FString>* OutRevisionFacts = nullptr,
+			const TSet<FName>* Excluded = nullptr)
+		{
+			UeAgentPropertyValueCodec::FOptions Options;
+			Options.bCompareStoredValues = true;
+			Options.bAllowPartialStructFields = false;
+			TArray<FProperty*> Properties;
+			CollectProperties(Object, Properties, Excluded);
 
 			UObject* DefaultObject =
 				Object.GetClass()->GetDefaultObject();
@@ -1145,17 +1149,17 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			if (FunctionInstance || Instance)
 			{
 				TSharedPtr<FJsonValue> Parameters;
-				TArray<TSharedPtr<FJsonValue>> Definitions;
+				TArray<UeAgentMaterialAuthoring::FInstanceParameterDefault> Defaults;
 				UE::UAI::Contract::FDiagnostic Error;
 				if (FunctionInstance)
 				{
-					if (!UeAgentMaterialAuthoring::FunctionInstance::Read(*FunctionInstance, Parameters, Error, &Definitions))
+					if (!UeAgentMaterialAuthoring::FunctionInstance::Read(*FunctionInstance, Parameters, Error, nullptr, &Defaults))
 						return Fail(OutError, Error, Owner.GetPathName());
 				}
 				else
 				{
 					TArray<TSharedPtr<FJsonValue>> Values;
-					if (!UeAgentMaterialAuthoring::CaptureInstanceParameters(*Instance, Values, Error, &Definitions))
+					if (!UeAgentMaterialAuthoring::CaptureInstanceParameters(*Instance, Values, Error, nullptr, &Defaults))
 					{
 						if (Error.TargetPath.IsEmpty()) Error.TargetPath = Owner.GetPathName();
 						return Fail(OutError, Error, Owner.GetPathName());
@@ -1171,9 +1175,32 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					const FString Association = Row->GetStringField(TEXT("association"));
 					const FString ParameterIndex = FString::FromInt(Row->GetIntegerField(TEXT("parameter_index")));
 					FUeAgentContentGraphParameter Captured;
-					if (!TryMakeManualFieldState(Row->TryGetField(TEXT("value")), Definitions[Index],
+					if (!Defaults.IsValidIndex(Index) || !Defaults[Index].Value.IsValid())
+					{
+						Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_graph_read_state_default_missing"),
+							TEXT("The native material parameter has no inherited or declared default."), TEXT("content_capture"));
+						Error.SourceKind = TEXT("native_result");
+						Error.PropertyPath = TEXT("/parameters/") + Kind + TEXT(":") + Name + TEXT("/default");
+						return Fail(OutError, Error, Owner.GetPathName());
+					}
+					const auto& NativeDefault = Defaults[Index];
+					if (!TryMakeManualFieldState(Row->TryGetField(TEXT("value")), NativeDefault.Value,
 						TEXT("material.parameter.") + Kind, Row->GetBoolField(TEXT("authored_override")),
 						Resources, Captured.State, OutError)) return false;
+					Captured.State.Default = FUeAgentDefaultValue(
+						EUeAgentDefaultSourceKind::DomainNative,
+						NativeDefault.SourceIdentity, NativeDefault.Provenance,
+						Captured.State.Default.GetValue().GetValue());
+					if (Kind == TEXT("texture") || Kind == TEXT("texture_collection")
+						|| Kind == TEXT("runtime_virtual_texture") || Kind == TEXT("sparse_volume_texture"))
+					{
+						// A native resource reference can be null independently of its inherited value.
+						const auto ValueKind = Captured.State.Value->GetKind();
+						const auto DefaultKind = Captured.State.Default.GetValue().GetValue()->GetKind();
+						const auto KindWhenPresent = ValueKind == EUeAgentValueKind::Null ? DefaultKind : ValueKind;
+						Captured.State.Type = FUeAgentCanonicalType(TEXT("material.parameter.") + Kind,
+							KindWhenPresent, true, ContainerKind(KindWhenPresent));
+					}
 					Captured.ParameterId = Kind + TEXT(":") + Name + TEXT(":") + Association + TEXT(":") + ParameterIndex;
 					Captured.OwnerId = Owner.GetPathName();
 					Captured.SemanticIdentity = SemanticIdentity(TEXT("uai.semantic.material.parameter"),
@@ -1181,6 +1208,14 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					OutCapture.Parameters.Add(MoveTemp(Captured));
 					FString Fact;
 					if (!UE::UAI::CommandContract::Json::TryCanonicalize(Row, Fact, Error))
+						return Fail(OutError, Error, Owner.GetPathName());
+					RevisionFacts.Add(MoveTemp(Fact));
+					const auto DefaultFact = MakeShared<FJsonObject>();
+					DefaultFact->SetStringField(TEXT("parameter"), Kind + TEXT(":") + Name + TEXT(":") + Association + TEXT(":") + ParameterIndex);
+					DefaultFact->SetField(TEXT("default"), NativeDefault.Value);
+					DefaultFact->SetStringField(TEXT("source"), NativeDefault.SourceIdentity);
+					DefaultFact->SetStringField(TEXT("provenance"), NativeDefault.Provenance);
+					if (!UE::UAI::CommandContract::Json::TryCanonicalize(DefaultFact, Fact, Error))
 						return Fail(OutError, Error, Owner.GetPathName());
 					RevisionFacts.Add(MoveTemp(Fact));
 				}
@@ -1708,7 +1743,9 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			FUeAgentResourceTracker& Resources,
 			FUeAgentContentGraphCapture& OutCapture,
 			FString& OutNativeRevision,
-			FUeAgentContentGraphReadError& OutError)
+			FUeAgentContentGraphReadError& OutError,
+			const TMap<int32, TSet<FString>>* FieldsByNode = nullptr,
+			bool bIncludeTopology = false)
 		{
 			OutNativeRevision.Reset();
 			UTextureGraph* TextureGraph = Cast<UTextureGraph>(&Owner);
@@ -1771,19 +1808,23 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 						return;
 					}
 					const int32 Index = Node->GetId().NodeIdx();
+					if (FieldsByNode && !bIncludeTopology && !FieldsByNode->Contains(Index)) return;
 					const FString Id = NodeId(Index);
 					const FString ClassPath =
 						Node->GetExpression()->GetClass()->GetPathName();
 					// All editable fields not represented by compact parameters use the
 					// same FProperty descriptor and native expression owner.
-					TArray<FUeAgentContentGraphProperty> ExpressionProperties; int32 PropertyCount = 0;
-					if (!AddProperties(*Node->GetExpression(), Resources, ExpressionProperties, PropertyCount, OutError))
-					{ bCaptureValid = false; return; }
-					for (auto& Captured : ExpressionProperties)
+					TArray<FProperty*> ExpressionProperties;
+					if (!FieldsByNode || FieldsByNode->Contains(Index))
+						CollectProperties(*Node->GetExpression(), ExpressionProperties);
+					for (FProperty* Property : ExpressionProperties)
 					{
-						FProperty* Property = FindFProperty<FProperty>(Node->GetExpression()->GetClass(), *Captured.FieldId);
 						if (!Property || !DomainAdapters::AudioMediaGraph::FAudioMediaGraphTextureGraphNativeHook::UsesReflectedExpressionProperty(
 							*Node->GetExpression(), *Property)) continue;
+						if (FieldsByNode && !FieldsByNode->FindChecked(Index).Contains(Property->GetName())) continue;
+						FUeAgentContentGraphProperty Captured;
+						Captured.OwnerId = Node->GetExpression()->GetPathName();
+						Captured.FieldId = Property->GetName();
 						UeAgentAuthoringState::FReadRequest Request;
 						UeAgentAuthoringTargetLocator::FResolveResult TargetResult;
 						if (!UeAgentAuthoringState::BuildPropertyReadRequest(Node->GetExpression(), Captured.FieldId,
@@ -1813,6 +1854,12 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 							ContainerKind(Captured.State.Value->GetKind()));
 						Captured.State.Default = FUeAgentDefaultValue(EUeAgentDefaultSourceKind::ClassDefaultObject,
 							DefaultExpression->GetPathName(), TEXT("reflection_class_default"), DefaultValue.ToSharedRef());
+						auto StoredOptions = CodecOptions; StoredOptions.bCompareStoredValues = true;
+						const bool bOverridden = !UeAgentPropertyValueCodec::AreSemanticallyEquivalent(Property,
+							Property->ContainerPtrToValuePtr<void>(Node->GetExpression()), Property->ContainerPtrToValuePtr<void>(DefaultExpression),
+							Node->GetExpression(), StoredOptions);
+						Captured.State.AuthoredPresence = bOverridden ? EUeAgentAuthoredPresence::Present : EUeAgentAuthoredPresence::Absent;
+						Captured.State.OverrideState = bOverridden ? EUeAgentOverrideState::Overridden : EUeAgentOverrideState::Inherited;
 						if (!TryCanonicalObject(Metadata, Resources, Captured.State.AuthoringDescriptor, OutError))
 						{ bCaptureValid = false; return; }
 						Captured.State.AuthoringDetails = FUeAgentStateDetails(Descriptor.DisplayName, Descriptor.Tooltip,
@@ -1855,6 +1902,12 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					State->SetStringField(
 						TEXT("node_type"),
 						Node->GetExpression()->GetClass()->GetName());
+					if (FieldsByNode && !bIncludeTopology) {
+						bCaptureValid = TryCanonicalObject(State, Resources, Item.State, OutError);
+						if (bCaptureValid) OutCapture.Items.Add(MoveTemp(Item));
+						RevisionFacts.Add(Id + TEXT("|") + ClassPath);
+						return;
+					}
 					TArray<TSharedPtr<FJsonValue>> InterfacePins;
 					Graph->ForEachPins(
 						[&InterfacePins, Index](
@@ -1948,7 +2001,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				return false;
 			}
 
-			Graph->ForEachPins(
+			if (!FieldsByNode || bIncludeTopology) Graph->ForEachPins(
 				[&](const UTG_Pin* Pin, const uint32, const uint32)
 				{
 					if (!Pin)
@@ -2194,40 +2247,82 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			return Rows;
 		}
 
+		bool AppendLevelProperties(const FUeAgentCanonicalSnapshot& Snapshot,
+			FUeAgentContentGraphCapture& OutCapture, FUeAgentContentGraphReadError& OutError)
+		{
+			using namespace UeAgentLevelAuthoring;
+			TSet<FString> ActorOwners;
+			TMap<FString, TSet<FString>> ComponentOwners;
+			for (const auto& Entry : Snapshot.GetEntries()) {
+				const auto& Identity = Entry.GetIdentity();
+				if (Identity.GetSemanticId() == ActorPropertySemanticId) ActorOwners.Add(Identity.GetSelector(TEXT("actor_guid")));
+				else if (Identity.GetSemanticId() == ComponentPropertySemanticId)
+					ComponentOwners.FindOrAdd(Identity.GetSelector(TEXT("owner_actor_guid"))).Add(Identity.GetSelector(TEXT("component_name")));
+			}
+			if (ActorOwners.IsEmpty() && ComponentOwners.IsEmpty()) return true;
+			TMap<FString, FString> ActorIds;
+			TMap<FString, TMap<FString, FString>> ComponentIds;
+			for (const auto& Item : OutCapture.Items) {
+				if (Item.ItemKind == TEXT("actor")) {
+					const FString Guid = Item.SemanticIdentity.Selectors.FindRef(TEXT("actor_guid"));
+					if (ActorOwners.Contains(Guid)) ActorIds.Add(Guid, Item.ItemId);
+				} else if (Item.ItemKind == TEXT("component")) {
+					const FString Guid = Item.SemanticIdentity.Selectors.FindRef(TEXT("owner_actor_guid"));
+					const FString Name = Item.SemanticIdentity.Selectors.FindRef(TEXT("component_name"));
+					const auto* Needed = ComponentOwners.Find(Guid);
+					if (Needed && Needed->Contains(Name)) ComponentIds.FindOrAdd(Guid).Add(Name, Item.ItemId);
+				}
+			}
+			for (const auto& Entry : Snapshot.GetEntries()) {
+				const auto& Identity = Entry.GetIdentity();
+				const FString& SemanticId = Identity.GetSemanticId();
+				if (SemanticId != ActorPropertySemanticId && SemanticId != ComponentPropertySemanticId) continue;
+				const bool bActorProperty = SemanticId == ActorPropertySemanticId;
+				const FString ActorGuid = Identity.GetSelector(bActorProperty ? TEXT("actor_guid") : TEXT("owner_actor_guid"));
+				const auto* Components = ComponentIds.Find(ActorGuid);
+				const FString* OwnerId = bActorProperty ? ActorIds.Find(ActorGuid)
+					: (Components ? Components->Find(Identity.GetSelector(TEXT("component_name"))) : nullptr);
+				if (!OwnerId) return Fail(OutError, CaptureFact(TEXT("level_read_property_owner_missing"), TEXT("Captured property has no matching actor or component owner."), TEXT("/actors"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Identity.GetCanonicalKey()));
+				FUeAgentContentGraphProperty Property;
+				Property.OwnerId = *OwnerId; Property.FieldId = Identity.GetSelector(TEXT("property_path"));
+				Property.SemanticIdentity = SemanticIdentity(SemanticId, Identity.GetSelectors(), TEXT("property"));
+				Property.State.AuthoringDescriptor = Entry.GetAuthoringDescriptor(); Property.State.AuthoringDetails = Entry.GetDetails();
+				Property.State.Value = Entry.GetValue(); Property.State.Type = Entry.GetType(); Property.State.Default = Entry.GetDefault();
+				Property.State.AuthoredPresence = Entry.GetAuthoredPresence(); Property.State.OverrideState = Entry.GetOverrideState();
+				OutCapture.Properties.Add(MoveTemp(Property));
+			}
+			return true;
+		}
+
 		bool CaptureLevel(UWorld& World, FUeAgentContentGraphCapture& OutCapture,
-			FUeAgentContentGraphReadError& OutError)
+			FUeAgentContentGraphReadError& OutError, const TArray<UeAgentLevelAuthoring::FLevelActorCaptureScope>* Scope = nullptr,
+			bool bIncludeScopedGeometry = false, bool bIncludeAuthoringMetadata = true)
 		{
 			using namespace UeAgentLevelAuthoring;
 			FLevelAuthoringCapture Capture;
 			UE::UAI::Contract::FDiagnostic Error;
 			if (!UeAgentLevelAuthoring::RegisterAuthoring(Error)
-				|| !TryCaptureLevelAuthoringState(World, Capture, Error))
+				|| !(Scope ? TryCaptureLevelScopedNativeState(World, *Scope, Capture, Error, TEXT("llm_authoring"))
+					: TryCaptureLevelNativeState(World, Capture, Error, TEXT("llm_authoring"))))
 				return Fail(OutError, Error, World.GetPathName());
+			auto Resources = MakeSemanticWorkspaceResourceTracker();
+			FWorkspaceError ProjectionError;
+			if (!TryBuildCanonicalAuthoringSnapshot(TEXT("ue.level.asset"), TEXT("llm_authoring"), Capture.Snapshot,
+				Resources, Capture.CanonicalSnapshot, ProjectionError, bIncludeAuthoringMetadata && Scope == nullptr, Scope == nullptr)) return Fail(OutError, ProjectionError.GetDiagnostic(), World.GetPathName());
 			OutCapture.CanonicalRevision = Capture.CanonicalSnapshot->GetRevision();
 			OutCapture.Revision = Capture.CanonicalSnapshot->GetRevision().GetGeneration();
-			auto Resources = MakeSemanticWorkspaceResourceTracker();
 			const FString RootId = TEXT("level.actors:") + World.GetPathName();
 			TMap<FString, FString> ActorNames, ActorIds;
-			TMap<FString, TMap<FString, FString>> ComponentIds;
-			// Reuse the workspace's allocated actor keys, including duplicate-label handling.
-			for (const auto& Unit : Capture.Model->GetUnits())
-			{
-				const auto* Actors = Unit.GetValues().Find(TEXT("actors"));
-				if (!Actors) continue;
-				TSharedPtr<FJsonValue> Json;
-				if (!CanonicalJson::TryToJsonValue(Actors->Get(), Json, Error))
-					return Fail(OutError, Error, World.GetPathName());
-				for (const auto& Row : Json->AsObject()->Values)
-					ActorNames.Add(Row.Value->AsObject()->GetStringField(TEXT("actor_guid")), Row.Key);
-			}
+			// The original composition owner allocates the same namespace, but
+			// no complete Model/graph/JSON aggregate is produced just for two fields.
+			if (!TryVisitSnapshotKeyedMemberNames(TEXT("ue.level.asset"), *Capture.CanonicalSnapshot, ActorStateSemanticId, TEXT("actors"),
+				[&](const FString& Alias, const FString&, const FString& Guid, const FString&, const FString&) { ActorNames.Add(Guid, Alias); },
+				ProjectionError)) return Fail(OutError, ProjectionError.GetDiagnostic(), World.GetPathName());
 			for (const auto& Entry : Capture.CanonicalSnapshot->GetEntries())
 			{
 				const auto& Identity = Entry.GetIdentity();
 				if (Identity.GetSemanticId() == ActorStateSemanticId)
 					ActorIds.Add(Identity.GetSelector(TEXT("actor_guid")), Identity.GetCanonicalKey());
-				else if (Identity.GetSemanticId() == ComponentStateSemanticId)
-					ComponentIds.FindOrAdd(Identity.GetSelector(TEXT("owner_actor_guid")))
-						.Add(Identity.GetSelector(TEXT("component_name")), Identity.GetCanonicalKey());
 			}
 			for (const auto& Entry : Capture.CanonicalSnapshot->GetEntries())
 			{
@@ -2237,17 +2332,27 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				const bool bComponent = SemanticId == ComponentStateSemanticId;
 				if (SemanticId == WorldTargetSemanticId || bActor || bComponent)
 				{
-					TSharedPtr<FJsonValue> Json;
-					if (!CanonicalJson::TryToJsonValue(Entry.GetValue().Get(), Json, Error))
-						return Fail(OutError, Error, World.GetPathName());
-					const auto State = Json->AsObject().ToSharedRef();
+					if (Entry.GetValue()->GetKind() != EUeAgentValueKind::Object)
+						return Fail(OutError, CaptureFact(TEXT("level_read_state_not_object"), TEXT("Native Level state must be an object."),
+							TEXT("/state"), nullptr, MakeShared<FJsonValueString>(TEXT("object")), Identity.GetCanonicalKey()));
+					auto Fields = Entry.GetValue()->GetObjectItems();
+					FUeAgentStateSemanticError StateError;
+					const auto SetValue = [&](const FString& Key, FUeAgentCanonicalValueRef Value) {
+						if (auto* Existing = Fields.FindByPredicate([&](const auto& Field) { return Field.Key == Key; })) Existing->Value = MoveTemp(Value);
+						else Fields.Emplace(Key, MoveTemp(Value));
+					};
+					const auto SetText = [&](const FString& Key, const FString& Text) {
+						FUeAgentCanonicalValuePtr Value;
+						if (!FUeAgentCanonicalValue::TryString(Text, Resources, Value, StateError)) return false;
+						SetValue(Key, Value.ToSharedRef()); return true;
+					};
 					if (SemanticId == WorldTargetSemanticId)
 					{
 						FUeAgentContentGraphContainer Root;
 						Root.ContainerId = RootId; Root.ContainerKind = TEXT("actors"); Root.OwnerId = World.GetPathName();
 						Root.SemanticIdentity = SemanticIdentity(SemanticId, Identity.GetSelectors(), TEXT("container"));
-						State->SetStringField(TEXT("name"), TEXT("actors"));
-						if (!TryCanonicalObject(State, Resources, Root.State, OutError)) return false;
+						if (!SetText(TEXT("name"), TEXT("actors"))
+							|| !FUeAgentCanonicalValue::TryObject(MoveTemp(Fields), Resources, Root.State, StateError)) return Fail(OutError, MoveTemp(StateError));
 						OutCapture.Containers.Add(MoveTemp(Root));
 						continue;
 					}
@@ -2265,15 +2370,20 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					Item.Order = OutCapture.Items.Num();
 					Item.SemanticIdentity = SemanticIdentity(SemanticId, Identity.GetSelectors(), TEXT("item"));
 					const FString ItemName = bActor ? *ActorName : Identity.GetSelector(TEXT("component_name"));
-					State->SetStringField(TEXT("name"), ItemName);
-					State->SetStringField(TEXT("type"), Item.ClassPath);
-					State->SetStringField(TEXT("kind"), Item.ItemKind);
-					State->SetStringField(TEXT("container"), bActor ? TEXT("actors") : ComponentsName);
+					if (!SetText(TEXT("name"), ItemName) || !SetText(TEXT("type"), Item.ClassPath)
+						|| !SetText(TEXT("kind"), Item.ItemKind) || !SetText(TEXT("container"), bActor ? TEXT("actors") : ComponentsName))
+						return Fail(OutError, MoveTemp(StateError));
 					if (bActor)
 					{
-						State->SetStringField(TEXT("object_ref"), Identity.GetSelector(TEXT("object_path")));
-						if (AActor* Actor = FindObject<AActor>(nullptr, *Identity.GetSelector(TEXT("object_path"))))
-							State->SetArrayField(TEXT("geometry_components"), ReadMeshComponentGeometry(*Actor));
+						// Public lookup for the existing parent_managed_id attachment contract.
+						// This reports ownership already present on the Actor; it never assigns it.
+						if (!SetText(TEXT("object_ref"), Identity.GetSelector(TEXT("object_path")))
+							|| !SetText(TEXT("managed_id"), Identity.GetSelector(TEXT("managed_id")))) return Fail(OutError, MoveTemp(StateError));
+						if (AActor* Actor = (!Scope || bIncludeScopedGeometry) ? FindObject<AActor>(nullptr, *Identity.GetSelector(TEXT("object_path"))) : nullptr) {
+							FUeAgentCanonicalValuePtr Geometry;
+							if (!TryCanonicalValue(MakeShared<FJsonValueArray>(ReadMeshComponentGeometry(*Actor)), Resources, Geometry, StateError)) return Fail(OutError, MoveTemp(StateError));
+							SetValue(TEXT("geometry_components"), Geometry.ToSharedRef());
+						}
 						FUeAgentContentGraphContainer Components;
 						Components.ContainerId = ComponentsId; Components.ContainerKind = TEXT("components");
 						Components.OwnerId = Item.ItemId; Components.ParentContainerId = RootId;
@@ -2284,8 +2394,11 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 						if (!TryCanonicalObject(ContainerState, Resources, Components.State, OutError)) return false;
 						OutCapture.Containers.Add(MoveTemp(Components));
 					}
-					else State->SetStringField(TEXT("actor"), *ActorName);
-					if (!TryCanonicalObject(State, Resources, Item.State, OutError)) return false;
+					else if (!SetText(TEXT("actor"), *ActorName)) return Fail(OutError, MoveTemp(StateError));
+					if (!FUeAgentCanonicalValue::TryObject(MoveTemp(Fields), Resources, Item.State, StateError)) return Fail(OutError, MoveTemp(StateError));
+					// Only full/compound/relation capture consumes ownership edges.
+					// Single-facet topology already carries its required item owners.
+					if (!Scope) {
 					FUeAgentContentGraphRelation Relation;
 					Relation.RelationId = TEXT("level.ownership:") + Item.ItemId;
 					Relation.RelationKind = bActor ? TEXT("membership") : TEXT("parent");
@@ -2299,26 +2412,12 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					RelationState->SetStringField(TEXT("container"), bActor ? TEXT("actors") : ComponentsName);
 					if (!TryCanonicalObject(RelationState, Resources, Relation.State, OutError)) return false;
 					OutCapture.Relations.Add(MoveTemp(Relation));
+					}
 					OutCapture.Items.Add(MoveTemp(Item));
 				}
-				else if (SemanticId == ActorPropertySemanticId || SemanticId == ComponentPropertySemanticId)
-				{
-					const bool bActorProperty = SemanticId == ActorPropertySemanticId;
-					const FString ActorGuid = Identity.GetSelector(bActorProperty ? TEXT("actor_guid") : TEXT("owner_actor_guid"));
-					const auto* Components = ComponentIds.Find(ActorGuid);
-					const FString* OwnerId = bActorProperty ? ActorIds.Find(ActorGuid)
-						: (Components ? Components->Find(Identity.GetSelector(TEXT("component_name"))) : nullptr);
-					if (!OwnerId) return Fail(OutError, CaptureFact(TEXT("level_read_property_owner_missing"), TEXT("Captured property has no matching actor or component owner."), TEXT("/actors"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Identity.GetCanonicalKey()));
-					FUeAgentContentGraphProperty Property;
-					Property.OwnerId = *OwnerId; Property.FieldId = Identity.GetSelector(TEXT("property_path"));
-					Property.SemanticIdentity = SemanticIdentity(SemanticId, Identity.GetSelectors(), TEXT("property"));
-					Property.State.AuthoringDescriptor = Entry.GetAuthoringDescriptor(); Property.State.AuthoringDetails = Entry.GetDetails();
-					Property.State.Value = Entry.GetValue(); Property.State.Type = Entry.GetType(); Property.State.Default = Entry.GetDefault();
-					Property.State.AuthoredPresence = Entry.GetAuthoredPresence(); Property.State.OverrideState = Entry.GetOverrideState();
-					OutCapture.Properties.Add(MoveTemp(Property));
-				}
+
 			}
-			return true;
+			return AppendLevelProperties(*Capture.CanonicalSnapshot, OutCapture, OutError);
 		}
 
 		bool CaptureSmartObject(USmartObjectDefinition& Definition, FUeAgentContentGraphCapture& OutCapture,
@@ -2663,6 +2762,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		{
 			const UEdGraphNode* Node = nullptr;
 			const UObject* PropertyObject = nullptr;
+			FString QueryItemId;
 		};
 
 		using FAiGraphQueryBindings = TMap<FString, TMap<FString, FAiGraphQueryNode>>;
@@ -2670,7 +2770,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		// Both query and workspace use the canonical authoring graph projection.
 		// Native bindings only supply property objects; they do not define public rows.
 		bool CaptureProjectedAiGraphs(UObject& Owner, const FAiGraphQueryDomain& Domain,
-			const FAiGraphQueryBindings& NativeGraphs, FUeAgentContentGraphCapture& OutCapture,
+			FAiGraphQueryBindings& NativeGraphs, FUeAgentContentGraphCapture& OutCapture,
 			FUeAgentContentGraphReadError& OutError)
 		{
 			const FString OwnerId = Owner.GetPathName();
@@ -2703,8 +2803,20 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			for (const auto& Entry : Snapshot->GetEntries())
 			{
 				const auto& Identity = Entry.GetIdentity();
-				if (Identity.GetSemanticId() == Domain.NodeSemanticId)
-					ItemByDeclaration.Add(Identity.GetSelector(TEXT("item_id")), Identity.GetSelector(TEXT("node_id")));
+				if (Identity.GetSemanticId() != Domain.NodeSemanticId) continue;
+				const FString& GraphName = Identity.GetSelector(TEXT("graph_name"));
+				const FString& NodeId = Identity.GetSelector(TEXT("node_id"));
+				const FString& Declaration = Identity.GetSelector(TEXT("item_id"));
+				auto* Graph = NativeGraphs.Find(GraphName);
+				FAiGraphQueryNode* Binding = Graph ? Graph->Find(NodeId) : nullptr;
+				if (!Binding || Declaration.IsEmpty())
+					return Fail(OutError, CaptureFact(TEXT("ai_graph_read_node_binding_missing"),
+						TEXT("The captured node declaration must identify a node in its native graph."), TEXT("/nodes"),
+						MakeShared<FJsonValueString>(Declaration), MakeShared<FJsonValueString>(TEXT("native graph node declaration")), NodeId));
+				// Main graph item ids remain stable. Owned instances use their original
+				// declaration because their native GUIDs are local to each bound graph.
+				Binding->QueryItemId = GraphName == TEXT("main") ? NodeId : Declaration;
+				ItemByDeclaration.Add(Declaration, Binding->QueryItemId);
 			}
 			TSet<FString> CapturedGraphs;
 			FUeAgentResourceTracker PropertyResources = MakeCanonicalResources();
@@ -2768,10 +2880,14 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 						return Fail(OutError, CaptureFact(TEXT("ai_graph_read_node_binding_missing"), TEXT("Projected graph node has no captured source record."), TEXT("/nodes"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Entry.Key));
 					if (!(*Source)->TryGetStringField(TEXT("id"), Id))
 						return Fail(OutError, CaptureFact(TEXT("ai_graph_read_node_binding_missing"), TEXT("Captured graph node requires a string id."), TEXT("/nodes/") + Entry.Key + TEXT("/id"), (*Source)->TryGetField(TEXT("id")), MakeShared<FJsonValueString>(TEXT("string id"))));
-					if (!NativeById->Contains(Id))
+					const FAiGraphQueryNode* Binding = NativeById->Find(Id);
+					if (!Binding || Binding->QueryItemId.IsEmpty())
 						return Fail(OutError, CaptureFact(TEXT("ai_graph_read_node_binding_missing"), TEXT("Projected graph node id has no matching native node."), TEXT("/nodes"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Id));
 					IdByName.Add(Entry.Key, Id);
 				}
+				const auto QueryIdByName = [&](const FString& Name) -> const FString& {
+					return NativeById->FindChecked(IdByName.FindChecked(Name)).QueryItemId;
+				};
 				auto AddRelationState = [&](const FString& Id, const FString& Kind, const FString& FromId,
 					const FString& ToId, const TSharedRef<FJsonObject>& State) {
 					FUeAgentContentGraphRelation Relation;
@@ -2800,8 +2916,8 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					const auto& Binding = NativeById->FindChecked(Id);
 					const UObject* Payload = Binding.PropertyObject;
 					FUeAgentContentGraphItem Item;
-					Item.ItemId = Id; Item.ContainerId = GraphId;
-					Item.OwnerId = Parent.IsEmpty() ? GraphId : IdByName.FindRef(Parent);
+					Item.ItemId = Binding.QueryItemId; Item.ContainerId = GraphId;
+					Item.OwnerId = Parent.IsEmpty() ? GraphId : QueryIdByName(Parent);
 					Item.ItemKind = Parent.IsEmpty() ? Domain.NodeKind : Domain.ChildKind;
 					Item.ClassPath = (Payload ? Payload : Binding.Node)->GetClass()->GetPathName();
 					Item.Order = OutCapture.Items.Num();
@@ -2813,13 +2929,13 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					{
 						const int32 FirstProperty = OutCapture.Properties.Num();
 						if (!AddProperties(*const_cast<UObject*>(Payload), PropertyResources, OutCapture.Properties, PropertyCount, OutError)) return false;
-						for (int32 Index = FirstProperty; Index < OutCapture.Properties.Num(); ++Index) OutCapture.Properties[Index].OwnerId = Id;
+						for (int32 Index = FirstProperty; Index < OutCapture.Properties.Num(); ++Index) OutCapture.Properties[Index].OwnerId = Binding.QueryItemId;
 					}
 					if (!Parent.IsEmpty())
 					{
 						const auto Relation = MakeShared<FJsonObject>();
 						Relation->SetStringField(TEXT("from"), Parent); Relation->SetStringField(TEXT("to"), Entry.Key);
-						if (!AddRelationState(TEXT("attachment:") + Id, Domain.AttachmentKind, IdByName.FindChecked(Parent), Id, Relation)) return false;
+						if (!AddRelationState(TEXT("attachment:") + Binding.QueryItemId, Domain.AttachmentKind, QueryIdByName(Parent), Binding.QueryItemId, Relation)) return false;
 					}
 				}
 				for (const auto& Edge : Visible->GetArrayField(TEXT("connections")))
@@ -2833,7 +2949,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					To.LeftInline(Separator);
 					if (!IdByName.Contains(From) || !IdByName.Contains(To)) return Fail(OutError, CaptureFact(TEXT("ai_graph_read_endpoint_missing"), TEXT("Graph connection references a node absent from the projected graph."), TEXT("/connections"), MakeShared<FJsonValueString>(!IdByName.Contains(From) ? From : To), MakeShared<FJsonValueString>(TEXT("existing node name"))));
 					if (!AddRelationState(TEXT("edge:") + FString::FromInt(OutCapture.Relations.Num()), Domain.ConnectionKind,
-						IdByName.FindChecked(From), IdByName.FindChecked(To), State)) return false;
+						QueryIdByName(From), QueryIdByName(To), State)) return false;
 				}
 				if (IdByName.Num() != NativeById->Num())
 					return Fail(OutError, CaptureFact(TEXT("ai_graph_read_nodes_incomplete"), TEXT("Graph capture does not cover all native nodes."),
@@ -4235,11 +4351,26 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		return true;
 	}
 
-	bool FUeAgentContentGraphReadProductionEnvironment::
-		TryCaptureOwner(
+	bool FUeAgentContentGraphReadProductionEnvironment::TryCaptureTextureGraphSettings(UObject& Owner,
+		const TMap<int32, TSet<FString>>& FieldsByNode, FUeAgentContentGraphCapture& OutCapture,
+		FUeAgentContentGraphReadError& OutError, bool bIncludeTopology)
+	{
+		OutCapture = {}; OutError = {};
+		OutCapture.Owner = &Owner;
+		OutCapture.DomainId = TEXT("texture_graph");
+		const FString Root = TEXT("content_graph.container:") + Owner.GetPathName();
+		OutCapture.Containers.Add({Root, TEXT("root"), Owner.GetPathName(), FString(), 0});
+		auto Resources = MakeCanonicalResources();
+		if (!AugmentTextureGraphCapture(Owner, Root, Resources, OutCapture, OutCapture.Revision, OutError, &FieldsByNode, bIncludeTopology)) return false;
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=texture_setting_current nodes=%d properties=%d topology=%s complete_asset_values=false"),
+			OutCapture.Items.Num(), OutCapture.Properties.Num(), bIncludeTopology ? TEXT("true") : TEXT("false"));
+		return true;
+	}
+
+	static bool CaptureOwnerValues(
 			UObject& Owner,
 			FUeAgentContentGraphCapture& OutCapture,
-			FUeAgentContentGraphReadError& OutError)
+			FUeAgentContentGraphReadError& OutError, bool bForQuery)
 	{
 		OutCapture = {};
 		OutError = {};
@@ -4255,7 +4386,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		}
 		OutCapture.Owner = &Owner;
 		OutCapture.DomainId = ResolvedDomain;
-		if (UWorld* World = Cast<UWorld>(&Owner)) return CaptureLevel(*World, OutCapture, OutError);
+		if (UWorld* World = Cast<UWorld>(&Owner)) return CaptureLevel(*World, OutCapture, OutError, nullptr, false, !bForQuery);
 		if (UBehaviorTree* Tree = Cast<UBehaviorTree>(&Owner)) return CaptureBehaviorTree(*Tree, OutCapture, OutError);
 		if (UEnvQuery* Query = Cast<UEnvQuery>(&Owner)) return CaptureEqs(*Query, OutCapture, OutError);
 		if (UStateTree* Tree = Cast<UStateTree>(&Owner)) return CaptureStateTree(*Tree, OutCapture, OutError);
@@ -4484,6 +4615,94 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		return true;
 	}
 
+	bool FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(UObject& Owner,
+		FUeAgentContentGraphCapture& OutCapture, FUeAgentContentGraphReadError& OutError)
+	{
+		return CaptureOwnerValues(Owner, OutCapture, OutError, false);
+	}
+
+	static bool CaptureLevelReadTopology(FUeAgentContentGraphReadProductionEnvironment& Environment,
+		const UE::UAI::Discovery::FUeAgentCandidateBinding& Target,
+		const FUeAgentExecutionContextRef& Context, FUeAgentContentGraphCapture& OutCapture,
+		bool& bDeferredProperties, FUeAgentContentGraphReadError& OutError, bool bIncludeGeometry)
+	{
+		bDeferredProperties = false;
+		UWorld* World = Cast<UWorld>(ResolveObject(Target.GetPublicRef()));
+		if (!World) return Environment.TryCapture(Target, Context, OutCapture, OutError);
+		OutCapture = {}; OutError = {};
+		OutCapture.Owner = World; OutCapture.DomainId = DomainId(*World);
+		// Keep the original loaded descriptor references through a later selected
+		// getter, without using complete property capture to keep cells alive.
+		if (World->IsPartitionedWorld()) OutCapture.NativeReadScope = MakeShared<UeAgentLevelAuthoring::FLevelPartitionReadScope>(*World);
+		TArray<UeAgentLevelAuthoring::FLevelActorCaptureScope> Scope;
+		for (TActorIterator<AActor> It(World); It; ++It) {
+			auto& ActorScope = Scope.AddDefaulted_GetRef();
+			ActorScope.ActorGuid = It->GetActorGuid();
+			ActorScope.ManagedId = UeAgentLevelAuthoring::GetManagedActorId(**It);
+			ActorScope.bActorState = ActorScope.bAllComponents = true;
+			ActorScope.bComponentProperties = false;
+		}
+		if (!CaptureLevel(*World, OutCapture, OutError, &Scope, bIncludeGeometry)) return false;
+		bDeferredProperties = true;
+		UE_LOG(LogTemp, Display, TEXT("UAI read timing phase=level_read_topology actors=%d items=%d property_values=%d include_geometry=%s complete_asset_properties=false"),
+			Scope.Num(), OutCapture.Items.Num(), OutCapture.Properties.Num(), bIncludeGeometry ? TEXT("true") : TEXT("false"));
+		return true;
+	}
+
+	bool FUeAgentContentGraphReadProductionEnvironment::TryCapturePropertyTopology(
+		const UE::UAI::Discovery::FUeAgentCandidateBinding& Target,
+		const FUeAgentExecutionContextRef& Context, FUeAgentContentGraphCapture& OutCapture,
+		bool& bDeferredProperties, FUeAgentContentGraphReadError& OutError)
+	{
+		return CaptureLevelReadTopology(*this, Target, Context, OutCapture, bDeferredProperties, OutError, false);
+	}
+	bool FUeAgentContentGraphReadProductionEnvironment::TryCaptureItemTopology(
+		const UE::UAI::Discovery::FUeAgentCandidateBinding& Target,
+		const FUeAgentExecutionContextRef& Context, FUeAgentContentGraphCapture& OutCapture, FUeAgentContentGraphReadError& OutError, bool bIncludeGeometry)
+	{
+		bool bDeferredProperties = false;
+		return CaptureLevelReadTopology(*this, Target, Context, OutCapture, bDeferredProperties, OutError, bIncludeGeometry);
+	}
+
+	bool FUeAgentContentGraphReadProductionEnvironment::TryCaptureSelectedProperties(
+		FUeAgentContentGraphCapture& Capture, const TSet<FString>& Owners, const TSet<FString>& Fields,
+		FUeAgentContentGraphReadError& OutError)
+	{
+		UWorld* World = Cast<UWorld>(Capture.Owner);
+		if (!World) return true;
+		using namespace UeAgentLevelAuthoring;
+		TArray<FLevelActorCaptureScope> Scope;
+		for (const auto& Item : Capture.Items) {
+			if (!Owners.Contains(Item.ItemId)) continue;
+			const bool bActor = Item.ItemKind == TEXT("actor");
+			if (!bActor && Item.ItemKind != TEXT("component")) continue;
+			FGuid Guid;
+			FGuid::Parse(Item.SemanticIdentity.Selectors.FindRef(bActor ? TEXT("actor_guid") : TEXT("owner_actor_guid")), Guid);
+			auto* ActorScope = Scope.FindByPredicate([&](const auto& Existing) { return Existing.ActorGuid == Guid; });
+			if (!ActorScope) {
+				ActorScope = &Scope.AddDefaulted_GetRef();
+				ActorScope->ActorGuid = Guid; ActorScope->PropertyNames = Fields;
+			}
+			if (bActor) ActorScope->bActorProperties = true;
+			else ActorScope->ComponentNames.Add(Item.SemanticIdentity.Selectors.FindRef(TEXT("component_name")));
+		}
+		FLevelAuthoringCapture Selected;
+		UE::UAI::Contract::FDiagnostic Error;
+		if (!TryCaptureLevelScopedNativeState(*World, Scope, Selected, Error, TEXT("llm_authoring")))
+			return Fail(OutError, Error, World->GetPathName());
+		auto Resources = MakeSemanticWorkspaceResourceTracker(); FWorkspaceError ProjectionError;
+		if (!TryBuildCanonicalAuthoringSnapshot(TEXT("ue.level.asset"), TEXT("llm_authoring"), Selected.Snapshot,
+			Resources, Selected.CanonicalSnapshot, ProjectionError, false)) return Fail(OutError, ProjectionError.GetDiagnostic(), World->GetPathName());
+		// This is a revision of the actual selected observation, never a native
+		// identity or a promise that unrequested fields were observed.
+		Capture.CanonicalRevision = Selected.CanonicalSnapshot->GetRevision();
+		Capture.Revision = Selected.CanonicalSnapshot->GetRevision().GetGeneration();
+		if (!AppendLevelProperties(*Selected.CanonicalSnapshot, Capture, OutError)) return false;
+		UE_LOG(LogTemp, Display, TEXT("UAI read timing phase=level_selected_properties owners=%d fields=%d native_requests=%d returned_properties=%d complete_asset_properties=false"),
+			Owners.Num(), Fields.Num(), Selected.Snapshot.Num(), Capture.Properties.Num());
+		return true;
+	}
+
 	bool FUeAgentContentGraphReadProductionEnvironment::TryCapture(
 		const UE::UAI::Discovery::FUeAgentCandidateBinding& Target,
 		const UE::UAI::ContextResource::FUeAgentExecutionContextRef&
@@ -4503,9 +4722,9 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("resolvable object reference"));
 			return Fail(OutError, Diagnostic);
 		}
-		return TryCaptureOwner(
+		return CaptureOwnerValues(
 			*Owner,
 			OutCapture,
-			OutError);
+			OutError, true);
 	}
 }

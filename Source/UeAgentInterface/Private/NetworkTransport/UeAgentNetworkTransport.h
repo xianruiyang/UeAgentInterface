@@ -146,6 +146,7 @@ namespace UE::UAI::NetworkTransport
 
 		virtual FUeAgentTransportReply Handle(
 			const FUeAgentTransportIngress& Ingress) = 0;
+		virtual TOptional<FUeAgentTransportReply> TryHandleConcurrent(const FUeAgentTransportIngress&) { return {}; }
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentNetworkServerControl

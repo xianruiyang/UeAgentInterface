@@ -3,41 +3,12 @@
 #include "CoreMinimal.h"
 #include "Core/ArtifactPublisher/UeAgentArtifactPublisher.h"
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UE::UAI::ArtifactPublisher
 {
 	using UE::UAI::HjsonWorkspace::FExportWorkspacePlanPtr;
 	using UE::UAI::StateSemantic::FUeAgentStateRevision;
-
-	class UEAGENTINTERFACE_API FExportSemanticSignature final
-	{
-	public:
-		FExportSemanticSignature();
-		FExportSemanticSignature(
-			FString InInventory,
-			FString InReferenceClosure,
-			FString InContentDigests,
-			FString InContractSemantic,
-			FString InBusinessSemantic);
-
-		const FString& GetInventory() const;
-		const FString& GetReferenceClosure() const;
-		const FString& GetContentDigests() const;
-		const FString& GetContractSemantic() const;
-		const FString& GetBusinessSemantic() const;
-		bool IsValid() const;
-		const FArtifactPublishError& GetValidationDiagnostic() const;
-		bool operator==(const FExportSemanticSignature& Other) const;
-		bool operator!=(const FExportSemanticSignature& Other) const;
-		TMap<FString, FString> ToReceiptFields() const;
-
-	private:
-		FString Inventory;
-		FString ReferenceClosure;
-		FString ContentDigests;
-		FString ContractSemantic;
-		FString BusinessSemantic;
-		FArtifactPublishError ValidationDiagnostic;
-	};
 
 	class UEAGENTINTERFACE_API IVerifiedExportWorkspaceSource
 	{
@@ -50,14 +21,6 @@ namespace UE::UAI::ArtifactPublisher
 		virtual bool TryCaptureWorkspace(
 			const FUeAgentStateRevision& FrozenRevision,
 			FExportWorkspacePlanPtr& OutPlan,
-			FExportSemanticSignature& OutSemantic,
-			FArtifactPublishError& OutError) = 0;
-		virtual bool TryRebuildStagedWorkspace(
-			const FString& StagedWorkspacePath,
-			EWorkspaceKind WorkspaceKind,
-			const FString& EntryFile,
-			FUeAgentResourceTracker& Resources,
-			FExportSemanticSignature& OutSemantic,
 			FArtifactPublishError& OutError) = 0;
 		virtual bool TryReadCurrentTargetRevision(
 			FUeAgentStateRevision& OutRevision,
@@ -75,6 +38,8 @@ namespace UE::UAI::ArtifactPublisher
 		const TSharedRef<IVerifiedExportWorkspaceSource>& GetSource() const;
 		const FString& GetFinalPath() const;
 		const FString& GetPublisherOwnerId() const;
+		void SetWorkspacePreparation(HjsonWorkspace::FPreparedWorkspaceExport* InPrepared) { Prepared = InPrepared; }
+		HjsonWorkspace::FPreparedWorkspaceExport* GetWorkspacePreparation() const { return Prepared; }
 		bool IsValid() const;
 		const FArtifactPublishError& GetValidationDiagnostic() const;
 
@@ -82,6 +47,7 @@ namespace UE::UAI::ArtifactPublisher
 		TSharedRef<IVerifiedExportWorkspaceSource> Source;
 		FString FinalPath;
 		FString PublisherOwnerId;
+		HjsonWorkspace::FPreparedWorkspaceExport* Prepared = nullptr;
 		FArtifactPublishError ValidationDiagnostic;
 	};
 

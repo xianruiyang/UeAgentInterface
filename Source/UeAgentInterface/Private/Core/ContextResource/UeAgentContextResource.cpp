@@ -101,12 +101,20 @@ namespace UE::UAI::ContextResource
 		return Tracker->TryChargeMany(Amounts, Path, OutError);
 	}
 
+	bool FUeAgentResourceScope::TryChargeMany(
+		std::initializer_list<TPair<EUeAgentResourceDimension, int64>> Amounts,
+		FUeAgentResourceChargeError& OutError)
+	{
+		return Tracker->TryChargeMany(Amounts, Path, OutError);
+	}
+
 	const FString& FUeAgentResourceScope::GetPath() const
 	{
 		return Path;
 	}
 
 	FUeAgentResourceTracker::FUeAgentResourceTracker() = default;
+	FUeAgentResourceTracker::FUeAgentResourceTracker(bool bInCollectUsage) : bCollectUsage(bInCollectUsage) {}
 
 	FUeAgentResourceScope FUeAgentResourceTracker::Scope(FString Path)
 	{
@@ -119,7 +127,20 @@ namespace UE::UAI::ContextResource
 		const FString& Path,
 		FUeAgentResourceChargeError& OutError)
 	{
-		return TryChargeMany({{Dimension, Amount}}, Path, OutError);
+		if (!bCollectUsage) return true;
+		if (Amount < 0)
+		{
+			OutError = FUeAgentResourceChargeError::Failure(TEXT("resource_amount_invalid"), TEXT("Resource accounting rejected a negative amount."), TEXT("resource_accounting"));
+			OutError.ResourceDimension = LexToString(Dimension);
+			OutError.ResourceObserved = Amount;
+			OutError.Source.JsonPath = Path;
+			OutError.StoppedEarly = true;
+			return false;
+		}
+		FScopeLock Lock(&Mutex);
+		int64& Current = Values.FindOrAdd(Dimension);
+		Current += FMath::Min(Amount, MAX_int64 - Current);
+		return true;
 	}
 
 	bool FUeAgentResourceTracker::TryChargeMany(
@@ -127,8 +148,10 @@ namespace UE::UAI::ContextResource
 		const FString& Path,
 		FUeAgentResourceChargeError& OutError)
 	{
-		FScopeLock Lock(&Mutex);
-		TMap<EUeAgentResourceDimension, int64> Candidates;
+		if (!bCollectUsage) return true;
+		// Validate the complete immutable request before touching usage. Once
+		// admitted, the same lock protects every dimension's saturating update;
+		// no per-token/per-node temporary Candidates map is needed.
 		for (const TPair<EUeAgentResourceDimension, int64>& Pair : Amounts)
 		{
 			if (Pair.Value < 0)
@@ -140,20 +163,57 @@ namespace UE::UAI::ContextResource
 				OutError.StoppedEarly = true;
 				return false;
 			}
-			const int64 Current = Values.FindRef(Pair.Key);
-			Candidates.Add(Pair.Key,
-				Current + FMath::Min(Pair.Value, MAX_int64 - Current));
 		}
-
-		for (const TPair<EUeAgentResourceDimension, int64>& Pair : Candidates)
+		FScopeLock Lock(&Mutex);
+		for (const TPair<EUeAgentResourceDimension, int64>& Pair : Amounts)
 		{
-			Values.Add(Pair.Key, Pair.Value);
+			int64& Current = Values.FindOrAdd(Pair.Key);
+			Current += FMath::Min(Pair.Value, MAX_int64 - Current);
 		}
 		return true;
 	}
 
+	bool FUeAgentResourceTracker::TryChargeMany(
+		std::initializer_list<TPair<EUeAgentResourceDimension, int64>> Amounts,
+		const FString& Path, FUeAgentResourceChargeError& OutError)
+	{
+		if (!bCollectUsage) return true;
+		// The dimension list is bounded by its caller, not an input-size quota.
+		// Preserve the map overload's all-or-nothing validation and duplicate
+		// semantics without allocating a map for every scalar or token.
+		const auto Visit = [&](auto&& Consumer) {
+			for (auto It = Amounts.begin(); It != Amounts.end(); ++It) {
+				bool bFirst = true;
+				for (auto Prior = Amounts.begin(); Prior != It; ++Prior)
+					if (Prior->Key == It->Key) { bFirst = false; break; }
+				if (!bFirst) continue;
+				const auto* Last = It;
+				for (auto Next = It + 1; Next != Amounts.end(); ++Next)
+					if (Next->Key == It->Key) Last = Next;
+				if (!Consumer(It->Key, Last->Value)) return false;
+			}
+			return true;
+		};
+		if (!Visit([&](EUeAgentResourceDimension Dimension, int64 Amount) {
+			if (Amount >= 0) return true;
+			OutError = FUeAgentResourceChargeError::Failure(TEXT("resource_amount_invalid"), TEXT("Resource accounting rejected a negative amount."), TEXT("resource_accounting"));
+			OutError.ResourceDimension = LexToString(Dimension);
+			OutError.ResourceObserved = Amount;
+			OutError.Source.JsonPath = Path;
+			OutError.StoppedEarly = true;
+			return false;
+		})) return false;
+		FScopeLock Lock(&Mutex);
+		return Visit([&](EUeAgentResourceDimension Dimension, int64 Amount) {
+			int64& Current = Values.FindOrAdd(Dimension);
+			Current += FMath::Min(Amount, MAX_int64 - Current);
+			return true;
+		});
+	}
+
 	FUeAgentResourceUsage FUeAgentResourceTracker::Snapshot() const
 	{
+		if (!bCollectUsage) return FUeAgentResourceUsage({});
 		FScopeLock Lock(&Mutex);
 		return FUeAgentResourceUsage(Values);
 	}

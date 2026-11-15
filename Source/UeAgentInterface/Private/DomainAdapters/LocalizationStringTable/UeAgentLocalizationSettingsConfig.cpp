@@ -167,13 +167,12 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 			UeAgentDetailsAuthoringService::FCapturePolicy Policy;
 			Policy.ExcludedProperties = {TEXT("Guid"), TEXT("TargetDependencies")};
 			UeAgentAuthoringState::FStateSnapshot ExpectedSnapshot, ActualSnapshot;
-			TSharedPtr<FJsonObject> ExpectedDocument, ActualDocument;
 			UE::UAI::Contract::FDiagnostic CaptureError;
 			const FString Owner = GetDefault<ULocalizationSettings>()->GetPathName();
-			if (UeAgentDetailsAuthoringService::CaptureStructProperties(FLocalizationTargetSettings::StaticStruct(),
-				&Expected, Owner, nullptr, Policy, ExpectedSnapshot, ExpectedDocument, CaptureError)
-				&& UeAgentDetailsAuthoringService::CaptureStructProperties(FLocalizationTargetSettings::StaticStruct(),
-					&Actual, Owner, nullptr, Policy, ActualSnapshot, ActualDocument, CaptureError))
+			if (UeAgentDetailsAuthoringService::CaptureStructSnapshot(FLocalizationTargetSettings::StaticStruct(),
+				&Expected, Owner, nullptr, Policy, ExpectedSnapshot, CaptureError)
+				&& UeAgentDetailsAuthoringService::CaptureStructSnapshot(FLocalizationTargetSettings::StaticStruct(),
+					&Actual, Owner, nullptr, Policy, ActualSnapshot, CaptureError))
 			{
 				UeAgentAuthoringSemanticCompare::FComparisonReport Report;
 				const bool bCompared = UeAgentAuthoringSemanticCompare::CompareSnapshots(ExpectedSnapshot, ActualSnapshot, {}, Report);
@@ -212,18 +211,24 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 			}
 			for (int32 Index = 0; Index < Actual.Num(); ++Index)
 			{
-				bool bEqual;
+				TOptional<FLocalizationTargetSettings> PersistentExpected;
+				const FLocalizationTargetSettings* ComparedExpected = &Expected[Index];
 				if (bSerialized)
 				{
-					FString Left, Right;
-					FLocalizationTargetSettings::StaticStruct()->ExportText(Left, &Actual[Index], nullptr, nullptr, PPF_SerializedAsImportText, nullptr);
-					FLocalizationTargetSettings::StaticStruct()->ExportText(Right, &Expected[Index], nullptr, nullptr, PPF_SerializedAsImportText, nullptr);
-					bEqual = Left.Equals(Right, ESearchCase::CaseSensitive);
+					// UE's config representation omits these two transient statistics
+					// (LocalizationTargetTypes.h). Compare the persisted native fields
+					// with the same native struct owner, without two ExportText copies.
+					PersistentExpected.Emplace(Expected[Index]);
+					PersistentExpected->ConflictStatus = Actual[Index].ConflictStatus;
+					for (int32 Culture = 0; Culture < PersistentExpected->SupportedCulturesStatistics.Num()
+						&& Culture < Actual[Index].SupportedCulturesStatistics.Num(); ++Culture)
+						PersistentExpected->SupportedCulturesStatistics[Culture].WordCount = Actual[Index].SupportedCulturesStatistics[Culture].WordCount;
+					ComparedExpected = &PersistentExpected.GetValue();
 				}
-				else bEqual = FLocalizationTargetSettings::StaticStruct()->CompareScriptStruct(&Actual[Index], &Expected[Index], PPF_None);
+				const bool bEqual = FLocalizationTargetSettings::StaticStruct()->CompareScriptStruct(&Actual[Index], ComparedExpected, PPF_None);
 				if (!bEqual)
 				{
-					Error = TargetDifference(Actual[Index], Expected[Index], Index, Code);
+					Error = TargetDifference(Actual[Index], *ComparedExpected, Index, Code);
 					return false;
 				}
 			}

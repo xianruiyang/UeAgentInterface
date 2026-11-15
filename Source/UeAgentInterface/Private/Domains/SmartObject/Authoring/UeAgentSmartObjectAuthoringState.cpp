@@ -9,6 +9,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "UObject/UnrealType.h"
+#include "UObject/Package.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 
@@ -262,11 +263,19 @@ namespace UeAgentSmartObjectAuthoring
 	bool ReadDefinitionDocument(const USmartObjectDefinition& Definition,
 		TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		return ReadDefinitionDocument(Definition, OutValue, OutError, nullptr);
+	}
+
+	bool ReadDefinitionDocument(const USmartObjectDefinition& Definition, TSharedPtr<FJsonValue>& OutValue,
+		UE::UAI::Contract::FDiagnostic& OutError, TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
+	{
 		OutValue.Reset(); OutError.Reset();
 		TArray<UeAgentAuthoringState::FReadRequest> Requests;
-		if (!AppendStructuralReadRequests(Definition, Definition.GetPathName(), Requests, OutError)) return false;
-		// Internal reconstruction retains nested native identities omitted by authoring.
-		for (auto& Request : Requests) Request.Limits.StructFieldFilter = nullptr;
+		const FString AssetPath = OutStructure ? Definition.GetOutermost()->GetName() : Definition.GetPathName();
+		if (!AppendStructuralReadRequests(Definition, AssetPath, Requests, OutError)) return false;
+		// Checkpoint replay needs native nested fields, including the hidden slot identity.
+		for (auto& Request : Requests)
+			if (Request.SemanticId == ItemPropertySemanticId) Request.Limits.bApplyAuthoringStructFieldPolicy = false;
 		UeAgentAuthoringState::FCaptureResult Capture;
 		if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
 		{ OutError = Capture.Diagnostic; return false; }
@@ -274,6 +283,8 @@ namespace UeAgentSmartObjectAuthoring
 		const auto Document = MakeShared<FJsonObject>();
 		const auto Items = MakeShared<FJsonObject>();
 		TMap<FString, TArray<UeAgentAuthoringState::FStateEntry>> Properties;
+		UeAgentDetailsAuthoringService::FProjectionPolicy Checkpoint;
+		Checkpoint.bRequireEditable = false;
 		for (const auto& Entry : Entries)
 		{
 			const FString Owner = Entry.TargetIdentity.GetSelector(TEXT("node_id"));
@@ -299,11 +310,12 @@ namespace UeAgentSmartObjectAuthoring
 				return false;
 			}
 			TSharedPtr<FJsonObject> PropertyDocument;
-			if (!UeAgentDetailsAuthoringService::BuildPropertiesDocument(Pair.Value, {}, PropertyDocument, OutError)) return false;
+			if (!UeAgentDetailsAuthoringService::BuildPropertiesDocument(Pair.Value, Checkpoint, PropertyDocument, OutError)) return false;
 			(*Item)->SetObjectField(TEXT("properties"), PropertyDocument);
 		}
 		Document->SetObjectField(TEXT("items"), Items);
 		OutValue = MakeShared<FJsonValueObject>(Document);
+		if (OutStructure) OutStructure->Emplace(MoveTemp(Capture.Snapshot));
 		return true;
 	}
 

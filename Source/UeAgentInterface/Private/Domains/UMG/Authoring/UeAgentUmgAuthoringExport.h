@@ -9,11 +9,14 @@
 
 class UWidgetBlueprint;
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UeAgentUmgAuthoring
 {
 	UEAGENTINTERFACE_API bool ExportAssetWorkspace(
 		UWidgetBlueprint& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

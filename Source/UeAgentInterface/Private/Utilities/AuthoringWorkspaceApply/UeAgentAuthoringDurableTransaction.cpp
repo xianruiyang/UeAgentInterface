@@ -6,22 +6,82 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringDurableDirectory.h"
 #include "Core/AssetDurable/UeAgentPackageSave.h"
+#include "Core/ArtifactPublisher/UeAgentArtifactGenerationFiles.h"
+#include "Core/HjsonWorkspace/UeAgentWorkspaceFileProof.h"
 #include "Utilities/UeAgentFileOperationDiagnostic.h"
+#include "Utilities/UeAgentThreadCpuTiming.h"
 
 #include "Dom/JsonObject.h"
+#include "Async/ParallelFor.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
+#include "Hash/Blake3.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
 #include "Misc/SecureHash.h"
 #include "Misc/ScopeExit.h"
+#include "Misc/PackageName.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/Archive.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+
+namespace UeAgentAuthoringWorkspaceTransaction {
+
+FString GetDurableTransactionRoot(bool bWorldImport) {
+  return FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() /
+      (bWorldImport ? TEXT("UeAgentInterface/Authoring/WorldImport") : TEXT("UeAgentInterface/DurableTransactions")));
+}
+
+bool IsAuthoringDurableJournalId(const FString& Id) { return Id.StartsWith(TEXT("apply-durable:")); }
+
+FString MakeDurableJournalRecoveryId(const FString& JournalPath) {
+  FString Path = FPaths::ConvertRelativePathToFull(JournalPath); FPaths::NormalizeFilename(Path);
+  for (bool bWorld : {false, true}) {
+    FString Root = GetDurableTransactionRoot(bWorld); FPaths::NormalizeDirectoryName(Root);
+    if (!Path.StartsWith(Root + TEXT("/"), ESearchCase::IgnoreCase)) continue;
+    const FString Name = Path.Contains(TEXT("/completed/")) ? FPaths::GetBaseFilename(Path) : FPaths::GetCleanFilename(FPaths::GetPath(Path));
+    return FString(TEXT("apply-durable:")) + (bWorld ? TEXT("world:") : TEXT("workspace:")) + Name;
+  }
+  return FString();
+}
+
+struct FDurableConsumerHistoryState {
+  struct FRead {
+    FString Owner, Stream, Schema, RequestId;
+    FBlake3Hash TextHash;
+    bool bOwner = false, bStream = false, bSequenceValid = false;
+    bool bHasIntent = false, bHasVerified = false, bIntentLoaded = false, bVerifiedLoaded = false;
+    FDurableConsumerRecord Record;
+    UE::UAI::HjsonWorkspace::FWorkspaceFileProofPtr Proof;
+    TUniquePtr<UE::UAI::ArtifactPublisher::FGenerationFileGuard> Guard;
+    int64 Charge() const {
+      return sizeof(FRead) + Owner.GetAllocatedSize() + Stream.GetAllocatedSize() + Schema.GetAllocatedSize() + RequestId.GetAllocatedSize()
+          + Record.RequestKey.GetAllocatedSize() + Record.Phase.GetAllocatedSize() + Record.OwnerId.GetAllocatedSize()
+          + Record.StreamId.GetAllocatedSize() + Record.IntentJson.GetAllocatedSize() + Record.VerifiedJson.GetAllocatedSize()
+          + (Guard ? Guard->GetRetainedBytes() : 0);
+    }
+  };
+  FDurableConsumerHistoryState* Previous = nullptr;
+  TMap<FString, FRead> Reads;
+  // Native scopes (e.g. Level Apply) can end before the outer import refresh.
+  // Ownership moves here only for the current request; this is not history
+  // authority and is never carried into PreviousParsedHistory.
+  TArray<FDurableConsumerRecord> RequestRecords;
+  FString JournalRoot;
+  // Only completed, private durable receipts may hold a read guard. Authoring
+  // source files and active journals retain their ordinary live read behavior.
+  TUniquePtr<UE::UAI::ArtifactPublisher::FGenerationDirectoryScope> ReceiptDirectories;
+  int32 ObservedReceipts = 0;
+  int64 Bytes = 0;
+};
+}
 
 namespace {
 using namespace UeAgentAuthoringWorkspaceTransaction;
@@ -29,6 +89,12 @@ using namespace UeAgentAuthoringWorkspaceTransaction;
 constexpr const TCHAR *JournalSchema = TEXT("uai.apply_durable_journal.v1");
 constexpr const TCHAR *JournalFileName = TEXT("journal.json");
 thread_local FScopedDurableRecoveryNotice* CurrentRecoveryNotice = nullptr;
+thread_local FScopedDurableConsumer* CurrentDurableConsumer = nullptr;
+thread_local FDurableConsumerHistoryState* CurrentHistory = nullptr;
+// Pure parsed receipt material only. No current-file proof survives a request;
+// every subsequent call enumerates and reads the actual legacy source again.
+// Ownership moves into the next scope, sharing the existing 64 MiB budget.
+thread_local TUniquePtr<FDurableConsumerHistoryState> PreviousParsedHistory;
 
 struct FDurableArtifactState {
   EDurableArtifactKind Kind = EDurableArtifactKind::File;
@@ -48,6 +114,7 @@ struct FDurableArtifactState {
 
 struct FDurableJournalState {
   FString RequestId;
+  FString OriginRequestId;
   FString RequestKey;
   FString RequestFingerprint;
   FString TransactionRoot;
@@ -56,6 +123,7 @@ struct FDurableJournalState {
   FString Phase;
   TArray<FString> PhaseHistory;
   TArray<FDurableArtifactState> Artifacts;
+  FDurableConsumerRecord Consumer;
 };
 
 void SetFailure(FOperationFailure& OutFailure, UE::UAI::Contract::FDiagnostic Diagnostic) {
@@ -118,6 +186,32 @@ void CleanupCompletedTransaction(const FDurableJournalState& State, FDurabilityR
   UeAgentAuthoringDiagnostics::FScopedWarnings CommandWarnings;
   CommandWarnings.Add(Warning);
   Result.Warnings.Add(MoveTemp(Warning));
+}
+
+bool HasPendingConsumerObservation(const FDurableJournalState& State) {
+  if (State.Consumer.VerifiedJson.IsEmpty()) return false;
+  const auto Reader = TJsonReaderFactory<TCHAR>::Create(State.Consumer.VerifiedJson);
+  EJsonNotation Notation;
+  if (!Reader->ReadNext(Notation) || Notation != EJsonNotation::ObjectStart) return true;
+  while (Reader->ReadNext(Notation)) {
+    if (Notation == EJsonNotation::Error) return true;
+    if (Notation == EJsonNotation::String && Reader->GetIdentifier() == TEXT("observation_status"))
+      return Reader->GetValueAsString() == TEXT("pending");
+    if (Notation == EJsonNotation::ObjectStart && !Reader->SkipObject()) return true;
+    if (Notation == EJsonNotation::ArrayStart && !Reader->SkipArray()) return true;
+    if (Notation == EJsonNotation::ObjectEnd) return false;
+  }
+  return true;
+}
+
+void RetainObservationMaterial(const FDurableJournalState& State, FDurabilityResult& Result) {
+  auto Warning = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_observation_material_retained"),
+      TEXT("The native transaction committed; its before/stage material is retained because HJSON observation is incomplete."), TEXT("workspace_durable_cleanup"));
+  Warning.Severity = UE::UAI::Contract::ESeverity::Warning;
+  Warning.TransactionStatus = State.Phase;
+  Warning.RetryImport = false;
+  UeAgentAuthoringDiagnostics::FScopedWarnings CommandWarnings;
+  CommandWarnings.Add(Warning); Result.Warnings.Add(MoveTemp(Warning));
 }
 
 FString NormalizeAbsolutePath(const FString &Input) {
@@ -195,14 +289,16 @@ bool SaveDurableText(const FString &Path, const FString &Text,
   return true;
 }
 
-bool LoadJson(const FString &Path, TSharedPtr<FJsonObject> &OutObject,
-              UE::UAI::Contract::FDiagnostic& OutError) {
-  FString Text;
+bool LoadJournalText(const FString& Path, FString& Text, UE::UAI::Contract::FDiagnostic& OutError) {
   if (!FFileHelper::LoadFileToString(Text, *Path)) {
     OutError = UE::UAI::FileDiagnostics::MakeFileOperationFailure(TEXT("durable_journal_read_failed"),
         TEXT("Reading the durable transaction journal failed."), TEXT("workspace_durable_transaction"), Path);
     return false;
   }
+  return true;
+}
+bool ParseJournalText(const FString& Path, const FString& Text, TSharedPtr<FJsonObject>& OutObject,
+    UE::UAI::Contract::FDiagnostic& OutError) {
   const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
   if (!FJsonSerializer::Deserialize(Reader, OutObject) || !OutObject.IsValid()) {
     OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_journal_json_invalid"),
@@ -212,6 +308,11 @@ bool LoadJson(const FString &Path, TSharedPtr<FJsonObject> &OutObject,
     return false;
   }
   return true;
+}
+
+bool LoadJson(const FString& Path, TSharedPtr<FJsonObject>& OutObject, UE::UAI::Contract::FDiagnostic& OutError) {
+  FString Text;
+  return LoadJournalText(Path, Text, OutError) && ParseJournalText(Path, Text, OutObject, OutError);
 }
 
 bool FileHash(const FString &Path, FString& OutHash, UE::UAI::Contract::FDiagnostic& OutError) {
@@ -341,6 +442,7 @@ TSharedRef<FJsonObject> JournalToJson(const FDurableJournalState &State) {
   TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
   Root->SetStringField(TEXT("schema"), JournalSchema);
   Root->SetStringField(TEXT("request_id"), State.RequestId);
+  if (!State.OriginRequestId.IsEmpty()) Root->SetStringField(TEXT("origin_request_id"), State.OriginRequestId);
   Root->SetStringField(TEXT("request_key"), State.RequestKey);
   Root->SetStringField(TEXT("request_fingerprint"),
                        State.RequestFingerprint);
@@ -348,6 +450,15 @@ TSharedRef<FJsonObject> JournalToJson(const FDurableJournalState &State) {
   Root->SetStringField(TEXT("phase"), State.Phase);
   Root->SetArrayField(TEXT("phase_history"),
                       StringArrayToJson(State.PhaseHistory));
+  if (!State.Consumer.OwnerId.IsEmpty()) {
+    const auto Consumer = MakeShared<FJsonObject>();
+    Consumer->SetStringField(TEXT("owner"), State.Consumer.OwnerId);
+    Consumer->SetStringField(TEXT("stream"), State.Consumer.StreamId);
+    Consumer->SetStringField(TEXT("sequence"), LexToString(State.Consumer.Sequence));
+    Consumer->SetStringField(TEXT("intent"), State.Consumer.IntentJson);
+    Consumer->SetStringField(TEXT("verified"), State.Consumer.VerifiedJson);
+    Root->SetObjectField(TEXT("consumer_evidence"), Consumer);
+  }
   TArray<TSharedPtr<FJsonValue>> ArtifactValues;
   ArtifactValues.Reserve(State.Artifacts.Num());
   for (const FDurableArtifactState &Artifact : State.Artifacts) {
@@ -425,6 +536,25 @@ bool JsonToJournal(const FString &JournalPath,
       !ReadString(*Root, TEXT("request_fingerprint"), OutState.RequestFingerprint, TEXT("/request_fingerprint")) ||
       !ReadString(*Root, TEXT("transaction_root"), OutState.TransactionRoot, TEXT("/transaction_root")) ||
       !ReadString(*Root, TEXT("phase"), OutState.Phase, TEXT("/phase"))) return false;
+  if (Root->HasField(TEXT("origin_request_id"))
+      && !ReadString(*Root, TEXT("origin_request_id"), OutState.OriginRequestId, TEXT("/origin_request_id"))) return false;
+  if (Root->HasField(TEXT("consumer_evidence"))) {
+    const TSharedPtr<FJsonObject>* Consumer = nullptr;
+    FString Sequence;
+    if (!Root->TryGetObjectField(TEXT("consumer_evidence"), Consumer) || !Consumer || !Consumer->IsValid())
+      return Fail(TEXT("durable_journal_field_invalid"), TEXT("The consumer evidence must be an object."),
+          TEXT("/consumer_evidence"), TEXT("object"), TEXT("invalid"));
+    if (!ReadString(**Consumer, TEXT("owner"), OutState.Consumer.OwnerId, TEXT("/consumer_evidence/owner")) ||
+        !ReadString(**Consumer, TEXT("stream"), OutState.Consumer.StreamId, TEXT("/consumer_evidence/stream")) ||
+        !ReadString(**Consumer, TEXT("sequence"), Sequence, TEXT("/consumer_evidence/sequence")) ||
+        !ReadString(**Consumer, TEXT("intent"), OutState.Consumer.IntentJson, TEXT("/consumer_evidence/intent")) ||
+        !ReadString(**Consumer, TEXT("verified"), OutState.Consumer.VerifiedJson, TEXT("/consumer_evidence/verified"))) return false;
+    if (OutState.Consumer.OwnerId.IsEmpty() || OutState.Consumer.StreamId.IsEmpty() ||
+        !LexTryParseString(OutState.Consumer.Sequence, *Sequence) || OutState.Consumer.Sequence <= 0 ||
+        !LexToString(OutState.Consumer.Sequence).Equals(Sequence, ESearchCase::CaseSensitive))
+      return Fail(TEXT("durable_journal_field_invalid"), TEXT("The consumer evidence identity or sequence is invalid."),
+          TEXT("/consumer_evidence"), TEXT("nonempty owner/stream and positive sequence"), Sequence);
+  }
   if (OutState.RequestId.IsEmpty())
     return Fail(TEXT("durable_journal_identity_invalid"), TEXT("The durable journal request ID is empty."), TEXT("/request_id"), TEXT("nonempty string"), TEXT("empty string"));
   const FString ExpectedKey = FMD5::HashAnsiString(*OutState.RequestId).ToLower();
@@ -548,11 +678,14 @@ bool WriteJournal(const FDurableJournalState &State, UE::UAI::Contract::FDiagnos
       OutError);
 }
 
-void RefreshPublishedArtifacts(const FDurableJournalState& State) {
+void RefreshPublishedArtifacts(TConstArrayView<FDurableArtifactState> Artifacts, int32 Confirmed) {
   TArray<FString> Files;
-  for (const auto& Artifact : State.Artifacts) {
+  TArray<FString> UnconfirmedFiles;
+  for (int32 Index = 0; Index < Artifacts.Num(); ++Index) {
+    const auto& Artifact = Artifacts[Index];
+    auto& Destination = Index < Confirmed ? Files : UnconfirmedFiles;
     if (Artifact.Kind == EDurableArtifactKind::File) {
-      Files.Add(Artifact.FinalPath);
+      Destination.Add(Artifact.FinalPath);
       continue;
     }
     // The union includes removed files as well as newly published ones. Only
@@ -564,15 +697,17 @@ void RefreshPublishedArtifacts(const FDurableJournalState& State) {
       IFileManager::Get().FindFilesRecursive(Found, *Root, TEXT("*"), true, false);
       for (FString File : Found) {
         if (FPaths::MakePathRelativeTo(File, *(Root + TEXT("/"))))
-          Files.AddUnique(Artifact.FinalPath / File);
+          Destination.AddUnique(Artifact.FinalPath / File);
       }
     }
   }
   UE::UAI::AssetDurable::RefreshPublishedPackageFiles(Files);
+  UE::UAI::AssetDurable::RescanPackageFiles(UnconfirmedFiles);
 }
 
 bool RestoreArtifacts(const FDurableJournalState &State, UE::UAI::Contract::FDiagnostic& OutError) {
-  ON_SCOPE_EXIT { RefreshPublishedArtifacts(State); };
+  int32 Confirmed = 0;
+  ON_SCOPE_EXIT { RefreshPublishedArtifacts(State.Artifacts, Confirmed); };
   for (const FDurableArtifactState &Artifact : State.Artifacts) {
     bool bFinalExists = false;
     FString FinalHash;
@@ -593,6 +728,7 @@ bool RestoreArtifacts(const FDurableJournalState &State, UE::UAI::Contract::FDia
       OutError = MakeDurableFailure(TEXT("durable_restore_delete_failed"), TEXT("Removing an artifact that did not exist before the transaction failed."), OutError, Artifact.ArtifactId);
       return false;
     }
+    ++Confirmed;
   }
   return true;
 }
@@ -617,6 +753,7 @@ bool AppendPhaseAndWrite(FDurableJournalState &State, const FString &Phase,
 
 void SyncResult(const FDurableJournalState &State,
                 FDurabilityResult &OutResult) {
+  if (CurrentRecoveryNotice) CurrentRecoveryNotice->RetainJournal(MakeDurableJournalRecoveryId(State.JournalPath));
   OutResult.JournalSchema = JournalSchema;
   OutResult.JournalPhase = State.Phase;
   OutResult.JournalPath = State.JournalPath;
@@ -624,27 +761,721 @@ void SyncResult(const FDurableJournalState &State,
   OutResult.ArtifactCount = State.Artifacts.Num();
 }
 
-FString CompletedPathFor(const FString &JournalRoot,
-                         const FString &RequestKey) {
-  return NormalizeAbsolutePath(JournalRoot) / TEXT("completed") /
-         (RequestKey + TEXT(".json"));
+FString ConsumerReceiptDirectory(const FString& JournalRoot, const FString& Owner, const FString& Stream) {
+  const FString Completed = NormalizeAbsolutePath(JournalRoot) / TEXT("completed");
+  if (Owner.IsEmpty() || Stream.IsEmpty()) return Completed / TEXT("unscoped");
+  // Physical placement only. The record's complete owner/stream fields remain
+  // authoritative, and are checked after reading a selected directory.
+  return Completed / FMD5::HashAnsiString(*Owner).ToLower() / FMD5::HashAnsiString(*Stream).ToLower();
+}
+
+FString CompletedPathFor(const FString& JournalRoot, const FString& RequestKey,
+    const FString& Owner = {}, const FString& Stream = {}) {
+  return ConsumerReceiptDirectory(JournalRoot, Owner, Stream) / (RequestKey + TEXT(".json"));
+}
+
+bool FindCompletedPathFor(const FString& JournalRoot, const FString& RequestKey,
+    FString& OutPath, UE::UAI::Contract::FDiagnostic& Error,
+    const FString& Owner = {}, const FString& Stream = {}, bool bExplicitRequestRecovery = false) {
+  const FString Root = NormalizeAbsolutePath(JournalRoot) / TEXT("completed");
+  TArray<FString> Matches;
+  int32 ExactCandidates = 0;
+  for (const FString& Path : {CompletedPathFor(JournalRoot, RequestKey, Owner, Stream),
+      Root / (RequestKey + TEXT(".json")), CompletedPathFor(JournalRoot, RequestKey)}) {
+    ++ExactCandidates;
+    if (IFileManager::Get().FileExists(*Path)) Matches.AddUnique(Path);
+  }
+  // Explicit request recovery has an identity, but an old public handle
+  // need not know its stream. Enumerate matching names only, never parse other
+  // receipts to discover the requested identity. A new request's idempotency
+  // probe already has its actual owner/stream: a negative exact lookup must not
+  // turn into an unrelated whole-history namespace search.
+  const bool bSearchNames = bExplicitRequestRecovery && Matches.IsEmpty();
+  if (bSearchNames) IFileManager::Get().FindFilesRecursive(Matches, *Root, *(RequestKey + TEXT(".json")), true, false);
+  UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=durable_completed_lookup exact_candidates=%d matches=%d recursive_names=%s explicit_recovery=%s"),
+      ExactCandidates, Matches.Num(), bSearchNames ? TEXT("true") : TEXT("false"), bExplicitRequestRecovery ? TEXT("true") : TEXT("false"));
+  Matches.Sort();
+  FString Expected;
+  for (int32 I = 0; I < Matches.Num() && Matches.Num() > 1; ++I) {
+    FString Actual;
+    if (!FileHash(Matches[I], Actual, Error)) return false;
+    if (I == 0) Expected = Actual;
+    else if (Actual != Expected) {
+      Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_request_evidence_ambiguous"),
+          TEXT("The original request has different retained receipts; no action was replayed or restored."),
+          TEXT("workspace_durable_transaction"), Matches[I]); return false;
+    }
+  }
+  OutPath = Matches.IsEmpty() ? CompletedPathFor(JournalRoot, RequestKey, Owner, Stream) : Matches[0];
+  return true;
 }
 
 FString RequestKeyFor(const FString &RequestId) {
   return FMD5::HashAnsiString(*RequestId).ToLower();
 }
 
+bool LoadRecoveryJournal(const FString& Id, FDurableJournalState& State,
+    FString& Owner, UE::UAI::Contract::FDiagnostic& Error) {
+  TArray<FString> Parts; Id.ParseIntoArray(Parts, TEXT(":"), false);
+  if (Parts.Num() != 3 || Parts[0] != TEXT("apply-durable")
+      || (Parts[1] != TEXT("workspace") && Parts[1] != TEXT("world"))
+      || Parts[2].Len() < 32 || Parts[2].Len() > 65) {
+    Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_recovery_identity_invalid"),
+        TEXT("The recovery identity is not an authoring journal issued by this owner."), TEXT("durable_maintenance")); return false;
+  }
+  for (TCHAR C : Parts[2]) if (!FChar::IsHexDigit(C) && C != TEXT('-')) {
+    Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_recovery_identity_invalid"),
+        TEXT("The recovery identity contains an invalid token."), TEXT("durable_maintenance")); return false;
+  }
+  const FString Root = NormalizeAbsolutePath(GetDurableTransactionRoot(Parts[1] == TEXT("world")));
+  FString Path = Root / TEXT("active") / Parts[2] / JournalFileName;
+  bool bActive = IFileManager::Get().FileExists(*Path);
+  if (!bActive && !FindCompletedPathFor(Root, Parts[2].Left(32), Path, Error, {}, {}, true)) return false;
+  TSharedPtr<FJsonObject> Object;
+  if (!LoadJson(Path, Object, Error) || !JsonToJournal(Path, Object.ToSharedRef(), State, Error, bActive)) return false;
+  if (State.RequestKey != Parts[2].Left(32) || !IsWithinRoot(Root, State.TransactionRoot)) {
+    Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_recovery_identity_mismatch"),
+        TEXT("The journal belongs to a different request or transaction root."), TEXT("durable_maintenance")); return false;
+  }
+  return FileHash(Path, Owner, Error);
+}
+
+bool RecoveryInspection(const FString& Id, const FDurableJournalState& State, const FString& Owner,
+    TSharedPtr<FJsonObject>& Out, UE::UAI::Contract::FDiagnostic& Error) {
+  Out = MakeShared<FJsonObject>();
+  Out->SetStringField(TEXT("schema"), TEXT("uai.asset_durable.journal_inspection.v1"));
+  Out->SetStringField(TEXT("journal_kind"), JournalSchema);
+  Out->SetStringField(TEXT("journal_id"), Id);
+  Out->SetStringField(TEXT("journal_owner_id"), Owner);
+  Out->SetNumberField(TEXT("fencing_token"), State.PhaseHistory.Num());
+  Out->SetStringField(TEXT("phase"), State.Phase);
+  Out->SetBoolField(TEXT("read_only"), true);
+  Out->SetBoolField(TEXT("retry_safe"), false);
+  TArray<TSharedPtr<FJsonValue>> Observed;
+  bool bMemoryDiffers = false;
+  for (const auto& Artifact : State.Artifacts) {
+    bool bExists = false; FString Hash;
+    if (!ArtifactSnapshot(Artifact.Kind, Artifact.FinalPath, bExists, Hash, Error)) return false;
+    const auto Row = MakeShared<FJsonObject>();
+    Row->SetStringField(TEXT("artifact_id"), Artifact.ArtifactId);
+    Row->SetBoolField(TEXT("present"), bExists);
+    Row->SetBoolField(TEXT("matches_disk_before"), bExists == Artifact.bOldExists && (!bExists || Hash == Artifact.OldHash));
+    Row->SetBoolField(TEXT("matches_published"), bExists == Artifact.bStagedExists && (!bExists || Hash == Artifact.StagedHash));
+    bMemoryDiffers |= !Artifact.MemoryCheckpointPath.IsEmpty()
+        && (Artifact.bMemoryCheckpointExists != Artifact.bOldExists
+          || (Artifact.bOldExists && Artifact.MemoryCheckpointHash != Artifact.OldHash));
+    Observed.Add(MakeShared<FJsonValueObject>(Row));
+  }
+  Out->SetArrayField(TEXT("observed_states"), MoveTemp(Observed));
+  Out->SetBoolField(TEXT("memory_before_differs_from_disk_bytes"), bMemoryDiffers);
+  Out->SetStringField(TEXT("recovery_action"), TEXT("inspect_then_reconcile_original_request_without_replay"));
+  return true;
+}
+
 } // namespace
 
 namespace UeAgentAuthoringWorkspaceTransaction {
 
-FScopedDurableRecoveryNotice::FScopedDurableRecoveryNotice()
-    : Previous(CurrentRecoveryNotice) {
+bool TryInspectAuthoringJournal(const FString& Id, TSharedPtr<FJsonObject>& Out,
+    UE::UAI::Contract::FDiagnostic& Error) {
+  FDurableJournalState State; FString Owner;
+  return LoadRecoveryJournal(Id, State, Owner, Error) && RecoveryInspection(Id, State, Owner, Out, Error);
+}
+
+void DiscoverAuthoringJournals(TArray<FString>& OutIds, TArray<UE::UAI::Contract::FDiagnostic>& Warnings) {
+  OutIds.Reset(); Warnings.Reset();
+  for (bool bWorld : {false, true}) {
+    TArray<FString> Files;
+    const FString Root = NormalizeAbsolutePath(GetDurableTransactionRoot(bWorld));
+    IFileManager::Get().FindFilesRecursive(Files, *(Root / TEXT("active")), JournalFileName, true, false);
+    for (const auto& Path : Files) {
+      const FString Id = MakeDurableJournalRecoveryId(Path);
+      FDurableJournalState State; FString Owner; UE::UAI::Contract::FDiagnostic Error;
+      if (!LoadRecoveryJournal(Id, State, Owner, Error)) {
+        Error.Severity = UE::UAI::Contract::ESeverity::Warning;
+        Warnings.Add(MoveTemp(Error)); continue;
+      }
+      // Only this owner's validated retained journals. Inspection/reconcile
+      // remains explicit; discovery does not hash backups, replay or take over.
+      OutIds.AddUnique(Id);
+    }
+  }
+  OutIds.Sort();
+}
+
+bool TryRecoverDurableRequest(const FString& RequestId, TSharedPtr<FJsonObject>& Out,
+    UE::UAI::Contract::FDiagnostic& Error) {
+  Out.Reset();
+  if (RequestId.IsEmpty()) return false;
+  TMap<FString, TSharedPtr<FJsonObject>> Inspections;
+  TMap<FString, FString> Fingerprints;
+  TMap<FString, FString> Phases;
+  for (bool bWorld : {false, true}) {
+    const FString Root = NormalizeAbsolutePath(GetDurableTransactionRoot(bWorld));
+    TArray<FString> Files;
+    IFileManager::Get().FindFilesRecursive(Files, *(Root / TEXT("active")), JournalFileName, true, false);
+    IFileManager::Get().FindFilesRecursive(Files, *(Root / TEXT("completed")), TEXT("*.json"), true, false, false);
+    for (const auto& Path : Files) {
+      TSharedPtr<FJsonObject> Json; UE::UAI::Contract::FDiagnostic ReadError;
+      FString NativeRequest, Origin;
+      if (!LoadJson(Path, Json, ReadError)) continue; // An unrelated unreadable record is not custody.
+      Json->TryGetStringField(TEXT("request_id"), NativeRequest);
+      Json->TryGetStringField(TEXT("origin_request_id"), Origin);
+      if (NativeRequest != RequestId && Origin != RequestId) continue;
+      const FString Id = MakeDurableJournalRecoveryId(Path);
+      FDurableJournalState State; FString Owner; TSharedPtr<FJsonObject> Inspection;
+      if (!LoadRecoveryJournal(Id, State, Owner, Error)
+          || (State.RequestId != RequestId && State.OriginRequestId != RequestId)
+          || !RecoveryInspection(Id, State, Owner, Inspection, Error)) return false;
+      if (const auto* Previous = Fingerprints.Find(NativeRequest)) {
+        if (*Previous != State.RequestFingerprint) {
+          Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_request_evidence_ambiguous"),
+              TEXT("Retained attempts of this native request have different inputs; no action was replayed or restored."), TEXT("operation_recovery")); return false;
+        }
+        if (Phases.FindChecked(NativeRequest) == TEXT("committed")) continue;
+      }
+      Fingerprints.Add(NativeRequest, State.RequestFingerprint);
+      Phases.Add(NativeRequest, State.Phase);
+      Inspections.Add(NativeRequest, MoveTemp(Inspection));
+    }
+  }
+  if (Inspections.IsEmpty()) {
+    Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_request_evidence_missing"),
+        TEXT("No readable authoring journal can be attributed to this original request; no action was replayed or restored."), TEXT("operation_recovery"));
+    Error.bRetrySafe = false; return false;
+  }
+  Out = MakeShared<FJsonObject>();
+  Out->SetStringField(TEXT("schema"), TEXT("uai.long_running.durable_recovery.v1"));
+  bool bCommitted = true; TArray<TSharedPtr<FJsonValue>> Journals;
+  for (const auto& Pair : Inspections) {
+    bCommitted &= Phases.FindChecked(Pair.Key) == TEXT("committed");
+    Journals.Add(MakeShared<FJsonValueObject>(Pair.Value));
+  }
+  Out->SetStringField(TEXT("status"), bCommitted ? TEXT("committed") : TEXT("state_unknown"));
+  Out->SetBoolField(TEXT("retry_safe"), false);
+  Out->SetBoolField(TEXT("native_replayed"), false);
+  Out->SetArrayField(TEXT("durability"), MoveTemp(Journals));
+  return true;
+}
+
+bool TryReconcileAuthoringJournal(const FString& Id, const FString& ExpectedOwner, int64 ExpectedFence,
+    TSharedPtr<FJsonObject>& Out, UE::UAI::Contract::FDiagnostic& Error) {
+  FDurableJournalState State; FString Owner;
+  if (!LoadRecoveryJournal(Id, State, Owner, Error)) return false;
+  if (Owner != ExpectedOwner || State.PhaseHistory.Num() != ExpectedFence) {
+    Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_recovery_binding_changed"),
+        TEXT("The inspected journal changed; inspect it again before reconciliation."), TEXT("durable_maintenance")); return false;
+  }
+  if (State.Phase == TEXT("committed") || State.Phase == TEXT("restored")
+      || State.Phase == TEXT("startup_restored") || State.Phase == TEXT("memory_complete")
+      || State.Phase == TEXT("disk_restored_memory_preserved")) {
+    return RecoveryInspection(Id, State, Owner, Out, Error);
+  }
+  // This is recovery of this one request, not a startup sweep of other work.
+  // A newer file or a live native package cannot be overwritten by its backup.
+  for (const auto& Artifact : State.Artifacts) {
+    FString PackageName;
+    if ((Artifact.FinalPath.EndsWith(TEXT(".umap")) || Artifact.FinalPath.EndsWith(TEXT(".uasset")))
+        && FPackageName::TryConvertFilenameToLongPackageName(Artifact.FinalPath, PackageName)
+        && FindPackage(nullptr, *PackageName)) {
+      Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_recovery_package_loaded"),
+          TEXT("The recovery package is loaded. Release its Editor context before restoring its recorded file."), TEXT("durable_maintenance"));
+      Error.TargetPath = PackageName; return false;
+    }
+    bool bExists = false; FString Hash;
+    if (!ArtifactSnapshot(Artifact.Kind, Artifact.FinalPath, bExists, Hash, Error)) return false;
+    const bool bBefore = bExists == Artifact.bOldExists && (!bExists || Hash == Artifact.OldHash);
+    const bool bPublished = bExists == Artifact.bStagedExists && (!bExists || Hash == Artifact.StagedHash);
+    if (!bBefore && !bPublished) {
+      Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_recovery_artifact_changed"),
+          TEXT("The current artifact differs from both this request's before and published states; it was preserved for review."), TEXT("durable_maintenance"));
+      Error.SubjectId = Artifact.ArtifactId; return false;
+    }
+    if (Artifact.bOldExists && !VerifyArtifactSnapshot(Artifact.Kind, Artifact.BackupPath, true, Artifact.OldHash,
+        TEXT("durable_restore_backup_hash_mismatch"), TEXT("The original backup cannot be confirmed."), Artifact.ArtifactId, Error)) return false;
+  }
+  if (!RestoreArtifacts(State, Error)) return false;
+  const bool bMemoryDiffers = State.Artifacts.ContainsByPredicate([](const auto& Artifact) {
+    return !Artifact.MemoryCheckpointPath.IsEmpty() && (Artifact.bMemoryCheckpointExists != Artifact.bOldExists
+        || (Artifact.bOldExists && Artifact.MemoryCheckpointHash != Artifact.OldHash));
+  });
+  if (!AppendPhaseAndWrite(State, bMemoryDiffers ? TEXT("disk_restored_memory_preserved") : TEXT("restored"), Error)
+      || !FileHash(State.JournalPath, Owner, Error) || !RecoveryInspection(Id, State, Owner, Out, Error)) return false;
+  Out->SetBoolField(TEXT("read_only"), false);
+  Out->SetStringField(TEXT("status"), bMemoryDiffers ? TEXT("disk_restored_memory_unconfirmed") : TEXT("rolled_back"));
+  // Keep original before/stage/checkpoint material for independent native
+  // verification; a filesystem receipt is not a complete semantic readback.
+  return true;
+}
+
+FScopedDurableConsumer::FScopedDurableConsumer(FString InOwnerId, FString InStreamId,
+    FString InIntentJson, FSeal InSeal, FObserve InObserve)
+    : Previous(CurrentDurableConsumer), OwnerId(MoveTemp(InOwnerId)), StreamId(MoveTemp(InStreamId)),
+      IntentJson(MoveTemp(InIntentJson)), Seal(MoveTemp(InSeal)), Observe(MoveTemp(InObserve)) {
+  CurrentDurableConsumer = this;
+}
+
+FScopedDurableConsumer::~FScopedDurableConsumer() {
+  if (CurrentHistory) CurrentHistory->RequestRecords.Append(MoveTemp(CommittedRecords));
+  CurrentDurableConsumer = Previous;
+}
+bool FScopedDurableConsumer::HasActualStateConsumer() { return CurrentDurableConsumer && !!CurrentDurableConsumer->Observe; }
+bool FScopedDurableConsumer::IsObservationPending() { return CurrentDurableConsumer && CurrentDurableConsumer->bObservationPending; }
+
+void FScopedDurableConsumer::ObserveActualState(const UeAgentAuthoringState::FStateSnapshot& Before,
+    const UeAgentAuthoringState::FStateSnapshot& Actual) {
+  if (CurrentDurableConsumer && CurrentDurableConsumer->Observe) CurrentDurableConsumer->Observe(Before, Actual);
+}
+
+void FScopedDurableConsumer::MarkObservationPending() {
+  if (CurrentDurableConsumer) CurrentDurableConsumer->bObservationPending = true;
+}
+
+TSharedPtr<const IDurableConsumerMaterial> FScopedDurableConsumer::FindCommittedMaterial(const FDurableConsumerRecord& Record,
+    bool* OutCurrentRequestCommit) {
+  if (OutCurrentRequestCommit) *OutCurrentRequestCommit = false;
+  if (Record.Phase != TEXT("committed")) return {};
+  const auto Matches = [&](const FDurableConsumerRecord& Sealed) {
+    return Sealed.RequestKey == Record.RequestKey && Sealed.OwnerId == Record.OwnerId
+        && Sealed.StreamId == Record.StreamId && Sealed.Sequence == Record.Sequence
+        && Sealed.Phase == Record.Phase && Sealed.VerifiedJson == Record.VerifiedJson;
+  };
+  for (auto* Scope = CurrentDurableConsumer; Scope; Scope = Scope->Previous)
+    for (const auto& Sealed : Scope->CommittedRecords)
+      if (Matches(Sealed)) { if (OutCurrentRequestCommit) *OutCurrentRequestCommit = true; return Sealed.Material; }
+  if (CurrentHistory) for (const auto& Sealed : CurrentHistory->RequestRecords)
+    if (Matches(Sealed)) { if (OutCurrentRequestCommit) *OutCurrentRequestCommit = true; return Sealed.Material; }
+  return {};
+}
+
+FScopedDurableConsumerHistory::FScopedDurableConsumerHistory() {
+  if (CurrentHistory) return;
+  State = PreviousParsedHistory ? MoveTemp(PreviousParsedHistory) : MakeUnique<FDurableConsumerHistoryState>();
+  State->Previous = CurrentHistory;
+  CurrentHistory = State.Get();
+}
+FScopedDurableConsumerHistory::~FScopedDurableConsumerHistory() {
+  if (State) {
+    ReleaseDurableConsumerHistoryReads();
+    State->RequestRecords.Empty();
+    CurrentHistory = State->Previous;
+    State->Previous = nullptr;
+    PreviousParsedHistory = MoveTemp(State);
+  }
+}
+
+void ReleaseDurableConsumerHistoryReads() {
+  if (!CurrentHistory || (!CurrentHistory->ObservedReceipts && !CurrentHistory->ReceiptDirectories)) return;
+  const double Started = FPlatformTime::Seconds();
+  const int32 Released = CurrentHistory->ObservedReceipts;
+  for (auto& Pair : CurrentHistory->Reads) {
+    auto& Read = Pair.Value;
+    if (Read.Guard) CurrentHistory->Bytes -= Read.Guard->GetRetainedBytes();
+    Read.Guard.Reset(); Read.Proof.Reset();
+  }
+  CurrentHistory->ReceiptDirectories.Reset();
+  CurrentHistory->ObservedReceipts = 0;
+  const auto Usage = UE::UAI::HjsonWorkspace::GetWorkspaceFileProofUsage();
+  UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=durable_history_release guards=%d pending_file_proofs=%d proof_path_characters=%lld total_s=%.6f"),
+      Released, Usage.PendingOperations, Usage.PathCharacters, FPlatformTime::Seconds() - Started);
+}
+
+bool ReadDurableConsumerRecords(const FString& JournalRoot, const FString& OwnerId, const FString& StreamId,
+    TArray<FDurableConsumerRecord>& OutRecords, FOperationFailure& OutFailure) {
+  return ReadDurableConsumerRecords(JournalRoot, OwnerId, StreamId, OutRecords, OutFailure, EDurableConsumerBody::Complete, 0);
+}
+
+void CaptureDurableCompletedRequestKeys(const FString& JournalRoot, TSet<FString>& OutRequestKeys) {
+  OutRequestKeys.Reset();
+  const double Started = FPlatformTime::Seconds();
+  TArray<FString> Paths;
+  IFileManager::Get().FindFilesRecursive(Paths, *(NormalizeAbsolutePath(JournalRoot) / TEXT("completed")), TEXT("*.json"), true, false);
+  for (const auto& Path : Paths) {
+    const FString Key = FPaths::GetBaseFilename(Path);
+    bool bValid = Key.Len() == 32;
+    for (TCHAR C : Key) bValid &= FChar::IsHexDigit(C);
+    if (bValid) OutRequestKeys.Add(Key);
+  }
+  UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=completed_capture_boundary names=%d receipt_body_reads=0 numeric_global_fence=false total_s=%.6f"),
+      OutRequestKeys.Num(), FPlatformTime::Seconds() - Started);
+}
+
+bool ReadDurableConsumerRecords(const FString& JournalRoot, const FString& OwnerId, const FString& StreamId,
+    TArray<FDurableConsumerRecord>& OutRecords, FOperationFailure& OutFailure,
+    EDurableConsumerBody Body, int64 BodyAfterSequence) {
+  OutRecords.Reset();
+  const double Started = FPlatformTime::Seconds();
+  const auto CpuStarted = UE::UAI::Timing::SampleThreadCpu();
+  int32 Parsed = 0, Reused = 0, PhysicalReads = 0, LogicalRows = 0, GuardReused = 0, GuardAcquired = 0, GuardRejected = 0;
+  double ReadSeconds = 0, ParseSeconds = 0, ReadCpuSeconds = 0, ProofSeconds = 0;
+  double AcquireSeconds = 0, GuardReadSeconds = 0, UnguardedReadSeconds = 0;
+  int32 ProofCapacityMisses = 0, SkippedProofAcquisitions = 0;
+  bool bMayAcquireReceiptProof = true;
+  bool bReadCpuValid = true;
+  const bool bWantIntent = !StreamId.IsEmpty() && Body != EDurableConsumerBody::Metadata;
+  const bool bWantVerified = !StreamId.IsEmpty() && Body == EDurableConsumerBody::Complete;
+  const auto NeedsBody = [&](const FDurableConsumerHistoryState::FRead& Read) {
+    return Read.bOwner && Read.Owner == OwnerId && Read.Stream == StreamId && Read.Record.Sequence > BodyAfterSequence
+      && ((bWantIntent && !Read.bIntentLoaded) || (bWantVerified && !Read.bVerifiedLoaded));
+  };
+  struct FMetadataProjection {
+    FDurableConsumerHistoryState::FRead Read;
+    FString Sequence, SyntaxError;
+    FBlake3Hash TextHash;
+    double WorkSeconds = 0;
+    bool bSyntaxValid = false, bShouldParse = false;
+  };
+  const auto ParseMetadata = [&](const FString& Text, FDurableConsumerHistoryState::FRead& Read,
+      FString& Sequence, FString& SyntaxError, bool bReadBody) {
+      const auto Reader = TJsonReaderFactory<TCHAR>::Create(Text);
+      EJsonNotation Notation;
+      int32 Depth = 0, ConsumerDepth = -1;
+      // A new metadata row does not yet establish target selection. Decode its
+      // body only after selection, from this same already-read text below.
+      while (Reader->ReadNext(Notation)) {
+        const FString& Field = Reader->GetIdentifier();
+        if (Notation == EJsonNotation::ObjectStart || Notation == EJsonNotation::ArrayStart) {
+          ++Depth;
+          if (Depth == 2 && Field == TEXT("consumer_evidence") && Notation == EJsonNotation::ObjectStart) ConsumerDepth = Depth;
+        } else if (Notation == EJsonNotation::ObjectEnd || Notation == EJsonNotation::ArrayEnd) {
+          if (ConsumerDepth == Depth) ConsumerDepth = -1;
+          --Depth;
+        } else if (Notation == EJsonNotation::String) {
+          if (Depth == 1 && Field == TEXT("request_key")) Read.Record.RequestKey = Reader->GetValueAsString();
+          else if (Depth == 1 && Field == TEXT("schema")) Read.Schema = Reader->GetValueAsString();
+          else if (Depth == 1 && Field == TEXT("request_id")) Read.RequestId = Reader->GetValueAsString();
+          else if (Depth == 1 && Field == TEXT("phase")) Read.Record.Phase = Reader->GetValueAsString();
+          else if (Depth == ConsumerDepth) {
+            if (Field == TEXT("owner")) { Read.Owner = Reader->GetValueAsString(); Read.bOwner = true; }
+            else if (Field == TEXT("stream")) { Read.Stream = Reader->GetValueAsString(); Read.bStream = true; }
+            else if (Field == TEXT("sequence")) Sequence = Reader->GetValueAsString();
+            else if (Field == TEXT("intent")) {
+              Read.bHasIntent = true;
+              if (bReadBody && bWantIntent) { Read.Record.IntentJson = Reader->GetValueAsString(); Read.bIntentLoaded = true; }
+            } else if (Field == TEXT("verified")) {
+              Read.bHasVerified = true;
+              if (bReadBody && bWantVerified) { Read.Record.VerifiedJson = Reader->GetValueAsString(); Read.bVerifiedLoaded = true; }
+            }
+          }
+        }
+      }
+    SyntaxError = Reader->GetErrorMessage();
+    return SyntaxError.IsEmpty() && Depth == 0;
+  };
+  const FString Root = NormalizeAbsolutePath(JournalRoot);
+  if (CurrentHistory && !CurrentHistory->JournalRoot.Equals(Root, ESearchCase::CaseSensitive)) {
+    ReleaseDurableConsumerHistoryReads();
+    CurrentHistory->Reads.Empty(); CurrentHistory->Bytes = 0;
+    CurrentHistory->JournalRoot = Root;
+    CurrentHistory->Bytes = sizeof(FDurableConsumerHistoryState) + CurrentHistory->JournalRoot.GetAllocatedSize();
+  }
+  TArray<FString> Files;
+  IFileManager::Get().FindFilesRecursive(Files, *(Root / TEXT("active")), JournalFileName, true, false);
+  TSet<FString> ActiveRequests;
+  for (const auto& ActivePath : Files)
+    ActiveRequests.Add(FPaths::GetCleanFilename(FPaths::GetPath(ActivePath)).Left(32));
+  const FString CompletedRoot = Root / TEXT("completed");
+  // Normal consumers read only their owner/target receipt directory.
+  // Old flat receipts remain available to explicit request-ID recovery;
+  // a missing stream record is reported by its publication consumer, never
+  // repaired by scanning/migrating every historical target here.
+  const FString SelectedDirectory = StreamId.IsEmpty()
+      ? CompletedRoot / FMD5::HashAnsiString(*OwnerId).ToLower() : ConsumerReceiptDirectory(Root, OwnerId, StreamId);
+  IFileManager::Get().FindFilesRecursive(Files, *SelectedDirectory, TEXT("*.json"), true, false, false);
+  const double Enumerated = FPlatformTime::Seconds();
+  TMap<FString, int32> Requests;
+  TSet<FString> ActiveRecordKeys;
+  TSet<FString> CurrentPaths;
+  double MigrationSeconds = 0;
+  const auto Consume = [&](const FString& Path, FString Text, bool bCompleted, bool bProvenCached, UE::UAI::HjsonWorkspace::FWorkspaceFileProofPtr Proof,
+      TUniquePtr<UE::UAI::ArtifactPublisher::FGenerationFileGuard> Guard, FMetadataProjection* Projection = nullptr) {
+    ++LogicalRows;
+    CurrentPaths.Add(Path);
+    auto* Prior = CurrentHistory ? CurrentHistory->Reads.Find(Path) : nullptr;
+    const int64 OldCharge = Prior ? Prior->Charge() + Path.GetAllocatedSize() + 96 : 0;
+    // Retain the metadata consumed by sequence/stream selection, not another
+    // complete journal text. Actual reads (or the existing current guard) still
+    // precede this compact equality proof. No persistent format is changed.
+    const FBlake3Hash TextHash = Projection ? Projection->TextHash : !CurrentHistory || bProvenCached ? FBlake3Hash() : FBlake3::HashBuffer(*Text, uint64(Text.Len()) * sizeof(TCHAR));
+    const bool bSame = Prior && (bProvenCached || Prior->TextHash == TextHash);
+    FDurableConsumerHistoryState::FRead Candidate;
+    auto& Read = bSame ? *Prior : Candidate;
+    if (bSame) ++Reused;
+    const auto ValidateOwnerMetadata = [&]() {
+      if (Read.bOwner && Read.Owner == OwnerId && (StreamId.IsEmpty() || (Read.bStream && Read.Stream == StreamId))
+          && (!Read.bStream || !Read.bSequenceValid)) {
+        SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_consumer_metadata_invalid"),
+            TEXT("Consumer metadata requires a stream and positive sequence."), TEXT("workspace_durable_transaction"), Path)); return false;
+      }
+      return true;
+    };
+    if (!bSame || NeedsBody(Read)) {
+      const double ParseStarted = FPlatformTime::Seconds();
+      // Sequence allocation and stream selection consume metadata only. Do not
+      // materialize every historical artifact/intent/delta as a JSON tree.
+      FString Sequence, SyntaxError; bool bSyntaxValid;
+      if (Projection && !bSame) {
+        Read = MoveTemp(Projection->Read); Sequence = MoveTemp(Projection->Sequence);
+        SyntaxError = MoveTemp(Projection->SyntaxError); bSyntaxValid = Projection->bSyntaxValid;
+      } else bSyntaxValid = ParseMetadata(Text, Read, Sequence, SyntaxError, bSame && Read.Record.Sequence > BodyAfterSequence);
+      if (!bSyntaxValid) {
+        if (bCompleted && FPaths::GetPath(Path) == CompletedRoot
+            && (!Read.bOwner || Read.Owner != OwnerId || (!StreamId.IsEmpty() && Read.Stream != StreamId))) {
+          // Unknown legacy bytes have no attributable effect for this stream.
+          // Preserve them for explicit recovery; do not turn them into another
+          // target's blocking error or manufacture a committed delta.
+          UE_LOG(LogTemp, Warning, TEXT("UAI durable legacy receipt preserved path=%s reason=unattributed_invalid_metadata"), *Path);
+          return true;
+        }
+        SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_consumer_metadata_invalid"),
+            SyntaxError, TEXT("workspace_durable_transaction"), Path)); return false;
+      }
+      Read.bSequenceValid = LexTryParseString(Read.Record.Sequence, *Sequence)
+          && Read.Record.Sequence > 0 && LexToString(Read.Record.Sequence) == Sequence;
+      if (!ValidateOwnerMetadata()) return false;
+      Read.Record.OwnerId = Read.Owner; Read.Record.StreamId = Read.Stream;
+      if (NeedsBody(Read)) {
+        const auto BodyReader = TJsonReaderFactory<TCHAR>::Create(Text);
+        EJsonNotation Notation;
+        int32 BodyDepth = 0, EvidenceDepth = -1;
+        while (BodyReader->ReadNext(Notation)) {
+          const FString& Field = BodyReader->GetIdentifier();
+          if (Notation == EJsonNotation::ObjectStart || Notation == EJsonNotation::ArrayStart) {
+            ++BodyDepth;
+            if (BodyDepth == 2 && Field == TEXT("consumer_evidence") && Notation == EJsonNotation::ObjectStart) EvidenceDepth = BodyDepth;
+          } else if (Notation == EJsonNotation::ObjectEnd || Notation == EJsonNotation::ArrayEnd) {
+            if (EvidenceDepth == BodyDepth) EvidenceDepth = -1;
+            --BodyDepth;
+          } else if (Notation == EJsonNotation::String && BodyDepth == EvidenceDepth) {
+            if (Field == TEXT("intent") && bWantIntent) { Read.Record.IntentJson = BodyReader->GetValueAsString(); Read.bIntentLoaded = true; }
+            if (Field == TEXT("verified") && bWantVerified) { Read.Record.VerifiedJson = BodyReader->GetValueAsString(); Read.bVerifiedLoaded = true; }
+          }
+        }
+      }
+      ParseSeconds += Projection ? Projection->WorkSeconds : FPlatformTime::Seconds() - ParseStarted;
+      ++Parsed;
+      if (!bSame) Read.TextHash = TextHash;
+    } else if (!ValidateOwnerMetadata()) return false;
+    const bool bSelected = Read.bOwner && Read.Owner.Equals(OwnerId, ESearchCase::CaseSensitive)
+        && (StreamId.IsEmpty() || (Read.bStream && Read.Stream.Equals(StreamId, ESearchCase::CaseSensitive)));
+    if (bSelected && !StreamId.IsEmpty()) {
+      if (!Read.bHasIntent || !Read.bHasVerified || Read.Schema != JournalSchema || Read.RequestId.IsEmpty()
+          || Read.Record.RequestKey != FMD5::HashAnsiString(*Read.RequestId).ToLower() || Read.Record.Phase.IsEmpty()) {
+        SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_consumer_record_invalid"),
+            TEXT("The selected consumer record has incomplete identity or evidence fields."), TEXT("workspace_durable_transaction"), Path)); return false;
+      }
+    } else if (!Read.Owner.Equals(OwnerId, ESearchCase::CaseSensitive) || (!StreamId.IsEmpty() && Read.Stream != StreamId)) {
+      Read.Record.IntentJson.Empty(); Read.Record.VerifiedJson.Empty(); Read.bIntentLoaded = false; Read.bVerifiedLoaded = false;
+    }
+    // Copy only the selected record; unrelated metadata remains in the same
+    // request-local backing and has no retained full-text copy.
+    FDurableConsumerRecord Record;
+    if (bSelected) {
+      Record.OwnerId = Read.Owner; Record.StreamId = Read.Stream; Record.Sequence = Read.Record.Sequence;
+      Record.RequestKey = Read.Record.RequestKey; Record.Phase = Read.Record.Phase;
+      if (Record.Sequence > BodyAfterSequence) {
+        if (bWantIntent) Record.IntentJson = Read.Record.IntentJson;
+        if (bWantVerified) Record.VerifiedJson = Read.Record.VerifiedJson;
+      }
+      if (bWantVerified) Record.Material = FScopedDurableConsumer::FindCommittedMaterial(Record, &Record.bCurrentRequestCommit);
+    }
+    if (bSelected && !bCompleted) ActiveRecordKeys.Add(Record.RequestKey);
+    if (Proof && Guard) { Read.Proof = MoveTemp(Proof); Read.Guard = MoveTemp(Guard); }
+    if (CurrentHistory) {
+      int64 Charge = Read.Charge() + Path.GetAllocatedSize() + 96;
+      if (CurrentHistory->Bytes - OldCharge + Charge > 64ll * 1024 * 1024 && (Read.bIntentLoaded || Read.bVerifiedLoaded)) {
+        // The selected result was copied above. If its optional body cannot
+        // remain, keep the small metadata; its next body consumer rereads it.
+        Read.Record.IntentJson.Empty(); Read.Record.VerifiedJson.Empty(); Read.bIntentLoaded = false; Read.bVerifiedLoaded = false;
+        Charge = Read.Charge() + Path.GetAllocatedSize() + 96;
+      }
+      if (CurrentHistory->Bytes - OldCharge + Charge <= 64ll * 1024 * 1024) {
+        CurrentHistory->Bytes += Charge - OldCharge;
+        if (!bSame) {
+          if (Prior && Prior->Guard) --CurrentHistory->ObservedReceipts;
+          if (Candidate.Guard) ++CurrentHistory->ObservedReceipts;
+          CurrentHistory->Reads.Add(Path, MoveTemp(Candidate));
+        } else if (!bProvenCached && Read.Guard) ++CurrentHistory->ObservedReceipts;
+      } else if (Prior) {
+        if (Prior->Guard && bProvenCached) --CurrentHistory->ObservedReceipts;
+        CurrentHistory->Bytes -= OldCharge; CurrentHistory->Reads.Remove(Path);
+      }
+    }
+    if (!bSelected) return true;
+    if (const int32* Existing = Requests.Find(Record.RequestKey)) {
+      const auto& ExistingRecord = OutRecords[*Existing];
+      if (ExistingRecord.Sequence != Record.Sequence || (!StreamId.IsEmpty() &&
+          (!ExistingRecord.IntentJson.Equals(Record.IntentJson, ESearchCase::CaseSensitive) ||
+          !ExistingRecord.VerifiedJson.Equals(Record.VerifiedJson, ESearchCase::CaseSensitive)))) {
+        SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_consumer_record_conflict"),
+            TEXT("Active and completed consumer evidence disagree."), TEXT("workspace_durable_transaction"), Path)); return false;
+      }
+      // The active file is the owner's latest state, including a deliberate
+      // reconciliation after an archived commit. An old completed receipt must
+      // not turn restored native content back into an applied delta.
+      if (!bCompleted || !ActiveRecordKeys.Contains(Record.RequestKey)) OutRecords[*Existing] = MoveTemp(Record);
+    } else {
+      Requests.Add(Record.RequestKey, OutRecords.Num());
+      OutRecords.Add(MoveTemp(Record));
+    }
+    return true;
+  };
+  struct FMetadataWork {
+    const FString* Path = nullptr; FString Text; bool bCompleted = false;
+    UE::UAI::HjsonWorkspace::FWorkspaceFileProofPtr Proof;
+    TUniquePtr<UE::UAI::ArtifactPublisher::FGenerationFileGuard> Guard;
+    FMetadataProjection Projection;
+  };
+  TArray<FMetadataWork> MetadataBatch;
+  const bool bPureMetadataMode = !bWantIntent && !bWantVerified;
+  const int32 MetadataWidth = FMath::Max(1, FTaskGraphInterface::Get().GetNumWorkerThreads() + 1);
+  int32 MetadataBatches = 0, MetadataJobs = 0, PendingReceiptGuards = 0;
+  int64 MetadataPeakCharacters = 0; double MetadataWallSeconds = 0, MetadataWorkerSeconds = 0;
+  const auto FlushMetadata = [&]() {
+    if (MetadataBatch.IsEmpty()) return true;
+    ++MetadataBatches;
+    int64 Characters = 0; for (const auto& Work : MetadataBatch) Characters += Work.Text.Len();
+    MetadataPeakCharacters = FMath::Max(MetadataPeakCharacters, Characters);
+    const double BatchStarted = FPlatformTime::Seconds();
+    ParallelFor(MetadataBatch.Num(), [&](int32 Index) {
+      auto& Work = MetadataBatch[Index]; auto& Projection = Work.Projection;
+      if (!Projection.bShouldParse) return;
+      const double WorkStarted = FPlatformTime::Seconds();
+      Projection.bSyntaxValid = ParseMetadata(Work.Text, Projection.Read, Projection.Sequence, Projection.SyntaxError, false);
+      Projection.WorkSeconds = FPlatformTime::Seconds() - WorkStarted;
+    });
+    MetadataWallSeconds += FPlatformTime::Seconds() - BatchStarted;
+    for (auto& Work : MetadataBatch) {
+      MetadataJobs += Work.Projection.bShouldParse ? 1 : 0;
+      MetadataWorkerSeconds += Work.Projection.WorkSeconds;
+      if (Work.Proof && Work.Guard) --PendingReceiptGuards;
+      if (!Consume(*Work.Path, MoveTemp(Work.Text), Work.bCompleted, false,
+          MoveTemp(Work.Proof), MoveTemp(Work.Guard), &Work.Projection)) return false;
+    }
+    MetadataBatch.Reset(); return true;
+  };
+  const auto ConsumeRead = [&](const FString& Path, FString Text, bool bCompleted,
+      UE::UAI::HjsonWorkspace::FWorkspaceFileProofPtr Proof,
+      TUniquePtr<UE::UAI::ArtifactPublisher::FGenerationFileGuard> Guard) {
+    if (!bPureMetadataMode) {
+      return Consume(Path, MoveTemp(Text), bCompleted, false, MoveTemp(Proof), MoveTemp(Guard));
+    }
+    auto& Work = MetadataBatch.AddDefaulted_GetRef(); Work.Path = &Path;
+    Work.Text = MoveTemp(Text); Work.bCompleted = bCompleted;
+    Work.Proof = MoveTemp(Proof); Work.Guard = MoveTemp(Guard);
+    if (Work.Proof && Work.Guard) ++PendingReceiptGuards;
+    auto* Prior = CurrentHistory ? CurrentHistory->Reads.Find(Path) : nullptr;
+    Work.Projection.TextHash = CurrentHistory ? FBlake3::HashBuffer(*Work.Text, uint64(Work.Text.Len()) * sizeof(TCHAR)) : FBlake3Hash();
+    Work.Projection.bShouldParse = !Prior || Prior->TextHash != Work.Projection.TextHash;
+    return MetadataBatch.Num() < MetadataWidth || FlushMetadata();
+  };
+  for (const FString& Path : Files) {
+    const bool bCompleted = Path.StartsWith((Root / TEXT("completed")) + TEXT("/"));
+    auto* Prior = CurrentHistory ? CurrentHistory->Reads.Find(Path) : nullptr;
+    const double ProofStarted = FPlatformTime::Seconds();
+    const bool bStableReceipt = bCompleted && !ActiveRequests.Contains(FPaths::GetBaseFilename(Path));
+    const bool bNeedsRecord = Prior && NeedsBody(*Prior);
+    const bool bGuarded = bStableReceipt && !bNeedsRecord && Prior && Prior->Guard && Prior->Proof
+        && Prior->Proof->IsCurrentHandle(Prior->Guard->GetCurrentReadHandle(Path));
+    ProofSeconds += FPlatformTime::Seconds() - ProofStarted;
+    if (bGuarded) {
+      ++GuardReused;
+      if (!FlushMetadata() || !Consume(Path, FString(), true, true, {}, {})) return false;
+      continue;
+    }
+    if (Prior && Prior->Guard) {
+      CurrentHistory->Bytes -= Prior->Guard->GetRetainedBytes();
+      Prior->Guard.Reset(); Prior->Proof.Reset(); --CurrentHistory->ObservedReceipts;
+    }
+    const double ReadStarted = FPlatformTime::Seconds();
+    const auto ReadCpuStarted = UE::UAI::Timing::SampleThreadCpu();
+    FString Text;
+    UE::UAI::Contract::FDiagnostic Error;
+    UE::UAI::HjsonWorkspace::FWorkspaceFileProofPtr Proof;
+    TUniquePtr<UE::UAI::ArtifactPublisher::FGenerationFileGuard> Guard;
+    bool bRead = false;
+    // These are private immutable completed receipts, not user input. Their
+    // request-ID recovery retains old paths. The finite request scope keeps
+    // their current namespace binding and excludes writers; a granted read
+    // lease additionally excludes an already writable mapping. Active journals,
+    // unavailable proof and every budget miss keep the original actual read.
+    if (bStableReceipt && CurrentHistory && CurrentHistory->ObservedReceipts + PendingReceiptGuards < 2048 && bMayAcquireReceiptProof) {
+      bool bBudgetExhausted = false;
+      const double AcquireStarted = FPlatformTime::Seconds();
+      Proof = UE::UAI::HjsonWorkspace::TryBeginWorkspaceFileObservation(Path, &bBudgetExhausted);
+      AcquireSeconds += FPlatformTime::Seconds() - AcquireStarted;
+      if (bBudgetExhausted) { ++ProofCapacityMisses; bMayAcquireReceiptProof = false; }
+      if (Proof) {
+        const double GuardStarted = FPlatformTime::Seconds();
+        if (!CurrentHistory->ReceiptDirectories)
+          CurrentHistory->ReceiptDirectories = MakeUnique<UE::UAI::ArtifactPublisher::FGenerationDirectoryScope>();
+        Guard = MakeUnique<UE::UAI::ArtifactPublisher::FGenerationFileGuard>();
+        UE::UAI::ArtifactPublisher::FArtifactPublishError GuardError;
+        TArray<uint8> Bytes;
+        if (!Guard->Open(Path, false, false, GuardError) || !Guard->Read(Bytes, GuardError)) {
+          if (!FlushMetadata()) return false;
+          SetFailure(OutFailure, MoveTemp(GuardError)); return false;
+        }
+        ++PhysicalReads;
+        if (!Proof->IsCurrentHandle(Guard->GetCurrentReadHandle(Path))) {
+          if (!FlushMetadata()) return false;
+          SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_receipt_observation_changed"),
+              TEXT("The selected receipt observation changed during its guarded read; the request stopped without selecting another reader."),
+              TEXT("workspace_durable_transaction"), Path)); return false;
+        }
+        FFileHelper::BufferToString(Text, Bytes.GetData(), Bytes.Num()); bRead = true; ++GuardAcquired;
+        GuardReadSeconds += FPlatformTime::Seconds() - GuardStarted;
+      }
+      if (!bRead) { ++GuardRejected; Proof.Reset(); Guard.Reset(); }
+    } else if (bStableReceipt && CurrentHistory && CurrentHistory->ObservedReceipts + PendingReceiptGuards < 2048 && !bMayAcquireReceiptProof) ++SkippedProofAcquisitions;
+    if (!bRead) {
+      const double LoadStarted = FPlatformTime::Seconds();
+      ++PhysicalReads; bRead = LoadJournalText(Path, Text, Error);
+      UnguardedReadSeconds += FPlatformTime::Seconds() - LoadStarted;
+    }
+    ReadSeconds += FPlatformTime::Seconds() - ReadStarted;
+    const double ReadCpu = UE::UAI::Timing::ThreadCpuSeconds(ReadCpuStarted, UE::UAI::Timing::SampleThreadCpu());
+    if (ReadCpu >= 0) ReadCpuSeconds += ReadCpu; else bReadCpuValid = false;
+    if (!bRead) { if (!FlushMetadata()) return false; SetFailure(OutFailure, MoveTemp(Error)); return false; }
+    if (!ConsumeRead(Path, MoveTemp(Text), bCompleted, MoveTemp(Proof), MoveTemp(Guard))) return false;
+  }
+  if (!FlushMetadata()) return false;
+  UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=durable_metadata_tasks batches=%d jobs=%d width=%d task_wall_s=%.6f worker_elapsed_sum_s=%.6f peak_batch_text_characters=%lld io_and_selection=original_file_order engine_json_grammar=true"),
+      MetadataBatches, MetadataJobs, MetadataWidth, MetadataWallSeconds, MetadataWorkerSeconds, MetadataPeakCharacters);
+  OutRecords.Sort([](const auto& A, const auto& B) { return A.Sequence < B.Sequence; });
+  // Allocation consumes only max(sequence); exact accepted-source lookup only
+  // needs matching committed input. Ordering ambiguity belongs to the stream
+  // publication consumer, not either of these pre-native decisions.
+  if (CurrentHistory) for (auto It = CurrentHistory->Reads.CreateIterator(); It; ++It)
+    if (It.Key().StartsWith(Root + TEXT("/")) && !CurrentPaths.Contains(It.Key())) {
+      CurrentHistory->Bytes -= It.Value().Charge() + It.Key().GetAllocatedSize() + 96;
+      if (It.Value().Guard) --CurrentHistory->ObservedReceipts;
+      It.RemoveCurrent();
+    }
+  const double Total = FPlatformTime::Seconds() - Started;
+  UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=durable_consumer_history files=%d actual_reads=%d guard_acquired=%d guard_reused=%d guard_rejected=%d guarded_retained=%d parsed=%d reused=%d selected=%d retained_bytes=%lld enumerate_s=%.6f read_s=%.6f proof_s=%.6f parse_s=%.6f migration_s=%.6f selection_s=%.6f total_s=%.6f read_cpu_s=%.6f total_cpu_s=%.6f body_mode=%d body_after=%lld proof_capacity_misses=%d proof_acquisitions_skipped=%d acquire_s=%.6f guard_read_s=%.6f unguarded_read_s=%.6f parse_timing=%s total_cpu_scope=calling_thread"),
+      LogicalRows, PhysicalReads, GuardAcquired, GuardReused, GuardRejected, CurrentHistory ? CurrentHistory->ObservedReceipts : 0,
+      Parsed, Reused, OutRecords.Num(), CurrentHistory ? CurrentHistory->Bytes : 0,
+      Enumerated - Started, ReadSeconds, ProofSeconds, ParseSeconds, MigrationSeconds,
+      Total - (Enumerated - Started) - ReadSeconds - ProofSeconds - (bPureMetadataMode ? MetadataWallSeconds : ParseSeconds) - MigrationSeconds, Total,
+      bReadCpuValid ? ReadCpuSeconds : -1.0, UE::UAI::Timing::ThreadCpuSeconds(CpuStarted, UE::UAI::Timing::SampleThreadCpu()),
+      static_cast<int32>(StreamId.IsEmpty() ? EDurableConsumerBody::Metadata : Body), BodyAfterSequence,
+      ProofCapacityMisses, SkippedProofAcquisitions, AcquireSeconds, GuardReadSeconds, UnguardedReadSeconds,
+      bPureMetadataMode ? TEXT("worker_elapsed_sum") : TEXT("serial_wall"));
+  return true;
+}
+
+FScopedDurableRecoveryNotice::FScopedDurableRecoveryNotice(FString InOriginRequestId)
+    : Previous(CurrentRecoveryNotice), OriginRequestId(MoveTemp(InOriginRequestId)) {
+  if (OriginRequestId.IsEmpty() && Previous) OriginRequestId = Previous->OriginRequestId;
   CurrentRecoveryNotice = this;
 }
 
 FScopedDurableRecoveryNotice::~FScopedDurableRecoveryNotice() {
-  if (Previous) Previous->bMemoryEvidencePreserved |= bMemoryEvidencePreserved;
+  if (Previous) {
+    Previous->bMemoryEvidencePreserved |= bMemoryEvidencePreserved;
+    for (const auto& Id : JournalIds) Previous->RetainJournal(Id);
+  }
   CurrentRecoveryNotice = Previous;
 }
 
@@ -653,6 +1484,7 @@ struct FDurableTransactionCoordinator::FImpl {
   TArray<FDurableArtifact> PublicArtifacts;
   FOperationFailure InventoryFailure;
   bool bPrepared = false;
+  FScopedDurableConsumer* Consumer = nullptr; // Synchronous request scope, never retained after commit.
 };
 
 FString BuildDurableRequestFingerprint(
@@ -707,8 +1539,13 @@ bool FDurableTransactionCoordinator::RecoverPending(
     return true;
 
   TArray<FString> JournalFiles;
-  IFileManager::Get().FindFilesRecursive(JournalFiles, *ActiveRoot,
-                                         JournalFileName, true, false);
+  TArray<FString> RequestDirectories;
+  IFileManager::Get().FindFiles(RequestDirectories,
+      *(ActiveRoot / (RequestKeyFor(Options.RequestId) + TEXT("*"))), false, true);
+  for (const auto& Directory : RequestDirectories) {
+    const FString Path = ActiveRoot / Directory / JournalFileName;
+    if (IFileManager::Get().FileExists(*Path)) JournalFiles.Add(Path);
+  }
   JournalFiles.Sort();
   bool bRecoveredAny = false;
   bool bMemoryEvidencePreserved = false;
@@ -722,8 +1559,14 @@ bool FDurableTransactionCoordinator::RecoverPending(
       InOutResult.RecoveryStatus = TEXT("failed");
       return false;
     }
+    if (State.RequestId != Options.RequestId) continue;
     if (State.Phase == TEXT("committed") || State.Phase == TEXT("restored") || State.Phase == TEXT("memory_complete")) {
-      CleanupCompletedTransaction(State, InOutResult);
+      if (State.Phase == TEXT("committed") && !State.Consumer.OwnerId.IsEmpty() &&
+          !WriteJournal(State, Error, CompletedPathFor(JournalRoot, State.RequestKey, State.Consumer.OwnerId, State.Consumer.StreamId))) {
+        SetFailure(OutFailure, MoveTemp(Error)); return false;
+      }
+      if (State.Phase == TEXT("committed") && HasPendingConsumerObservation(State)) RetainObservationMaterial(State, InOutResult);
+      else CleanupCompletedTransaction(State, InOutResult);
       continue;
     }
     if (State.Phase == TEXT("disk_restored_memory_preserved")) {
@@ -788,16 +1631,23 @@ bool FDurableTransactionCoordinator::TryReplay(
   OutReplayed = false;
   OutFailure = FOperationFailure();
   const FString RequestKey = RequestKeyFor(Options.RequestId);
-  const FString CompletedPath =
-      CompletedPathFor(Options.JournalRoot, RequestKey);
-  if (!IFileManager::Get().FileExists(*CompletedPath))
-    return true;
-
+  FString CompletedPath;
+  UE::UAI::Contract::FDiagnostic Error;
+  if (!FindCompletedPathFor(Options.JournalRoot, RequestKey, CompletedPath, Error,
+      CurrentDurableConsumer ? CurrentDurableConsumer->OwnerId : FString(),
+      CurrentDurableConsumer ? CurrentDurableConsumer->StreamId : FString())) {
+    SetFailure(OutFailure, MoveTemp(Error)); return false;
+  }
   TSharedPtr<FJsonObject> Object;
   FDurableJournalState State;
-  UE::UAI::Contract::FDiagnostic Error;
-  if (!LoadJson(CompletedPath, Object, Error) ||
-      !JsonToJournal(CompletedPath, Object.ToSharedRef(), State, Error,
+  if (!IFileManager::Get().FileExists(*CompletedPath)) return true;
+  FString CompletedText;
+  if (!LoadJournalText(CompletedPath, CompletedText, Error)
+      || !ParseJournalText(CompletedPath, CompletedText, Object, Error)) {
+    SetFailure(OutFailure, MakeDurableFailure(TEXT("durable_replay_receipt_invalid"),
+        TEXT("The completed transaction receipt cannot be replayed."), Error, CompletedPath)); return false;
+  }
+  if (!JsonToJournal(CompletedPath, Object.ToSharedRef(), State, Error,
                      false)) {
     SetFailure(OutFailure, MakeDurableFailure(TEXT("durable_replay_receipt_invalid"), TEXT("The completed transaction receipt cannot be replayed."), Error, CompletedPath));
     return false;
@@ -866,6 +1716,7 @@ bool FDurableTransactionCoordinator::Prepare(
   FDurableJournalState &State = Impl->State;
   State = FDurableJournalState();
   State.RequestId = Options.RequestId;
+  if (CurrentRecoveryNotice) State.OriginRequestId = CurrentRecoveryNotice->GetOriginRequestId();
   State.RequestKey = RequestKeyFor(Options.RequestId);
   State.RequestFingerprint = RequestFingerprint;
   const FString JournalRoot = NormalizeAbsolutePath(Options.JournalRoot);
@@ -878,6 +1729,22 @@ bool FDurableTransactionCoordinator::Prepare(
   State.JournalPath = State.TransactionRoot / JournalFileName;
   State.CompletedPath = CompletedPathFor(JournalRoot, State.RequestKey);
   State.PhaseHistory = InOutResult.PhaseHistory;
+
+  Impl->Consumer = CurrentDurableConsumer;
+  if (Impl->Consumer) {
+    TArray<FDurableConsumerRecord> Records;
+    if (!ReadDurableConsumerRecords(JournalRoot, Impl->Consumer->OwnerId, Impl->Consumer->StreamId,
+        Records, OutFailure, EDurableConsumerBody::Metadata)) return false;
+    if (!Records.IsEmpty() && Records.Last().Sequence == MAX_int64) {
+      SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_consumer_sequence_exhausted"),
+          TEXT("The consumer sequence cannot advance."), TEXT("workspace_durable_transaction"))); return false;
+    }
+    State.Consumer.OwnerId = Impl->Consumer->OwnerId;
+    State.Consumer.StreamId = Impl->Consumer->StreamId;
+    State.Consumer.IntentJson = Impl->Consumer->IntentJson;
+    State.Consumer.Sequence = Records.IsEmpty() ? 1 : Records.Last().Sequence + 1;
+  }
+  State.CompletedPath = CompletedPathFor(JournalRoot, State.RequestKey, State.Consumer.OwnerId, State.Consumer.StreamId);
 
   UE::UAI::Contract::FDiagnostic Error;
   if (!IFileManager::Get().MakeDirectory(*State.TransactionRoot, true)) {
@@ -1130,7 +1997,8 @@ bool FDurableTransactionCoordinator::Publish(
     SetFailure(OutFailure, StateFailure(TEXT("durable_publish_without_stage"), TEXT("Publishing artifacts requires a staged transaction."), Impl->bPrepared, Impl->State.Phase, TEXT("staged")));
     return false;
   }
-  ON_SCOPE_EXIT { RefreshPublishedArtifacts(Impl->State); };
+  int32 Confirmed = 0;
+  ON_SCOPE_EXIT { RefreshPublishedArtifacts(Impl->State.Artifacts, Confirmed); };
   UE::UAI::Contract::FDiagnostic Error;
   if (!AppendPhaseAndWrite(Impl->State, TEXT("publish_started"), Error)) {
     SetFailure(OutFailure, MakeDurableFailure(TEXT("durable_journal_publish_failed"), TEXT("Recording the start of artifact publication failed."), Error));
@@ -1189,6 +2057,7 @@ bool FDurableTransactionCoordinator::Publish(
         TEXT("durable_publish_verification_failed"), TEXT("The published artifact does not match the staged presence or content."), Artifact.ArtifactId, Error)) {
       SetFailure(OutFailure, MoveTemp(Error)); return false;
     }
+    ++Confirmed;
     const FString DonePhase =
         FString::Printf(TEXT("publish_%04d_done"), Index);
     if (!AppendPhaseAndWrite(Impl->State, DonePhase, Error)) {
@@ -1285,7 +2154,8 @@ bool FDurableTransactionCoordinator::PublishMemoryCheckpoint(
     SetFailure(OutFailure, StateFailure(TEXT("durable_memory_checkpoint_without_prepare"), TEXT("A memory checkpoint requires a prepared transaction."), Impl->bPrepared, Impl->State.Phase, TEXT("")));
     return false;
   }
-  ON_SCOPE_EXIT { RefreshPublishedArtifacts(Impl->State); };
+  int32 Confirmed = 0;
+  ON_SCOPE_EXIT { RefreshPublishedArtifacts(Impl->State.Artifacts, Confirmed); };
   UE::UAI::Contract::FDiagnostic Error;
   if (!AppendPhaseAndWrite(Impl->State, TEXT("memory_restore_started"), Error)) {
     SetFailure(OutFailure, MakeDurableFailure(TEXT("durable_memory_restore_failed"), TEXT("Publishing or recording the memory checkpoint failed."), Error));
@@ -1319,6 +2189,7 @@ bool FDurableTransactionCoordinator::PublishMemoryCheckpoint(
         TEXT("durable_memory_restore_failed"), TEXT("The final artifact does not match the restored memory checkpoint."), Artifact.ArtifactId, Error)) {
       SetFailure(OutFailure, MoveTemp(Error)); return false;
     }
+    ++Confirmed;
   }
 
   if (!AppendPhaseAndWrite(Impl->State, TEXT("memory_restore_published"), Error)) {
@@ -1390,7 +2261,31 @@ bool FDurableTransactionCoordinator::FinalizeRestore(
     InOutResult.bRestoreSucceeded = false;
     return false;
   }
+  // The combined restore is confirmed and its storage was actually removed.
+  // Do not advertise the now-unreadable journal as recovery custody. Nested
+  // callers may already have seen SyncResult, so retire it in that same scope.
+  const FString RestoredId = MakeDurableJournalRecoveryId(Impl->State.JournalPath);
+  for (auto* Notice = CurrentRecoveryNotice; Notice; Notice = Notice->Previous)
+    Notice->JournalIds.Remove(RestoredId);
+  InOutResult.JournalPath.Reset();
   Impl->bPrepared = false;
+  return true;
+}
+
+bool FDurableTransactionCoordinator::SealConsumerEvidence(FOperationFailure& OutFailure) {
+  if (!Impl->bPrepared || !Impl->Consumer) return true;
+  FString Verified;
+  TSharedPtr<const IDurableConsumerMaterial> Material;
+  if (!Impl->Consumer->Seal || !Impl->Consumer->Seal(Impl->State.Consumer.Sequence, Verified, Material, OutFailure)) return false;
+  if (Verified.IsEmpty()) {
+    SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_consumer_evidence_empty"),
+        TEXT("A registered durable consumer returned no verified evidence."), TEXT("workspace_durable_transaction")));
+    return false;
+  }
+  Impl->State.Consumer.VerifiedJson = MoveTemp(Verified);
+  Impl->State.Consumer.Material = MoveTemp(Material);
+  UE::UAI::Contract::FDiagnostic Error;
+  if (!WriteJournal(Impl->State, Error)) { SetFailure(OutFailure, MoveTemp(Error)); return false; }
   return true;
 }
 
@@ -1402,6 +2297,11 @@ bool FDurableTransactionCoordinator::Commit(
     return false;
   }
   UE::UAI::Contract::FDiagnostic Error;
+  if (Impl->Consumer && Impl->State.Consumer.VerifiedJson.IsEmpty()) {
+    SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_consumer_evidence_missing"),
+        TEXT("The registered consumer must seal its evidence before native commit."), TEXT("workspace_durable_transaction")));
+    return false;
+  }
   for (const auto& Artifact : Impl->State.Artifacts) {
     if (!VerifyArtifactSnapshot(Artifact.Kind, Artifact.FinalPath, Artifact.bStagedExists, Artifact.StagedHash,
         TEXT("durable_commit_verification_failed"), TEXT("The artifact changed after publication and cannot be confirmed for commit."), Artifact.ArtifactId, Error)) {
@@ -1415,8 +2315,19 @@ bool FDurableTransactionCoordinator::Commit(
     return false;
   }
   Impl->State.JournalPath = Impl->State.CompletedPath;
+  if (Impl->Consumer) Impl->Consumer->CommittedSequence = Impl->State.Consumer.Sequence;
   SyncResult(Impl->State, InOutResult);
-  CleanupCompletedTransaction(Impl->State, InOutResult);
+  if (Impl->Consumer && Impl->Consumer->bObservationPending) {
+    RetainObservationMaterial(Impl->State, InOutResult);
+  } else CleanupCompletedTransaction(Impl->State, InOutResult);
+  // The completed receipt remains authoritative. Move, rather than copy, the
+  // already sealed body into its active consumer until this request refreshes.
+  // A reader only receives the pure material after reading the matching record.
+  if (Impl->Consumer) {
+    Impl->State.Consumer.RequestKey = Impl->State.RequestKey;
+    Impl->State.Consumer.Phase = Impl->State.Phase;
+    Impl->Consumer->CommittedRecords.Add(MoveTemp(Impl->State.Consumer));
+  }
   Impl->bPrepared = false;
   return true;
 }

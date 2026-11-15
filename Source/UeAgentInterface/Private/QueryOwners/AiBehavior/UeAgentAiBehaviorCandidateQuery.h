@@ -20,6 +20,11 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		UAIGraphNode* Parent = nullptr;
 		FString AttachmentKind;
 		UEdGraph* Graph = nullptr;
+		FString ParentAlias;
+		FString TargetPath;
+		FString FunctionOutput; // Binding source path when resolving an authored output.
+		FGuid StateTreeParentId; // Resolved keyed row on the HJSON import path.
+		bool bTargetMenu = false; // Discovery covers currently available placements. New-item planning may introduce an owner.
 	};
 
 	struct UEAGENTINTERFACE_API FAiBehaviorCandidate
@@ -65,6 +70,7 @@ namespace UE::UAI::QueryOwners::AiBehavior
 	};
 
 	using FAiBehaviorCandidateQueryError = UE::UAI::Contract::FDiagnostic;
+	bool IsStateTreeNodePlacement(const FString& Placement);
 
 	UEAGENTINTERFACE_API bool TryQueryAiBehaviorCandidates(
 		UObject& Target,

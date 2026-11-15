@@ -209,40 +209,6 @@ namespace UeAgentPCGAuthoring
 			return Result;
 		}
 
-		TSharedRef<FJsonObject> BuildNodeState(
-			UPCGGraph& Graph,
-			UPCGNode& Node,
-			const FString& NodeId)
-		{
-			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-			if (&Node == Graph.GetInputNode())
-			{
-				Result->SetStringField(TEXT("role"), TEXT("input"));
-			}
-			else if (&Node == Graph.GetOutputNode())
-			{
-				Result->SetStringField(TEXT("role"), TEXT("output"));
-			}
-			else if (const UPCGSettings* Settings = Node.GetSettings())
-			{
-				Result->SetStringField(TEXT("settings_class"), Settings->GetClass()->GetPathName());
-			}
-
-			const FString AuthoredTitle = Node.GetAuthoredTitleName().ToString();
-			if (!AuthoredTitle.IsEmpty() && AuthoredTitle != TEXT("None"))
-			{
-				Result->SetStringField(TEXT("authored_title"), AuthoredTitle);
-			}
-#if WITH_EDITOR
-			Result->SetArrayField(TEXT("position"), {
-				MakeShared<FJsonValueNumber>(Node.PositionX),
-				MakeShared<FJsonValueNumber>(Node.PositionY),
-			});
-#endif
-			Result->SetObjectField(TEXT("input_pins"), BuildPinMap(Node.GetInputPins()));
-			Result->SetObjectField(TEXT("output_pins"), BuildPinMap(Node.GetOutputPins()));
-			return Result;
-		}
 
 		TSharedRef<FJsonObject> PinMapToArrayContainer(
 			const TSharedPtr<FJsonObject>& Node,
@@ -668,6 +634,40 @@ const bool bNameInvalid = Pin && !Pin->TryGetStringField(TEXT("name"), PinName);
 		}
 	}
 
+	TSharedRef<FJsonObject> BuildNodeState(
+		UPCGGraph& Graph,
+		UPCGNode& Node)
+	{
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		if (&Node == Graph.GetInputNode())
+		{
+			Result->SetStringField(TEXT("role"), TEXT("input"));
+		}
+		else if (&Node == Graph.GetOutputNode())
+		{
+			Result->SetStringField(TEXT("role"), TEXT("output"));
+		}
+		else if (const UPCGSettings* Settings = Node.GetSettings())
+		{
+			Result->SetStringField(TEXT("settings_class"), Settings->GetClass()->GetPathName());
+		}
+
+		const FString AuthoredTitle = Node.GetAuthoredTitleName().ToString();
+		if (!AuthoredTitle.IsEmpty() && AuthoredTitle != TEXT("None"))
+		{
+			Result->SetStringField(TEXT("authored_title"), AuthoredTitle);
+		}
+#if WITH_EDITOR
+		Result->SetArrayField(TEXT("position"), {
+			MakeShared<FJsonValueNumber>(Node.PositionX),
+			MakeShared<FJsonValueNumber>(Node.PositionY),
+		});
+#endif
+		Result->SetObjectField(TEXT("input_pins"), BuildPinMap(Node.GetInputPins()));
+		Result->SetObjectField(TEXT("output_pins"), BuildPinMap(Node.GetOutputPins()));
+		return Result;
+	}
+
 	FString MakeEdgeKey(
 		const FString& FromNode,
 		const FString& FromPin,
@@ -703,7 +703,7 @@ const bool bNameInvalid = Pin && !Pin->TryGetStringField(TEXT("name"), PinName);
 				return false;
 			}
 			IdByNode.Add(Pair.Value, Pair.Key);
-			Nodes->SetObjectField(Pair.Key, BuildNodeState(Graph, *Pair.Value, Pair.Key));
+			Nodes->SetObjectField(Pair.Key, BuildNodeState(Graph, *Pair.Value));
 		}
 
 		for (const TPair<FString, UPCGNode*>& Pair : NodeById)

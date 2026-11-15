@@ -18,7 +18,8 @@ namespace UE::UAI::CommandHandlers::LocalizationStringTable
 				Request.GetCanonicalParamsJson(),
 				Payload,
 				bReadOnly,
-				OutError))
+				OutError,
+				Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

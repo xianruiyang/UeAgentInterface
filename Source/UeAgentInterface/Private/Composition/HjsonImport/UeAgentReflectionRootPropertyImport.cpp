@@ -39,7 +39,8 @@ FString PackageIdentity(const FString& Target)
 { return Target.Contains(TEXT(".")) ? FPackageName::ObjectPathToPackageName(Target) : Target; }
 }
 bool TryExportReflectionRootWorkspace(const UeAgentReflectionAuthoring::FProfile& Profile,
- const FString& Target, const FString& WorkspacePath, FString& OutPayload, FWorkspaceError& OutError)
+ const FString& Target, const FString& WorkspacePath, FString& OutPayload, FWorkspaceError& OutError,
+ FPreparedWorkspaceExport* PreparedExport)
 {
 	UE::UAI::Contract::FDiagnostic LoadError;
 	UObject* Asset = UeAgentReflectionAuthoring::LoadAsset(Profile, PackageIdentity(Target), LoadError);
@@ -49,7 +50,7 @@ bool TryExportReflectionRootWorkspace(const UeAgentReflectionAuthoring::FProfile
 		return false;
 	}
 	UeAgentExportWorkspaceWriter::FWorkspaceResult Result;
-	if (!UeAgentReflectionAuthoring::ExportAssetWorkspace(Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), Result))
+	if (!UeAgentReflectionAuthoring::ExportAssetWorkspace(Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), Result, PreparedExport))
 		{ OutError.SetFailure(Result.Diagnostic, Target); return false; }
 	return TryCanonicalizeObject(Result.ToPublicJsonObject(), OutPayload, OutError);
 }
@@ -69,20 +70,19 @@ bool TryImportReflectionWorkspace(const UeAgentReflectionAuthoring::FProfile& Pr
 	// Profiles may name a base class. Resolve membership through the same owner
 	// as export, then capture the concrete identity selected by the workspace.
 	const FString RootType = Asset->GetClass()->GetPathName();
-	FUeAgentContentGraphCapture TargetCapture;
-	if (!TryCaptureObject(Target, RootType, Asset, TargetCapture, OutError)) return false;
 	TArray<UeAgentAuthoringState::FReadRequest> Requests;
 	UE::UAI::Contract::FDiagnostic CaptureError;
 	if (!UeAgentReflectionAuthoring::BuildAssetExportSnapshotReadRequests(
 		Profile, *Asset, Requests, CaptureError))
 		{ OutError.SetFailure(CaptureError, Target); return false; }
+	SelectPropertyImportReadRequests(Workspace.Get(), Requests, Profile.ExportTargetSemanticId);
 	UeAgentAuthoringState::FCaptureResult Capture;
-	if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+	if (!CapturePropertyImportState(Workspace.Get(), Requests, Capture, Profile.ExportTargetSemanticId))
 		{ OutError.SetFailure(Capture.Diagnostic, Target); return false; }
 	auto Resources = MakeSemanticWorkspaceResourceTracker();
 	StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 	FAuthoringModelPtr Model;
-	if (!TryBuildCanonicalAuthoringCapture(
+	if (!TryBuildPropertyImportCurrentCapture(&Workspace.Get(),
 		ResolveTargetCompositionKind(Profile.TargetKind, Profile.TypeId),
 		TEXT("llm_authoring"), Capture.Snapshot, Resources,
 		CanonicalSnapshot, Model, OutError)
@@ -104,8 +104,7 @@ bool TryImportReflectionWorkspace(const UeAgentReflectionAuthoring::FProfile& Pr
 	return TryCoordinateSemanticWorkspaceImport(
 		Workspace, Model.ToSharedRef(),
 		CanonicalSnapshot.ToSharedRef(),
-		Contract::FUeAgentDescriptorIdentity(ImportContract.ProviderId + TEXT(".semantic_workspace"),
-			1, Model->GetSemanticFingerprint()),
+		BuildSemanticWorkspaceImportDescriptor(ImportContract.ProviderId + TEXT(".semantic_workspace"), *Model),
 		TargetObjectPath, Resources,
 		FinalContract,
 		[&Profile, TargetPackage, &Asset, &PrepareProperties](const FString& RequestId,

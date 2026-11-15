@@ -21,6 +21,8 @@ namespace UeAgentStateTreeAuthoring
 		const FString& AssetPath, TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError);
 	// Frozen domain document built from the same structural/property capture as export.
 	UEAGENTINTERFACE_API bool ReadTreeDocument(UStateTree& Tree, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError);
+	bool ReadTreeDocument(UStateTree& Tree, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError,
+		TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure);
 	// Applies only the document's property payloads to the already-resolved structure.
 	// The caller owns the enclosing structural transaction and its recovery.
 	// A transaction identity package resolves text sources into its private document

@@ -9,6 +9,7 @@
 class FJsonValue;
 class UObject;
 class UPackage;
+namespace UeAgentAuthoringState { class FStateSnapshot; }
 namespace UE::UAI::Authoring::Timeline { struct FMovieSceneCreationState; }
 
 namespace UeAgentReflectionAuthoring
@@ -29,6 +30,9 @@ namespace UeAgentReflectionAuthoring
 			TSharedPtr<FJsonValue>& OutValue,
 			bool& bOutAuthoringVisible,
 			UE::UAI::Contract::FDiagnostic& OutError);
+		bool Read(const FProfile& Profile, UObject& Asset, const FString& SemanticAssetPath, TSharedPtr<FJsonValue>& OutValue,
+			bool& bOutAuthoringVisible, UE::UAI::Contract::FDiagnostic& OutError,
+			TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure);
 		UEAGENTINTERFACE_API bool Apply(
 			const FProfile& Profile,
 			UObject& Asset,

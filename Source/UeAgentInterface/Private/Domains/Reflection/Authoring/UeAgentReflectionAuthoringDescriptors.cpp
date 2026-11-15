@@ -6,6 +6,8 @@
 #include "Domains/Eqs/Authoring/UeAgentEqsAuthoringState.h"
 #include "Domains/StateTree/Authoring/UeAgentStateTreeAuthoringState.h"
 #include "Domains/SmartObject/Authoring/UeAgentSmartObjectAuthoringState.h"
+#include "Engine/Texture.h"
+#include "Engine/VolumeTexture.h"
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
@@ -62,6 +64,20 @@ FProfile TextureSourceProfile(const TCHAR* TypeId, const TCHAR* DisplayName, con
   Result.GenerationInputSemanticId = FString::Printf(TEXT("uai.semantic.reflection.%s.generation_input"), TypeId);
   Result.GenerationInputField = TEXT("source_input");
   Result.GeneratedStateSemanticId = FString::Printf(TEXT("uai.semantic.reflection.%s.generated_state"), TypeId);
+  // Assembling a new native source invokes UTexture::ValidateSettingsAfterImportOrEdit.
+  // Observe its public write set on the same target even when no setting was authored.
+  Result.GenerationReadbackProperties = {
+      GET_MEMBER_NAME_CHECKED(UTexture, PowerOfTwoMode), GET_MEMBER_NAME_CHECKED(UTexture, ResizeDuringBuildX),
+      GET_MEMBER_NAME_CHECKED(UTexture, ResizeDuringBuildY), GET_MEMBER_NAME_CHECKED(UTexture, NeverStream),
+      GET_MEMBER_NAME_CHECKED(UTexture, VirtualTextureStreaming), GET_MEMBER_NAME_CHECKED(UTexture, MaxTextureSize),
+      GET_MEMBER_NAME_CHECKED(UTexture, MipGenSettings), GET_MEMBER_NAME_CHECKED(UTexture, SRGB),
+      GET_MEMBER_NAME_CHECKED(UTexture, bUseLegacyGamma), GET_MEMBER_NAME_CHECKED(UTexture, NumCinematicMipLevels)};
+  if (Result.TypeId == TEXT("volume_texture")) {
+    const FName Atlas = GET_MEMBER_NAME_CHECKED(UVolumeTexture, Source2DTexture);
+    Result.GenerationReadbackProperties.Append({Atlas, GET_MEMBER_NAME_CHECKED(UVolumeTexture, Source2DTileSizeX),
+                                                GET_MEMBER_NAME_CHECKED(UVolumeTexture, Source2DTileSizeY)});
+    Result.GenerationDependencyProperty = Atlas.ToString();
+  }
   return Result;
 }
 

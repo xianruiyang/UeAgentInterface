@@ -281,7 +281,8 @@ namespace UeAgentBehaviorTreeAuthoring
 		if (!CaptureGraph(Tree, NativeCapture, Detail)) { OutError.SetFailure(Detail); return false; }
 		const auto FullDocument = Captured->AsObject();
 		auto BuildContents = [&](const HjsonWorkspace::FSemanticUnit& GraphUnit,
-			const FString& GraphId, const TSharedPtr<FJsonObject>& Document, bool bOwned) -> bool {
+			const FString& GraphId, const TSharedPtr<FJsonObject>& Document, bool bOwned,
+			const TSharedPtr<FJsonObject>* InjectedBaseline = nullptr) -> bool {
 			const FString GraphPointer = bOwned ? TEXT("/owned_graphs/") + HjsonWorkspace::EscapeJsonPointerSegment(GraphId) : FString();
 			const auto Desired = MakeShared<FJsonObject>();
 			const auto Existing = Document->GetObjectField(TEXT("nodes"));
@@ -600,13 +601,6 @@ namespace UeAgentBehaviorTreeAuthoring
 					TEXT("/nodes/") + HjsonWorkspace::EscapeJsonPointerSegment(Pair.Key));
 				if (!Difference.bEquivalent) return RejectInjected(Difference, GraphUnit, Pair.Key);
 			}
-			// Existing objects retain their native state; only projected property changes
-			// are writable input. Keep full snapshots for capture/restore, not authoring.
-			for (const auto& Pair : Desired->Values)
-			{
-				if (Existing->HasField(Pair.Key))
-					Pair.Value->AsObject()->RemoveField(TEXT("properties"));
-			}
 			Document->SetObjectField(TEXT("nodes"), Desired);
 			Document->SetArrayField(TEXT("connections"), MoveTemp(Connections));
 			Prepared.GetWorkspace()->ProjectValueSources(GraphUnit.GetUnitId(), TEXT("/blackboard"), GraphPointer + TEXT("/blackboard"), Sources);
@@ -614,6 +608,19 @@ namespace UeAgentBehaviorTreeAuthoring
 			if (Graph->TryGetStringField(TEXT("blackboard"), Blackboard)) Document->SetStringField(TEXT("blackboard"), Blackboard);
 			else if (const auto* Field = Graph->Values.Find(TEXT("blackboard")); Field && (*Field)->Type == EJson::Null)
 				Document->SetStringField(TEXT("blackboard"), FString());
+			// Compare the full native candidate before converting existing property
+			// snapshots into the sparse apply document.
+			if (InjectedBaseline)
+			{
+				const auto Difference = StateSemantic::CanonicalJson::CompareJsonValues(
+					MakeShared<FJsonValueObject>(*InjectedBaseline), MakeShared<FJsonValueObject>(Document), GraphPointer);
+				if (!Difference.bEquivalent) return RejectInjected(Difference, GraphUnit);
+			}
+			for (const auto& Pair : Desired->Values)
+			{
+				if (Existing->HasField(Pair.Key))
+					Pair.Value->AsObject()->RemoveField(TEXT("properties"));
+			}
 			return true;
 		};
 		const HjsonWorkspace::FSemanticUnit* Main = nullptr;
@@ -644,17 +651,10 @@ namespace UeAgentBehaviorTreeAuthoring
 			const FString GraphId = TEXT("decorator:") + Id;
 			const TSharedPtr<FJsonObject>* Graph = nullptr;
 			if (!ExistingOwned->TryGetObjectField(GraphId, Graph)) return FailNative(TEXT("behavior_tree_semantic_owned_graph_missing"), TEXT("The captured decorator owner has no matching owned graph."), GraphId);
-			const auto DesiredGraph = UeAgentDetailsAuthoring::CloneObjectTree(*Graph);
-			if (!BuildContents(*Unit, GraphId, DesiredGraph, true)) return false;
 			bool bInjected = false;
 			FullDocument->GetObjectField(TEXT("nodes"))->GetObjectField(Id)->TryGetBoolField(TEXT("injected"), bInjected);
-			if (bInjected)
-			{
-				const auto Difference = StateSemantic::CanonicalJson::CompareJsonValues(
-					MakeShared<FJsonValueObject>(*Graph), MakeShared<FJsonValueObject>(DesiredGraph),
-					TEXT("/owned_graphs/") + HjsonWorkspace::EscapeJsonPointerSegment(GraphId));
-				if (!Difference.bEquivalent) return RejectInjected(Difference, *Unit);
-			}
+			const auto DesiredGraph = UeAgentDetailsAuthoring::CloneObjectTree(*Graph);
+			if (!BuildContents(*Unit, GraphId, DesiredGraph, true, bInjected ? Graph : nullptr)) return false;
 			DesiredOwned->SetObjectField(GraphId, DesiredGraph);
 		}
 		for (const auto& Pair : FullDocument->GetObjectField(TEXT("nodes"))->Values)

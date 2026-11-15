@@ -17,7 +17,8 @@ namespace UE::UAI::CommandHandlers::Blueprint::Surfaces
 		bool bReadOnly = false;
 		if (!DomainAdapters::Blueprint::Surfaces::TryExecuteContentGraph(
 			Request.GetCommandId(), Request.GetTargetIdentity(),
-			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
+			Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

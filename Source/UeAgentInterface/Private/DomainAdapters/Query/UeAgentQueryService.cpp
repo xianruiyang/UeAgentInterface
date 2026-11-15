@@ -3,6 +3,7 @@
 #include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Core/BindingGateway/Query/UeAgentQueryBinding.h"
+#include "Core/BindingGateway/Query/UeAgentQueryPublicProjection.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -665,6 +666,31 @@ namespace UE::UAI::DomainAdapters::Query
 					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Request.CommandId;
 					return false;
 				}
+				auto EffectiveProjection = Projection;
+				TArray<FDiagnostic> ProjectionNotices;
+				const auto Notice = [&](const FString& Code, const FString& Message, const FString& Path) {
+					auto Diagnostic = QueryFact(*Code, Message, Path, MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+					Diagnostic.Severity = ESeverity::Warning; Diagnostic.CandidateName = Request.CommandId;
+					ProjectionNotices.Add(MoveTemp(Diagnostic));
+				};
+				const bool bBusinessOnly = PublicProjection->Strategy == EUeAgentQueryPublicProjectionStrategy::SnapshotEntries
+					|| PublicProjection->Strategy == EUeAgentQueryPublicProjectionStrategy::SnapshotSections;
+				if (Projection && bBusinessOnly) {
+					for (const TCHAR* Field : {TEXT("include_defaults"), TEXT("include_details"), TEXT("include_provenance")}) {
+						bool bRequested = false;
+						if (Projection->TryGetBoolField(Field, bRequested) && bRequested) {
+							Notice(TEXT("content_graph_metadata_projection_unavailable"),
+								TEXT("Current business values are returned. This metadata option has no public result in this projection; omit it. Internal capture metadata is not an independently observed default."), FString(TEXT("/projection/")) + Field);
+							if (EffectiveProjection == Projection) { EffectiveProjection = MakeShared<FJsonObject>(); EffectiveProjection->Values = Projection->Values; }
+							EffectiveProjection->SetBoolField(Field, false);
+						}
+					}
+				}
+				bool bLegacyDefaults = false;
+				if (Descriptor.GetValue().GetProviderBinding() == TEXT("content_graph.read.properties")
+					&& Input->TryGetBoolField(TEXT("include_defaults"), bLegacyDefaults) && bLegacyDefaults)
+					Notice(TEXT("content_graph_legacy_defaults_option"),
+						TEXT("include_defaults is retained as a legacy compatibility option. The selected current values, including inherited values, are returned; independent defaults are not added. Omit the option for the same value result."), TEXT("/input/include_defaults"));
 
 				const FUeAgentCallerContext Caller(
 					Request.CallerId,
@@ -758,7 +784,7 @@ namespace UE::UAI::DomainAdapters::Query
 					ExecutionContext(Descriptor.GetValue(), Context),
 					FUeAgentContractValue(InputJson),
 					MoveTemp(Target),
-					ProjectionRequest(Projection, *PublicProjection));
+					ProjectionRequest(EffectiveProjection, *PublicProjection));
 				const FUeAgentQueryBindingRequest BindingRequest(
 					DescriptorOperation->GetIdentity(),
 					Request.RequestId,
@@ -804,6 +830,7 @@ namespace UE::UAI::DomainAdapters::Query
 				}
 
 				OutResponse.Diagnostics = Result->GetValue().GetDiagnostics();
+				OutResponse.Diagnostics.Append(MoveTemp(ProjectionNotices));
 
 				FUeAgentContractValue Encoded(TEXT("{}"));
 				if (!FUeAgentQueryPayloadCodec::TryEncodePublic(

@@ -114,12 +114,12 @@ owns inline, single-file, and directory loading; T24 selects the declared
 root and operation, and rejects legacy top-level `carrier` and
 `hjson_document` fields.
 
-The same domain continues to route Control Rig hierarchy and shape-library
-operations, IK Rig definition and auto-generation, IK Retargeter definition and
-settings, and Skeleton definition, compatibility, and virtual-bone operations.
-Their own explicit parent, transform, chain, and space contracts still apply;
-the compact RigVM candidate rule must not be generalized into those unrelated
-identities.
+Edit existing Control Rig hierarchy and shape libraries, IK Rig definitions,
+IK Retargeter settings, and Skeleton definitions through the exported HJSON
+directory and `import_changes`. Inline and single-file imports initialize a
+missing target. To auto-generate an existing IK Rig, call the separate
+`animation.ik_rig.definition.auto_generate` operation. Each domain keeps its
+own parent, transform, chain, and space contracts.
 
 An IK chain uses its map key as its name. Omitted endpoints and goal retain an
 existing chain's values, or the native unset defaults for a new chain. A new

@@ -390,6 +390,130 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 		return true;
 	}
 
+	bool MatchesCanonicalProjection(const TSharedPtr<FJsonValue>& Current, const FUeAgentCanonicalValue& Previous)
+	{
+		using FPair = TPair<const FJsonValue*, const FUeAgentCanonicalValue*>;
+		TArray<FPair> Work;
+		TMap<const FJsonValue*, const FUeAgentCanonicalValue*> Compared;
+		Work.Emplace(Current.Get(), &Previous);
+		while (!Work.IsEmpty()) {
+			const FPair Pair = Work.Pop(EAllowShrinking::No);
+			if (!Pair.Key || !Pair.Value) return false;
+			if (const auto* Prior = Compared.Find(Pair.Key); Prior && *Prior == Pair.Value) continue;
+			Compared.Add(Pair.Key, Pair.Value);
+			const auto& Json = *Pair.Key;
+			const auto& Canonical = *Pair.Value;
+			switch (Json.Type) {
+			case EJson::None:
+			case EJson::Null:
+				if (Canonical.GetKind() != EUeAgentValueKind::Null) return false;
+				break;
+			case EJson::Boolean:
+				if (Canonical.GetKind() != EUeAgentValueKind::Boolean || Json.AsBool() != Canonical.GetBoolean()) return false;
+				break;
+			case EJson::String:
+				if (Canonical.GetKind() != EUeAgentValueKind::String || !Json.AsString().Equals(Canonical.GetText(), ESearchCase::CaseSensitive)) return false;
+				break;
+			case EJson::Number: {
+				// TryFromJsonValue uses Decimal for native doubles and first tries
+				// Integer for exact number strings. The uncommon decimal-string
+				// case retains ordinary conversion rather than guessing its kind.
+				const auto Expected = Json.PreferStringRepresentation() ? EUeAgentValueKind::Integer : EUeAgentValueKind::Decimal;
+				FString Lexeme;
+				if (Canonical.GetKind() != Expected || !TryGetNumberLexeme(Json, Lexeme)
+					|| !Lexeme.Equals(Canonical.GetText(), ESearchCase::CaseSensitive)) return false;
+				break;
+			}
+			case EJson::Array: {
+				if (Canonical.GetKind() != EUeAgentValueKind::Array || Json.AsArray().Num() != Canonical.GetArrayItems().Num()) return false;
+				for (int32 Index = 0; Index < Json.AsArray().Num(); ++Index)
+					Work.Emplace(Json.AsArray()[Index].Get(), &Canonical.GetArrayItems()[Index].Get());
+				break;
+			}
+			case EJson::Object: {
+				const auto Object = Json.AsObject();
+				if (Canonical.GetKind() != EUeAgentValueKind::Object || !Object
+					|| Object->Values.Num() != Canonical.GetObjectItems().Num()) return false;
+				TArray<FString> Keys; Object->Values.GetKeys(Keys);
+				Keys.Sort([](const FString& A, const FString& B) { return A.Compare(B, ESearchCase::CaseSensitive) < 0; });
+				for (int32 Index = 0; Index < Keys.Num(); ++Index) {
+					const auto& Item = Canonical.GetObjectItems()[Index];
+					if (!Keys[Index].Equals(Item.Key, ESearchCase::CaseSensitive)) return false;
+					Work.Emplace(Object->Values.FindChecked(Keys[Index]).Get(), &Item.Value.Get());
+				}
+				break;
+			}
+			default: return false;
+			}
+		}
+		return true;
+	}
+
+	static bool TryFromJsonScalar(const FJsonValue& Value, FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalValuePtr& OutValue, UE::UAI::Contract::FDiagnostic& OutError, const FString& Path)
+	{
+		FUeAgentStateSemanticError SemanticError; bool bCreated = false;
+		switch (Value.Type) {
+			case EJson::Null:
+			case EJson::None:
+				bCreated = FUeAgentCanonicalValue::TryNull(
+					Resources, OutValue, SemanticError);
+				break;
+			case EJson::Boolean:
+				bCreated = FUeAgentCanonicalValue::TryBoolean(
+					Value.AsBool(), Resources, OutValue, SemanticError);
+				break;
+			case EJson::String:
+				bCreated = FUeAgentCanonicalValue::TryString(
+					Value.AsString(), Resources, OutValue, SemanticError);
+				break;
+			case EJson::Number:
+			{
+				FString Lexeme;
+				if (!TryGetNumberLexeme(Value, Lexeme))
+				{
+					OutError = ConversionFailure(TEXT("canonical_json_number_lexeme_invalid"), TEXT("The JSON number cannot provide a finite exact numeric spelling."), Path,
+						Value.PreferStringRepresentation() ? nullptr : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), Value.AsNumber()))),
+						MakeShared<FJsonValueString>(TEXT("finite numeric spelling")));
+					return false;
+				}
+				if (Value.PreferStringRepresentation())
+				{
+					// Use the canonical numeric grammar rather than a double or a
+					// second HJSON parse. Invalid integer grammar allocates nothing;
+					// allocation failures must not be retried as another value kind.
+					bCreated = FUeAgentCanonicalValue::TryInteger(Lexeme,
+						Resources, OutValue, SemanticError);
+					if (!bCreated && SemanticError.Code == TEXT("integer_lexeme_not_canonical"))
+						bCreated = FUeAgentCanonicalValue::TryDecimal(Lexeme,
+							Resources, OutValue, SemanticError);
+					break;
+				}
+				bCreated = FUeAgentCanonicalValue::TryDecimal(
+					Lexeme,
+					Resources, OutValue, SemanticError);
+				break;
+			}
+		default:
+			OutError = ConversionFailure(TEXT("canonical_json_kind_unsupported"), TEXT("This JSON value kind is not supported by canonical conversion."), Path,
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Value.Type))); return false;
+		}
+		if (!bCreated || !OutValue.IsValid()) {
+			OutError = SemanticError.IsEmpty()
+				? ConversionFailure(TEXT("canonical_json_value_create_failed"), TEXT("The canonical value factory returned no value or diagnostic."), TEXT("/"), MakeShared<FJsonValueNumber>(static_cast<int32>(Value.Type)))
+				: SemanticError;
+			LocateConversionFailure(OutError, Path); return false;
+		}
+		return true;
+	}
+
+	bool TryFromJsonScalarValue(const FJsonValue& Value, FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalValuePtr& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutValue.Reset(); OutError.Reset();
+		return TryFromJsonScalar(Value, Resources, OutValue, OutError, TEXT("/"));
+	}
+
 	bool TryFromJsonValue(
 		const TSharedPtr<FJsonValue>& Value,
 		FUeAgentResourceTracker& Resources,
@@ -398,9 +522,10 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 	{
 		struct FVisit final
 		{
-			TSharedPtr<FJsonValue> Value;
+			const FJsonValue* Value = nullptr;
 			bool bExpanded = false;
 			FString Path;
+			TArray<FString> Keys;
 		};
 
 		OutValue.Reset();
@@ -411,14 +536,17 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 			return false;
 		}
 
+		if (Value->Type != EJson::Array && Value->Type != EJson::Object)
+			return TryFromJsonScalar(*Value, Resources, OutValue, OutError, TEXT("/"));
+
 		TArray<FVisit> Work;
-		TMap<const FJsonValue*, FUeAgentCanonicalValuePtr> Built;
-		TSet<const FJsonValue*> Expanded;
-		Work.Add({Value, false, TEXT("/")});
+		struct FConverted { FUeAgentCanonicalValuePtr Value; bool bExpanded = false; };
+		TMap<const FJsonValue*, FConverted> Built;
+		Work.Add({Value.Get(), false, TEXT("/")});
 		while (!Work.IsEmpty())
 		{
-			const FVisit Current = Work.Pop(EAllowShrinking::No);
-			if (!Current.Value.IsValid())
+			FVisit Current = Work.Pop(EAllowShrinking::No);
+			if (!Current.Value)
 			{
 				OutError = ConversionFailure(TEXT("canonical_json_value_missing"), TEXT("The value at this conversion path is missing."), Current.Path);
 				return false;
@@ -427,37 +555,34 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 				&& (Current.Value->Type == EJson::Array
 					|| Current.Value->Type == EJson::Object))
 			{
-				if (Expanded.Contains(Current.Value.Get()))
-				{
-					continue;
-				}
-				Expanded.Add(Current.Value.Get());
-				Work.Add({Current.Value, true, Current.Path});
+				auto& Converted = Built.FindOrAdd(Current.Value);
+				if (Converted.bExpanded) continue;
+				Converted.bExpanded = true;
 				if (Current.Value->Type == EJson::Array)
 				{
-					const TArray<TSharedPtr<FJsonValue>>& Items =
-						Current.Value->AsArray();
+					const TArray<TSharedPtr<FJsonValue>>& Items = Current.Value->AsArray();
+					Work.Add({Current.Value, true, Current.Path});
 					for (int32 Index = Items.Num() - 1; Index >= 0; --Index)
 					{
-						Work.Add({Items[Index], false, ChildPath(Current.Path, FString::FromInt(Index))});
+						Work.Add({Items[Index].Get(), false, ChildPath(Current.Path, FString::FromInt(Index))});
 					}
 				}
 				else
 				{
-					const TSharedPtr<FJsonObject> Object =
+					const TSharedPtr<FJsonObject>& Object =
 						Current.Value->AsObject();
 					if (!Object.IsValid())
 					{
 						OutError = ConversionFailure(TEXT("canonical_json_object_invalid"), TEXT("The JSON object value has no object storage."), Current.Path);
 						return false;
 					}
-					TArray<FString> Keys;
-					Object->Values.GetKeys(Keys);
-					Keys.Sort();
-					for (int32 Index = Keys.Num() - 1; Index >= 0; --Index)
-					{
-						Work.Add({Object->Values.FindChecked(Keys[Index]), false, ChildPath(Current.Path, Keys[Index])});
-					}
+					TArray<FString> Keys; Object->Values.GetKeys(Keys); Keys.Sort();
+					const int32 Count = Keys.Num(); const FString* OrderedKeys = Keys.GetData();
+					// The original expanded frame owns this allocation through the join;
+					// moving/reallocating Work moves TArray ownership, not its elements.
+					Work.Add({Current.Value, true, Current.Path, MoveTemp(Keys)});
+					for (int32 Index = Count - 1; Index >= 0; --Index)
+						Work.Add({Object->Values.FindChecked(OrderedKeys[Index]).Get(), false, ChildPath(Current.Path, OrderedKeys[Index])});
 				}
 				continue;
 			}
@@ -469,44 +594,12 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 			{
 			case EJson::Null:
 			case EJson::None:
-				bCreated = FUeAgentCanonicalValue::TryNull(
-					Resources, Canonical, SemanticError);
-				break;
 			case EJson::Boolean:
-				bCreated = FUeAgentCanonicalValue::TryBoolean(
-					Current.Value->AsBool(), Resources, Canonical, SemanticError);
-				break;
 			case EJson::String:
-				bCreated = FUeAgentCanonicalValue::TryString(
-					Current.Value->AsString(), Resources, Canonical, SemanticError);
-				break;
 			case EJson::Number:
-			{
-				FString Lexeme;
-				if (!TryGetNumberLexeme(*Current.Value, Lexeme))
-				{
-					OutError = ConversionFailure(TEXT("canonical_json_number_lexeme_invalid"), TEXT("The JSON number cannot provide a finite exact numeric spelling."), Current.Path,
-						Current.Value->PreferStringRepresentation() ? nullptr : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), Current.Value->AsNumber()))),
-						MakeShared<FJsonValueString>(TEXT("finite numeric spelling")));
-					return false;
-				}
-				if (Current.Value->PreferStringRepresentation())
-				{
-					// Use the canonical numeric grammar rather than a double or a
-					// second HJSON parse. Invalid integer grammar allocates nothing;
-					// allocation failures must not be retried as another value kind.
-					bCreated = FUeAgentCanonicalValue::TryInteger(Lexeme,
-						Resources, Canonical, SemanticError);
-					if (!bCreated && SemanticError.Code == TEXT("integer_lexeme_not_canonical"))
-						bCreated = FUeAgentCanonicalValue::TryDecimal(Lexeme,
-							Resources, Canonical, SemanticError);
-					break;
-				}
-				bCreated = FUeAgentCanonicalValue::TryDecimal(
-					Lexeme,
-					Resources, Canonical, SemanticError);
-				break;
-			}
+				if (!TryFromJsonScalar(*Current.Value, Resources, Canonical, OutError, Current.Path)) return false;
+				bCreated = true; break;
+
 			case EJson::Array:
 			{
 				TArray<FUeAgentCanonicalValueRef> Items;
@@ -514,13 +607,13 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 				for (int32 Index = 0; Index < Children.Num(); ++Index)
 				{
 					const auto& Item = Children[Index];
-					const FUeAgentCanonicalValuePtr* Found = Built.Find(Item.Get());
-					if (!Found || !Found->IsValid())
+					const auto* Found = Built.Find(Item.Get());
+					if (!Found || !Found->Value.IsValid())
 					{
 						OutError = ConversionFailure(TEXT("canonical_json_array_child_missing"), TEXT("The JSON array element has no converted canonical value."), ChildPath(Current.Path, FString::FromInt(Index)));
 						return false;
 					}
-					Items.Add(Found->ToSharedRef());
+					Items.Add(Found->Value.ToSharedRef());
 				}
 				bCreated = FUeAgentCanonicalValue::TryArray(
 					Items, Resources, Canonical, SemanticError);
@@ -528,27 +621,24 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 			}
 			case EJson::Object:
 			{
-				const TSharedPtr<FJsonObject> Object = Current.Value->AsObject();
+				const TSharedPtr<FJsonObject>& Object = Current.Value->AsObject();
 				if (!Object.IsValid())
 				{
 					OutError = ConversionFailure(TEXT("canonical_json_object_invalid"), TEXT("The JSON object value has no object storage."), Current.Path);
 					return false;
 				}
-				TArray<FString> Keys;
-				Object->Values.GetKeys(Keys);
-				Keys.Sort();
 				TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
-				for (const FString& Key : Keys)
+				for (const FString& Key : Current.Keys)
 				{
 					const TSharedPtr<FJsonValue>& Child =
 						Object->Values.FindChecked(Key);
-					const FUeAgentCanonicalValuePtr* Found = Built.Find(Child.Get());
-					if (!Found || !Found->IsValid())
+					const auto* Found = Built.Find(Child.Get());
+					if (!Found || !Found->Value.IsValid())
 					{
 						OutError = ConversionFailure(TEXT("canonical_json_object_child_missing"), TEXT("The JSON object member has no converted canonical value."), ChildPath(Current.Path, Key));
 						return false;
 					}
-					Items.Emplace(Key, Found->ToSharedRef());
+					Items.Emplace(Key, Found->Value.ToSharedRef());
 				}
 				bCreated = FUeAgentCanonicalValue::TryObject(
 					Items, Resources, Canonical, SemanticError);
@@ -566,23 +656,30 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 				LocateConversionFailure(OutError, Current.Path);
 				return false;
 			}
-			Built.Add(Current.Value.Get(), Canonical);
+			Built.FindOrAdd(Current.Value).Value = MoveTemp(Canonical);
 		}
 
-		const FUeAgentCanonicalValuePtr* Root = Built.Find(Value.Get());
-		if (!Root || !Root->IsValid())
+		const auto* Root = Built.Find(Value.Get());
+		if (!Root || !Root->Value.IsValid())
 		{
 			OutError = ConversionFailure(TEXT("canonical_json_root_missing"), TEXT("Canonical conversion produced no root value."), TEXT("/"));
 			return false;
 		}
-		OutValue = *Root;
+		OutValue = Root->Value;
 		return true;
 	}
 
-	bool TryToJsonValue(
+	bool NeedsDecimalPoint(const FString& DecimalLexeme)
+	{
+		return !DecimalLexeme.Contains(TEXT(".")) && !DecimalLexeme.Contains(TEXT("e"), ESearchCase::IgnoreCase);
+	}
+
+enum class EJsonProjectionPurpose { ExactLexeme, AuthoringValue, AuthoringDeclaration };
+
+static bool ProjectToJson(
 		const FUeAgentCanonicalValue& Value,
 		TSharedPtr<FJsonValue>& OutValue,
-		UE::UAI::Contract::FDiagnostic& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError, const EJsonProjectionPurpose Purpose)
 	{
 		struct FVisit final
 		{
@@ -643,9 +740,27 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 				break;
 			case EUeAgentValueKind::Integer:
 			case EUeAgentValueKind::Decimal:
-				JsonValue = MakeShared<FJsonValueNumberString>(
-					Current.Value->GetLexeme());
+			{
+				const FString& Lexeme = Current.Value->GetLexeme();
+				if (Purpose != EJsonProjectionPurpose::ExactLexeme && Current.Value->GetKind() == EUeAgentValueKind::Decimal && NeedsDecimalPoint(Lexeme)) {
+					if (Purpose == EJsonProjectionPurpose::AuthoringValue) {
+						JsonValue = MakeShared<FJsonValueNumberString>(Lexeme + TEXT(".0"));
+						break;
+					}
+					if (Purpose == EJsonProjectionPurpose::AuthoringDeclaration) {
+						// Native JSON doubles enter a capture as Decimal even when the writer
+						// spells an integer. Exact number strings with that spelling enter as Integer.
+						const auto Native = MakeShared<FJsonValueNumber>(FCString::Atod(*Lexeme));
+						FString Written;
+						if (TryGetNumberLexeme(*Native, Written) && Written.Equals(Lexeme, ESearchCase::CaseSensitive)) {
+							JsonValue = Native;
+							break;
+						}
+					}
+				}
+				JsonValue = MakeShared<FJsonValueNumberString>(Lexeme);
 				break;
+			}
 			case EUeAgentValueKind::Array:
 			{
 				TArray<TSharedPtr<FJsonValue>> Items;
@@ -708,5 +823,23 @@ namespace UE::UAI::StateSemantic::CanonicalJson
 		}
 		OutValue = *Root;
 		return true;
+	}
+
+	bool TryToJsonValue(const FUeAgentCanonicalValue& Value, TSharedPtr<FJsonValue>& OutValue,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return ProjectToJson(Value, OutValue, OutError, EJsonProjectionPurpose::ExactLexeme);
+	}
+
+	bool TryToAuthoringCodecJson(const FUeAgentCanonicalValue& Value, TSharedPtr<FJsonValue>& OutValue,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return ProjectToJson(Value, OutValue, OutError, EJsonProjectionPurpose::AuthoringValue);
+	}
+
+	bool TryToAuthoringDeclarationJson(const FUeAgentCanonicalValue& Value, TSharedPtr<FJsonValue>& OutValue,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return ProjectToJson(Value, OutValue, OutError, EJsonProjectionPurpose::AuthoringDeclaration);
 	}
 }

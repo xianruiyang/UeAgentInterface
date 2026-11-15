@@ -414,7 +414,7 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 			Table = nullptr;
 			return TryCoordinateSemanticWorkspaceImport(Document.SemanticWorkspace.ToSharedRef(),
 				Model.ToSharedRef(), Snapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(TEXT("string_table.semantic_workspace"), 1, Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("string_table.semantic_workspace"), *Model),
 				Target, Resources,
 				{ProviderId, Target, Target, TEXT("string-table-semantic"),
 				 TEXT("string_table_prepare_failed"), TEXT("string_table_apply_failed"), TEXT("string_table_readback_invalid"), TEXT("string_table_schema_invalid"),
@@ -546,7 +546,7 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 			if (!TryBuildCanonicalAuthoringCapture(TEXT("ue.localization_settings.config"), TEXT("llm_authoring"),
 				Capture.Snapshot, Resources, Snapshot, Model, OutError)) return false;
 			return TryCoordinateSemanticWorkspaceImport(Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(), Snapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(TEXT("localization_settings.semantic_workspace"), 1, Model->GetSemanticFingerprint()), Target, Resources,
+				BuildSemanticWorkspaceImportDescriptor(TEXT("localization_settings.semantic_workspace"), *Model), Target, Resources,
 				{ProviderId, Target, Target, TEXT("localization-settings"), TEXT("localization_prepare_failed"), TEXT("localization_apply_failed"),
 				 TEXT("localization_readback_invalid"), TEXT("localization_schema_invalid"),
 				 [](TArray<UeAgentAuthoringState::FReadRequest>& Requests, UE::UAI::Contract::FDiagnostic& Error) {
@@ -610,7 +610,8 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 			const FString& Target,
 			const FString& RootType,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -636,7 +637,7 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 				FString Profile = TEXT("llm_authoring");
 				Params->TryGetStringField(TEXT("profile_id"), Profile);
 				UeAgentExportWorkspaceWriter::FWorkspaceResult Result;
-				if (!TryExportCompositionWorkspace(TEXT("ue.string_table.asset"), Profile, Capture.Snapshot, WorkspacePath, Result))
+				if (!TryExportCompositionWorkspace(TEXT("ue.string_table.asset"), Profile, Capture.Snapshot, WorkspacePath, Result, PreparedExport))
 				{
 					OutError.SetFailure(Result.Diagnostic, Target);
 					return false;
@@ -656,7 +657,7 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 				FString Profile = TEXT("llm_authoring");
 				Params->TryGetStringField(TEXT("profile_id"), Profile);
 				UeAgentExportWorkspaceWriter::FWorkspaceResult Result;
-				if (!TryExportCompositionWorkspace(TEXT("ue.localization_settings.config"), Profile, Capture.Snapshot, WorkspacePath, Result))
+				if (!TryExportCompositionWorkspace(TEXT("ue.localization_settings.config"), Profile, Capture.Snapshot, WorkspacePath, Result, PreparedExport))
 				{
 					OutError.SetFailure(Result.Diagnostic, Target);
 					return false;
@@ -679,7 +680,8 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -731,7 +733,7 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return ExportWorkspace(Params, Target, RootTypeIdentity, OutPayloadJson, OutError);
+			return ExportWorkspace(Params, Target, RootTypeIdentity, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId == TEXT("content_graph.compound"))
 		{

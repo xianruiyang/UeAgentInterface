@@ -1,6 +1,12 @@
 #include "DomainAdapters/WorldSpatial/UeAgentLevelWorldDomainMechanics.h"
 #include "DomainAdapters/WorldRead/SceneAnalysis/UeAgentSceneAnalysis.h"
 #include "Core/HjsonWorkspace/UeAgentWorkspaceRefresh.h"
+#include "Core/HjsonWorkspace/UeAgentCommittedWorkspaceExport.h"
+#include "Core/HjsonWorkspace/UeAgentCommittedWorkspaceDelta.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
+#include "Core/HjsonWorkspace/UeAgentCapturedReferenceReadScope.h"
+#include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
+#include "Core/ArtifactPublisher/UeAgentArtifactPublisher.h"
 #include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
@@ -20,18 +26,22 @@
 #include "Core/HjsonWorkspace/UeAgentKeyedItemAuthoringProjection.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Composition/HjsonImport/UeAgentSemanticWorkspaceImport.h"
+#include "Composition/HjsonImport/UeAgentSemanticWorkspaceRebase.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringApplyProvider.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringAuthorability.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringDescriptors.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringExport.h"
+#include "Domains/Level/Authoring/UeAgentLevelPartitionReadScope.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringRegistration.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringSpatial.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Domains/Level/Authoring/UeAgentLevelComponentCandidates.h"
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
 #include "Editor.h"
 #include "Engine/World.h"
 #include "Engine/Level.h"
@@ -44,6 +54,7 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
+#include "HAL/PlatformTime.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/WorldCommands/UeAgentWorldCommandOperationOwner.h"
 #include "PackageTools.h"
@@ -79,6 +90,35 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	{
 		const FString SchemaId = TEXT("uai.world.edit/1");
 		const FString ProviderId = TEXT("level-world-domain-provider");
+
+		bool MayContainNativeObjectReference(const FResolvedSemanticWorkspace& Source,
+			const FSemanticUnit::FDeclarationView& Property, bool* OutClosedContainer = nullptr,
+			TConstArrayView<const UObject*> RemovedObjects = {}, bool* OutIncompatibleReference = nullptr)
+		{
+			if (OutClosedContainer) *OutClosedContainer = false;
+			if (OutIncompatibleReference) *OutIncompatibleReference = false;
+			bool bKnownSafeType = false, bClosedContainer = false;
+			for (const FString& Id : Property.GetDependencyRefs()) {
+				const auto Declaration = Source.GetModel()->FindDeclaration(Id);
+				if (!Declaration || Declaration->GetRole() != TEXT("property_definition")) continue;
+				const auto* Definition = Source.FindBaselineUnit(Id);
+				if (!Definition) return true;
+				const auto* Type = Definition->GetValues().Find(TEXT("type"));
+				if (!Type || (*Type)->GetKind() != EUeAgentValueKind::Object) return true;
+				if (UeAgentAuthoringTypeDescriptors::MayContainNativeObjectReferenceTo(Type->Get(), RemovedObjects)) return true;
+				if (OutIncompatibleReference && !RemovedObjects.IsEmpty()
+					&& UeAgentAuthoringTypeDescriptors::MayContainNativeObjectReference(Type->Get()))
+					*OutIncompatibleReference = true;
+				bKnownSafeType = true;
+				if (OutClosedContainer) {
+					const auto* Kind = (*Type)->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("kind"); });
+					const FString Wrapper = UeAgentAuthoringTypeDescriptors::NativeCodecValueWrapper(Kind->Value->GetText());
+					bClosedContainer |= Wrapper != TEXT("literal") && Wrapper != TEXT("selected") && Wrapper != TEXT("components");
+				}
+			}
+			if (OutClosedContainer) *OutClosedContainer = bKnownSafeType && bClosedContainer;
+			return !bKnownSafeType;
+		}
 
 		class FNeverCancelled final : public Contract::IUeAgentCancellationSignal
 		{
@@ -289,8 +329,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				PackageName, FPackageName::GetMapPackageExtension());
 		}
 
-		bool StableRevision(
-			const FString& PackageName, FString& OutRevision, FWorkspaceError& OutError)
+		bool ReadPersistedMap(
+			const FString& PackageName, FString* OutRevision, FWorkspaceError& OutError)
 		{
 			TArray<uint8> Bytes;
 			const FString Filename = MapFilename(PackageName);
@@ -301,8 +341,12 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					bRead ? TEXT("/persisted_map/byte_count") : TEXT("/persisted_map/read_succeeded"),
 					bRead ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Bytes.Num())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
 					bRead ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("greater than zero"))) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)), PackageName));
-			OutRevision = Sha256(Bytes);
+			if (OutRevision) *OutRevision = Sha256(Bytes);
 			return true;
+		}
+		bool StableRevision(const FString& PackageName, FString& OutRevision, FWorkspaceError& OutError)
+		{
+			return ReadPersistedMap(PackageName, &OutRevision, OutError);
 		}
 
 		struct FMapRestoreContext
@@ -1085,13 +1129,28 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 
 	}
 
-	bool TryBuildLevelSemanticWorkspaceBundle(
+	static FString AllocateLevelActorManagedId(const FString& WorldPath, const FString& Key, TSet<FString>& Reserved)
+	{
+		const FString Material = WorldPath + TEXT("|") + Key;
+		const FTCHARToUTF8 Utf8(*Material);
+		TArray<uint8> Bytes;
+		Bytes.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+		const FString Base = TEXT("semantic-") + Sha256(Bytes).Right(20);
+		FString Id = Base;
+		for (int32 Suffix = 2; Reserved.Contains(Id); ++Suffix) Id = Base + TEXT("-") + FString::FromInt(Suffix);
+		Reserved.Add(Id);
+		return Id;
+	}
+
+	static bool TryBuildLevelSemanticWorkspaceBundleWithSnapshot(
 			const FResolvedSemanticWorkspaceRef& Workspace,
 			const TArray<FChangeDraft>& Changes,
 			TSharedRef<FJsonObject>& OutBundle,
 			FWorkspaceError& OutError,
-			TFunction<Contract::FSourceLocation(const FString&, const FString&)>* OutSourceResolver)
+			TFunction<Contract::FSourceLocation(const FString&, const FString&)>* OutSourceResolver,
+			const StateSemantic::FUeAgentCanonicalSnapshot* CurrentSnapshot)
 		{
+			const double BundleStarted = FPlatformTime::Seconds();
 			OutBundle = MakeShared<FJsonObject>();
 			OutBundle->SetStringField(TEXT("schema"), TEXT("uai.virtual_workspace.v1"));
 			TSharedRef<FJsonObject> Units = MakeShared<FJsonObject>();
@@ -1100,9 +1159,35 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			TMap<FString, TArray<TSharedPtr<FJsonValue>>> PropertiesByKey;
 			TMap<FString, TPair<FString, FString>> ActorSourcesByKey;
 			TMap<FString, TPair<FString, FString>> SourcesByUnitPath;
-			FString WorkspaceWorldPath;
-			for (const FSemanticUnit& Unit : Workspace->GetModel()->GetUnits())
+			TMap<FString, const StateSemantic::FUeAgentStateEntry*> CurrentNativeActors;
+			TArray<StateSemantic::FUeAgentStateEntry> CurrentNativeActorStorage;
+			TSet<FString> AmbiguousNativeActors;
+			int32 UnchangedNativeActors = 0;
+			const auto ActorIndices = CurrentSnapshot
+				? CurrentSnapshot->FindSemanticEntryIndices(UeAgentLevelAuthoring::ActorStateSemanticId) : TArray<int32>();
+			CurrentNativeActorStorage.Reserve(ActorIndices.Num());
+			for (const int32 EntryIndex : ActorIndices)
 			{
+				const auto& Entry = CurrentNativeActorStorage.Add_GetRef(CurrentSnapshot->ReadEntry(EntryIndex));
+				const auto& Identity = Entry.GetIdentity();
+				if (Identity.GetSemanticId() != UeAgentLevelAuthoring::ActorStateSemanticId
+					|| Identity.GetSelector(TEXT("actor_class")) != TEXT("/Script/Engine.StaticMeshActor")) continue;
+				FString Owner = Identity.GetSelector(TEXT("managed_id"));
+				if (Owner.IsEmpty()) Owner = Identity.GetSelector(TEXT("actor_guid"));
+				if (Owner.IsEmpty()) Owner = Identity.GetSelector(TEXT("object_path"));
+				const FString WorldPath = Identity.GetSelector(TEXT("world_path"));
+				if (Owner.IsEmpty() || WorldPath.IsEmpty()) continue;
+				const FString Key = WorldPath + TEXT("|") + Owner + TEXT("|");
+				if (AmbiguousNativeActors.Contains(Key)) continue;
+				if (CurrentNativeActors.Contains(Key)) { CurrentNativeActors.Remove(Key); AmbiguousNativeActors.Add(Key); }
+				else CurrentNativeActors.Add(Key, &Entry);
+			}
+			FString WorkspaceWorldPath;
+			for (const FString& TargetId : Workspace->GetModel()->GetTargetUnitIds())
+			{
+				const auto* TargetUnit = Workspace->GetModel()->FindUnit(TargetId);
+				if (!TargetUnit) continue;
+				const auto& Unit = *TargetUnit;
 				if (Unit.GetUnitKind() == ESemanticUnitKind::TargetState)
 				{
 					const FUeAgentCanonicalValueRef* WorldPath =
@@ -1114,15 +1199,22 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					}
 				}
 			}
+			const double BindingsFinished = FPlatformTime::Seconds();
 			for (const FChangeDraft& Change : Changes)
 			{
 				const FUeAgentCanonicalIdentity& Identity = Change.GetIdentity();
+				// This synthetic desired-membership row is handled below from the
+				// original authored action. It is not a native property identity or
+				// a source row to search merely for a possible diagnostic.
+				if (Identity.GetTargetKind() == TEXT("authoring_keyed_item_desired_state")) continue;
 				const FString AuthoringKey = Identity.GetSelector(TEXT("authoring_target_identity_key"));
 				const FSemanticUnit* SourceUnit = nullptr;
 				bool bAmbiguousSource = false;
-				auto SourceUnits = Workspace->GetModel()->FindUnitsForTargetIdentity(Identity.GetCanonicalKey());
-				if (!AuthoringKey.IsEmpty() && AuthoringKey != Identity.GetCanonicalKey())
-					SourceUnits.Append(Workspace->GetModel()->FindUnitsForTargetIdentity(AuthoringKey));
+				// The capture's explicit authoring binding is the source identity.
+				// Its canonical observation key also carries this observation's
+				// selectors/revision and is not a second source namespace to scan.
+				const auto SourceUnits = Workspace->GetModel()->FindUnitsForTargetIdentity(
+					AuthoringKey.IsEmpty() ? Identity.GetCanonicalKey() : AuthoringKey);
 				for (const FSemanticUnit* Unit : SourceUnits)
 				{
 					if (SourceUnit) { bAmbiguousSource = true; break; }
@@ -1136,11 +1228,6 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					SupplementLevelSemanticSource(Workspace, SourceUnitId, TEXT("/value"), Diagnostic);
 					OutError.SetFailure(MoveTemp(Diagnostic));
 				};
-				if (Identity.GetTargetKind()
-					== TEXT("authoring_keyed_item_desired_state"))
-				{
-					continue;
-				}
 				const TMap<FString, FString>& Selectors = Identity.GetSelectors();
 				const FString* PropertyPath = Selectors.Find(TEXT("property_path"));
 				const bool bActorState =
@@ -1288,7 +1375,12 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				PropertiesByKey.FindOrAdd(UnitKey).Add(
 					MakeShared<FJsonValueObject>(Property));
 			}
-			for (const FSemanticUnit& Unit : Workspace->GetModel()->GetUnits())
+			const double PropertiesFinished = FPlatformTime::Seconds();
+			TArray<FSemanticUnit> AuthoredUnits;
+			if (Workspace->GetEditedUnitIds().IsSet()) for (const FString& Id : *Workspace->GetEditedUnitIds())
+				if (const auto* Unit = Workspace->GetModel()->FindUnit(Id)) AuthoredUnits.Add(*Unit);
+			AuthoredUnits.Sort([](const FSemanticUnit& A, const FSemanticUnit& B) { return A.GetUnitId() < B.GetUnitId(); });
+			for (const FSemanticUnit& Unit : AuthoredUnits)
 			{
 				const TOptional<TArray<FString>>& EditedUnitIds =
 					Workspace->GetEditedUnitIds();
@@ -1367,19 +1459,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 						&& !Target->HasField(TEXT("managed_id"))
 						&& !Target->HasField(TEXT("object_path")))
 					{
-						const FString Material = WorkspaceWorldPath + TEXT("|") + ActorRow.Key;
-						const FTCHARToUTF8 Utf8(*Material);
-						TArray<uint8> Bytes;
-						Bytes.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
-						const FString BaseManagedId =
-							TEXT("semantic-") + Sha256(Bytes).Right(20);
-						FString ManagedId = BaseManagedId;
-						for (int32 Suffix = 2; ReservedManagedIds.Contains(ManagedId); ++Suffix)
-						{
-							ManagedId = BaseManagedId + TEXT("-") + FString::FromInt(Suffix);
-						}
-						ReservedManagedIds.Add(ManagedId);
-						Target->SetStringField(TEXT("managed_id"), ManagedId);
+						Target->SetStringField(TEXT("managed_id"), AllocateLevelActorManagedId(WorkspaceWorldPath, ActorRow.Key, ReservedManagedIds));
 					}
 					FString ManagedId;
 					FString ActorGuid;
@@ -1402,7 +1482,8 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 							MakeShared<FJsonValueString>(Operation), MakeShared<FJsonValueString>(TEXT("operation compatible with actor edits")), EffectiveOwner));
 					}
 					TSharedPtr<FJsonObject>& MergedUnit = UnitsByKey.FindOrAdd(UnitKey);
-					if (MergedUnit.IsValid())
+					const bool bHadExistingUnit = MergedUnit.IsValid();
+					if (bHadExistingUnit)
 					{
 						FString ExistingOperation;
 						MergedUnit->TryGetStringField(TEXT("operation"), ExistingOperation);
@@ -1454,6 +1535,56 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 							}
 							Extension->SetObjectField(TEXT("transform"), LevelTransform);
 						}
+						// The public decimal spelling can differ while both values map
+						// to the same native double. Do not prepare/mutate an unchanged
+						// native Actor merely because the aggregate document was edited.
+						// The proof is the complete actual current snapshot, not edit IDs.
+						const auto* PropertyEdits = PropertiesByKey.Find(UnitKey);
+						if (Operation == TEXT("update") && !bHadExistingUnit
+							&& (!PropertyEdits || PropertyEdits->IsEmpty()))
+						if (const auto* Actual = CurrentNativeActors.Find(UnitKey))
+						{
+							bool bSameTarget = true;
+							for (const auto& Selector : Target->Values)
+							{
+								FString Expected;
+								if (!Selector.Value || !Selector.Value->TryGetString(Expected)
+									|| !(*Actual)->GetIdentity().GetSelector(Selector.Key).Equals(Expected, ESearchCase::CaseSensitive))
+								{ bSameTarget = false; break; }
+							}
+							TSharedPtr<FJsonValue> CurrentValue;
+							UE::UAI::Contract::FDiagnostic CurrentError;
+							TSharedRef<FJsonObject> CurrentExtension = MakeShared<FJsonObject>();
+							FWorkspaceError ProofError;
+							if (bSameTarget && StateSemantic::CanonicalJson::TryToJsonValue((*Actual)->GetValue().Get(), CurrentValue, CurrentError)
+								&& CurrentValue && CurrentValue->Type == EJson::Object
+								&& TryBuildLevelProviderExtension(CurrentValue->AsObject(), true, EffectiveOwner,
+									CurrentExtension, ProofError, true))
+							{
+								const TSharedPtr<FJsonObject>* Attachment = nullptr;
+								bool bUnattached = CurrentExtension->TryGetObjectField(TEXT("attachment"), Attachment)
+									&& Attachment && Attachment->IsValid();
+								if (bUnattached) for (const auto& Field : (*Attachment)->Values)
+									bUnattached &= (Field.Key == TEXT("parent_managed_id") || Field.Key == TEXT("parent_actor_guid")
+										|| Field.Key == TEXT("parent_object_path") || Field.Key == TEXT("socket_name"))
+										&& Field.Value && Field.Value->Type == EJson::String && Field.Value->AsString().IsEmpty();
+							// Actor labels are FString text (SetActorLabel uses Strcmp),
+							// unlike native FName/tag identity. JSON CompareEqual uses
+							// FString's IgnoreCase operator and cannot prove this field.
+							FString CurrentLabel, DesiredLabel;
+							const bool bCurrentLabel = CurrentExtension->TryGetStringField(TEXT("label"), CurrentLabel);
+							const bool bDesiredLabel = Extension->TryGetStringField(TEXT("label"), DesiredLabel);
+							const bool bSameLabel = bCurrentLabel == bDesiredLabel
+								&& (!bCurrentLabel || CurrentLabel.Equals(DesiredLabel, ESearchCase::CaseSensitive));
+							if (bUnattached && bSameLabel && FJsonValue::CompareEqual(FJsonValueObject(CurrentExtension), FJsonValueObject(Extension)))
+								{
+									UnitsByKey.Remove(UnitKey);
+									ActorSourcesByKey.Remove(UnitKey);
+									++UnchangedNativeActors;
+									continue;
+								}
+							}
+						}
 						const TSharedPtr<FJsonObject>* ExistingExtension = nullptr;
 						if (MergedUnit->TryGetObjectField(TEXT("provider_extension"), ExistingExtension)
 							&& ExistingExtension && ExistingExtension->IsValid())
@@ -1480,7 +1611,8 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			}
 			// Component membership is authored in an Actor-owned collection. Existing
 			// component state/property documents keep their original native bindings.
-			for (const FSemanticUnit& Collection : Workspace->GetModel()->GetUnits())
+			const double ActorsFinished = FPlatformTime::Seconds();
+			for (const FSemanticUnit& Collection : AuthoredUnits)
 			{
 				if (Collection.GetRole() != TEXT("level_components")
 					|| !Workspace->GetEditedUnitIds().IsSet()
@@ -1663,6 +1795,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				Units->SetObjectField(UnitPath, Pair.Value.ToSharedRef());
 				if (const auto* Source = ActorSourcesByKey.Find(Pair.Key)) SourcesByUnitPath.Add(UnitPath, *Source);
 			}
+			const double ComponentsFinished = FPlatformTime::Seconds();
 			OutBundle->SetObjectField(TEXT("units"), Units);
 			if (OutSourceResolver)
 			{
@@ -1703,20 +1836,638 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					return Location;
 				};
 			}
+			UE_LOG(LogTemp, Display, TEXT("UAI import projection unchanged_native_actors=%d"), UnchangedNativeActors);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=level_bundle changes=%d bindings_s=%.6f properties_s=%.6f actors_s=%.6f components_and_units_s=%.6f source_binding_s=%.6f total_s=%.6f"),
+				Changes.Num(), BindingsFinished - BundleStarted, PropertiesFinished - BindingsFinished,
+				ActorsFinished - PropertiesFinished, ComponentsFinished - ActorsFinished,
+				FPlatformTime::Seconds() - ComponentsFinished, FPlatformTime::Seconds() - BundleStarted);
 			return true;
 		}
+
+	bool TryBuildLevelSemanticWorkspaceBundle(
+		const FResolvedSemanticWorkspaceRef& Workspace, const TArray<FChangeDraft>& Changes,
+		TSharedRef<FJsonObject>& OutBundle, FWorkspaceError& OutError,
+		TFunction<Contract::FSourceLocation(const FString&, const FString&)>* OutSourceResolver)
+	{
+		return TryBuildLevelSemanticWorkspaceBundleWithSnapshot(Workspace, Changes, OutBundle, OutError, OutSourceResolver, nullptr);
+	}
+
+	static TMap<FGuid, AActor*> ObserveLevelActorMembership(UWorld& World)
+	{
+		TMap<FGuid, AActor*> Result;
+		for (TActorIterator<AActor> It(&World, AActor::StaticClass(), EActorIteratorFlags::SkipPendingKill); It; ++It)
+			if (UeAgentLevelAuthoring::EvaluateActorAuthorability(World, **It).bAuthorable)
+				Result.Add(It->GetActorGuid(), *It);
+		return Result;
+	}
+
+	static TOptional<bool> TryCaptureScopedLevelPreflight(UWorld& World, const FString& WorkspaceRoot,
+		const FString& ProfileId, UeAgentLevelAuthoring::FLevelAuthoringCapture& Capture,
+		Composition::HjsonImport::FScopedCurrentCoverage& Coverage, FWorkspaceError& Error,
+		const FResolvedSemanticWorkspaceRef& Source, TArray<UeAgentLevelAuthoring::FLevelActorCaptureScope>& Scope)
+	{
+		using namespace UeAgentLevelAuthoring;
+		using namespace UeAgentAuthoringState;
+		const auto Missing = [&](const TCHAR* Reason) -> TOptional<bool> {
+			Error.SetSourceFailure(TEXT("level_semantic_capture_incomplete"),
+				FString::Printf(TEXT("The addressed Level fact is unavailable (%s). No unrelated World state was captured."), Reason), WorkspaceRoot);
+			return false;
+		};
+		if (!Source->GetEditedUnitIds().IsSet()) return Missing(TEXT("source_edit_scope_missing"));
+		if (Source->GetModel()->GetProfileId() != ProfileId) {
+			Error.SetSourceFailure(TEXT("workspace_incremental_profile_mismatch"),
+				TEXT("Level preparation requires the authored workspace profile."), WorkspaceRoot);
+			return false;
+		}
+		if (!Source->GetStructuralEdits().IsEmpty()) {
+			// This representation is not a Level native command. The original
+			// lowering rejects it as well; a complete World cannot implement it.
+			Error.SetSourceFailure(TEXT("level_semantic_change_kind_unsupported"),
+				TEXT("Level creation/removal uses the actors/components keyed operation records; generic structural_edits is not a Level native change."), WorkspaceRoot);
+			return false;
+		}
+		// World streaming topology is a genuine complete-domain action. It is
+		// the only full observation selection, never a missing-cache fallback.
+		for (const auto& Id : *Source->GetEditedUnitIds())
+			if (const auto Unit = Source->GetModel()->FindDeclaration(Id);
+				Unit && Unit->GetSemanticTypeRef() == WorldStateSemanticId) {
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=level_scoped_preflight selected=false reason=explicit_world_topology_action"));
+				return {};
+			}
+		const double Started = FPlatformTime::Seconds();
+		TSet<FString> WorldPropertyNames;
+		TMap<AActor*, FLevelActorCaptureScope> ActorScopes;
+		TArray<FLevelActorCaptureScope> PlannedActors;
+		const auto IncludeActor = [&](AActor* Actor) -> FLevelActorCaptureScope& {
+			auto& Scope = ActorScopes.FindOrAdd(Actor);
+			Scope.ActorGuid = Actor->GetActorGuid();
+			Scope.ManagedId = GetManagedActorId(*Actor);
+			// The keyed Actor declaration consumes label/attachment metadata.
+			// This is one state request, not the Actor's reflected properties.
+			Scope.bActorState = true;
+			return Scope;
+		};
+		const auto IncludeCompleteActor = [&](AActor* Actor) {
+			auto& Scope = IncludeActor(Actor);
+			Scope.bActorState = Scope.bActorProperties = Scope.bAllComponents = true;
+		};
+		const auto IncludeComponent = [&](UActorComponent* Component) {
+			auto& Scope = IncludeActor(Component->GetOwner());
+			Scope.ComponentNames.Add(Component->GetName());
+			// A custom/Blueprint component can rebuild its owning Actor. Keep
+			// that actual owner closure; its module is not a World-wide scope.
+			if (Component->GetClass()->GetOutermost()->GetName() != TEXT("/Script/Engine")
+				|| Component->GetClass()->HasAnyClassFlags(CLASS_CompiledFromBlueprint))
+				Scope.bActorProperties = Scope.bAllComponents = true;
+		};
+		const auto IncludeAttachmentClosure = [&](USceneComponent* Component) {
+			if (!Component) return;
+			for (USceneComponent* Parent = Component; Parent; Parent = Parent->GetAttachParent()) {
+				IncludeComponent(Parent);
+				if (Parent == Parent->GetOwner()->GetRootComponent()) IncludeActor(Parent->GetOwner()).bActorState = true;
+			}
+			TArray<USceneComponent*> Children;
+			Component->GetChildrenComponents(true, Children);
+			for (USceneComponent* Child : Children) {
+				IncludeComponent(Child);
+				if (Child == Child->GetOwner()->GetRootComponent()) IncludeActor(Child->GetOwner()).bActorState = true;
+			}
+		};
+		TMap<FString, AActor*> ActorsByPath;
+		TMap<FString, AActor*> ActorsByManagedId;
+		const auto ActorMembership = ObserveLevelActorMembership(World);
+		for (const auto& Pair : ActorMembership) {
+			ActorsByPath.Add(Pair.Value->GetPathName(), Pair.Value);
+			const FString ManagedId = GetManagedActorId(*Pair.Value);
+			if (!ManagedId.IsEmpty()) ActorsByManagedId.Add(ManagedId, Pair.Value);
+		}
+		TSet<FString> RemovedObjectPaths;
+		TArray<const UObject*> RemovedObjects;
+		int32 ActorOperationRows = 0;
+		const auto IncludeReferencedActors = [&](const FSemanticUnit& Unit) {
+			TArray<StateSemantic::FUeAgentCanonicalValueRef> Values;
+			for (const auto& Pair : Unit.GetValues()) Values.Add(Pair.Value);
+			while (!Values.IsEmpty()) {
+				const auto Value = Values.Pop(EAllowShrinking::No);
+				if (Value->GetKind() == StateSemantic::EUeAgentValueKind::String) {
+					if (AActor* const* Referenced = ActorsByPath.Find(Value->GetText())) IncludeActor(*Referenced);
+					if (AActor* const* Referenced = ActorsByManagedId.Find(Value->GetText())) IncludeActor(*Referenced);
+					if (Value->GetText().StartsWith(GetWorldPath(World) + TEXT(":"), ESearchCase::CaseSensitive))
+						if (UActorComponent* Referenced = FindObject<UActorComponent>(nullptr, *Value->GetText());
+							Referenced && Referenced->GetWorld() == &World && EvaluateComponentAuthorability(World, *Referenced).bAuthorable)
+							IncludeComponent(Referenced);
+				} else if (Value->GetKind() == StateSemantic::EUeAgentValueKind::Array) {
+					Values.Append(Value->GetArrayItems());
+				} else if (Value->GetKind() == StateSemantic::EUeAgentValueKind::Object) {
+					for (const auto& Pair : Value->GetObjectItems()) Values.Add(Pair.Value);
+				}
+			}
+		};
+		Contract::FDiagnostic Diagnostic;
+		for (const auto& Id : *Source->GetEditedUnitIds()) {
+			const auto* Unit = Source->GetModel()->FindUnit(Id);
+			if (Unit && Unit->GetRole() == TEXT("actor_component_hierarchy")) {
+				const auto* Rows = Unit->GetValues().Find(TEXT("actors"));
+				if (!Rows || (*Rows)->GetKind() != StateSemantic::EUeAgentValueKind::Object) return Missing(TEXT("actor_collection_shape_changed"));
+				TSet<FString> ReservedManagedIds;
+				const auto StringField = [](const StateSemantic::FUeAgentCanonicalValue& Row, const TCHAR* Key) {
+					const auto* Value = Row.GetObjectItems().FindByPredicate([&](const auto& Item) { return Item.Key == Key; });
+					return Value && Value->Value->GetKind() == StateSemantic::EUeAgentValueKind::String ? Value->Value->GetText() : FString();
+				};
+				for (const auto& Row : (*Rows)->GetObjectItems())
+					if (Row.Value->GetKind() == StateSemantic::EUeAgentValueKind::Object) {
+						const FString ManagedId = StringField(Row.Value.Get(), TEXT("managed_id"));
+						if (!ManagedId.IsEmpty()) ReservedManagedIds.Add(ManagedId);
+					}
+				auto& KeyScope = Coverage.KeyedValueScopes.FindOrAdd(Id);
+				KeyScope.RootField = TEXT("actors");
+				for (const auto& Row : (*Rows)->GetObjectItems()) {
+					if (Row.Value->GetKind() != StateSemantic::EUeAgentValueKind::Object) return Missing(TEXT("actor_operation_shape_changed"));
+					// The Source keyed owner has already emitted mutation records,
+					// omitting unchanged updates. Do not compare that result again.
+					++ActorOperationRows;
+					const FString Operation = StringField(Row.Value.Get(), TEXT("operation"));
+					KeyScope.ObservedKeys.Add(Row.Key);
+					if (Operation == TEXT("create")) {
+						FLevelActorCaptureScope New;
+						New.ManagedId = StringField(Row.Value.Get(), TEXT("managed_id"));
+						const FString GuidText = StringField(Row.Value.Get(), TEXT("actor_guid"));
+						FGuid RequestedGuid;
+						if (!GuidText.IsEmpty()) {
+							if (!FGuid::Parse(GuidText, RequestedGuid)) return Missing(TEXT("actor_creation_guid_invalid"));
+							if (AActor* const* Existing = ActorMembership.Find(RequestedGuid)) IncludeCompleteActor(*Existing);
+						}
+						// Creation owns the actual native GUID. The same managed ID
+						// assigned by the factory binds its before/after logical slot.
+						const FString ObjectPath = StringField(Row.Value.Get(), TEXT("object_path"));
+						if (!ObjectPath.IsEmpty())
+							if (AActor* Existing = FindObject<AActor>(nullptr, *ObjectPath); Existing && Existing->GetWorld() == &World)
+								IncludeCompleteActor(Existing);
+						if (New.ManagedId.IsEmpty()) New.ManagedId = AllocateLevelActorManagedId(GetWorldPath(World), Row.Key, ReservedManagedIds);
+						New.bActorState = New.bActorProperties = New.bAllComponents = New.bAllowMissing = true;
+						PlannedActors.Add(MoveTemp(New));
+						continue;
+					}
+					if (Operation != TEXT("update") && Operation != TEXT("remove")) return Missing(TEXT("actor_operation_not_supported"));
+					const auto Target = MakeShared<FJsonObject>();
+					Target->SetStringField(TEXT("world_path"), GetWorldPath(World));
+					for (const TCHAR* Field : {TEXT("actor_guid"), TEXT("managed_id"), TEXT("object_path")}) {
+						const FString Value = StringField(Row.Value.Get(), Field);
+						if (!Value.IsEmpty()) Target->SetStringField(Field, Value);
+					}
+					AActor* Actor = FindActorExact(World, Target, Diagnostic);
+					if (!Actor) { Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+					IncludeCompleteActor(Actor);
+					if (Operation == TEXT("remove")) {
+						IncludeActor(Actor).bAllowMissing = true;
+						RemovedObjectPaths.Add(Actor->GetPathName());
+						RemovedObjects.AddUnique(Actor);
+						TArray<UActorComponent*> Components; Actor->GetComponents(Components);
+						for (const auto* Component : Components) if (Component) {
+							RemovedObjectPaths.Add(Component->GetPathName()); RemovedObjects.AddUnique(Component);
+							}
+					}
+				}
+				IncludeReferencedActors(*Unit);
+				continue;
+			}
+			if (Unit && Unit->GetRole() == TEXT("level_components")) {
+				// The current complete owner membership is the conflict/structural
+				// prerequisite for component create/remove/reparent. It does not
+				// require reflected values from other Actors in the World.
+				const auto* Owner = Source->GetModel()->FindUnit(Unit->GetOwnerRef());
+				if (!Owner) return Missing(TEXT("component_collection_owner_missing"));
+				const auto Target = MakeShared<FJsonObject>();
+				Target->SetStringField(TEXT("world_path"), GetWorldPath(World));
+				for (const TCHAR* Field : {TEXT("actor_guid"), TEXT("managed_id")}) {
+					const auto* Value = Owner->GetValues().Find(Field);
+					if (Value && (*Value)->GetKind() == StateSemantic::EUeAgentValueKind::String)
+						Target->SetStringField(Field, (*Value)->GetText());
+				}
+				AActor* Actor = FindActorExact(World, Target, Diagnostic);
+				if (!Actor) { Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+				IncludeCompleteActor(Actor);
+				auto& KeyScope = Coverage.KeyedValueScopes.FindOrAdd(Id);
+				KeyScope.RootField = TEXT("components");
+				if (const auto* Rows = Unit->GetValues().Find(TEXT("components")); Rows && (*Rows)->GetKind() == StateSemantic::EUeAgentValueKind::Object)
+					for (const auto& Row : (*Rows)->GetObjectItems()) {
+						KeyScope.ObservedKeys.Add(Row.Key);
+						if (Row.Value->GetKind() != StateSemantic::EUeAgentValueKind::Object) continue;
+						const auto StringField = [&](const TCHAR* Key) {
+							const auto* Value = Row.Value->GetObjectItems().FindByPredicate([&](const auto& Item) { return Item.Key == Key; });
+							return Value && Value->Value->GetKind() == StateSemantic::EUeAgentValueKind::String ? Value->Value->GetText() : FString();
+						};
+						if (StringField(TEXT("operation")) != TEXT("remove")) continue;
+						const FString Name = StringField(TEXT("component_name"));
+						if (UActorComponent* Component = FindComponentExact(*Actor, Name.IsEmpty() ? Row.Key : Name, Diagnostic)) {
+							RemovedObjectPaths.Add(Component->GetPathName()); RemovedObjects.AddUnique(Component);
+							}
+					}
+				// The original native owner captures this Actor's complete component
+				// membership/attachment closure. Only the new K operations add source
+				// references; decoding all old component records adds no before fact.
+				IncludeReferencedActors(*Unit);
+				continue;
+			}
+			const auto* Baseline = Source->FindBaselineUnit(Id);
+			if (!Unit || Unit->GetUnitKind() != ESemanticUnitKind::PropertySet)
+				return Missing(TEXT("edited_unit_not_a_native_value"));
+			if (Unit->GetSemanticTypeRef() == WorldPropertySemanticId) {
+				UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
+				if (!UeAgentAuthoringIdentity::ParseCanonicalKey(Unit->GetTargetIdentityKey(), Identity, Diagnostic))
+				{ Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+				if (Identity.GetSelector(TEXT("world_path")) != GetWorldPath(World)) return Missing(TEXT("world_binding_changed"));
+				FString Name = Identity.GetSelector(TEXT("property_path"));
+				int32 End = Name.Len(), Index;
+				if (Name.FindChar(TEXT('.'), Index)) End = FMath::Min(End, Index);
+				if (Name.FindChar(TEXT('['), Index)) End = FMath::Min(End, Index);
+				if (End == 0) return Missing(TEXT("world_property_path_missing"));
+				WorldPropertyNames.Add(Name.Left(End));
+				continue;
+			}
+			const bool bMetadata = Unit->GetSemanticTypeRef() == ComponentStateSemanticId || Unit->GetSemanticTypeRef() == ActorStateSemanticId;
+			if (!bMetadata && Unit->GetSemanticTypeRef() != ComponentPropertySemanticId && Unit->GetSemanticTypeRef() != ActorPropertySemanticId)
+				return Missing(TEXT("edited_semantic_not_a_level_native_value"));
+			if (bMetadata) {
+				// Type/presence/binding validation belongs to rebase and the native
+				// provider. Shape differences do not require unrelated Actor values.
+				if (Unit->GetSemanticTypeRef() == ActorStateSemanticId) {
+					for (const FSemanticUnit* Side : {Baseline, Unit}) {
+						if (!Side) continue;
+						const auto* Attachment = Side->GetValues().Find(TEXT("attachment"));
+						if (!Attachment || (*Attachment)->GetKind() != EUeAgentValueKind::Object) continue;
+						const auto* Parent = (*Attachment)->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("parent_managed_id"); });
+						if (!Parent || Parent->Value->GetKind() != EUeAgentValueKind::String) continue;
+						if (Parent->Value->GetText().IsEmpty()) continue;
+						const auto ParentTarget = MakeShared<FJsonObject>();
+						ParentTarget->SetStringField(TEXT("world_path"), GetWorldPath(World));
+						ParentTarget->SetStringField(TEXT("managed_id"), Parent->Value->GetText());
+						AActor* ParentActor = FindActorExact(World, ParentTarget, Diagnostic);
+						if (ParentActor) IncludeAttachmentClosure(ParentActor->GetRootComponent());
+						// A missing old parent or a parent created by this same keyed
+						// request is not a reason to observe every Actor. Native apply
+						// still resolves the requested new parent and reports absence.
+					}
+				}
+			}
+			const bool bComponent = Unit->GetSemanticTypeRef() == ComponentPropertySemanticId || Unit->GetSemanticTypeRef() == ComponentStateSemanticId;
+			UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
+			if (!UeAgentAuthoringIdentity::ParseCanonicalKey(Unit->GetTargetIdentityKey(), Identity, Diagnostic))
+			{ Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+			if (Identity.GetSelector(TEXT("world_path")) != GetWorldPath(World)) return Missing(TEXT("world_binding_changed"));
+			const auto Target = MakeShared<FJsonObject>();
+			Target->SetStringField(TEXT("world_path"), Identity.GetSelector(TEXT("world_path")));
+			Target->SetStringField(TEXT("actor_guid"), Identity.GetSelector(bComponent ? TEXT("owner_actor_guid") : TEXT("actor_guid")));
+			Target->SetStringField(TEXT("managed_id"), Identity.GetSelector(bComponent ? TEXT("owner_managed_id") : TEXT("managed_id")));
+			AActor* Actor = FindActorExact(World, Target, Diagnostic);
+			if (!Actor) { Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+			if (bComponent) {
+				UActorComponent* Component = FindComponentExact(*Actor, Identity.GetSelector(TEXT("component_name")), Diagnostic);
+				if (!Component) { Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+				IncludeComponent(Component);
+				if (bMetadata) IncludeAttachmentClosure(Cast<USceneComponent>(Component));
+				// Actual property notifications on registered BP components rerun
+				// construction (ActorComponent::ConsolidatedPostEditChange). Metadata
+				// attachment setters do not use that property notification path.
+				if (!bMetadata && Component->IsRegistered() && Actor->GetClass()->HasAnyClassFlags(CLASS_CompiledFromBlueprint))
+					IncludeCompleteActor(Actor);
+			} else {
+				IncludeCompleteActor(Actor);
+			}
+			// Public object references are exact paths. Include both previous and
+			// requested in-world Actors in the same declared attribution union.
+			if (Baseline) IncludeReferencedActors(*Baseline);
+			IncludeReferencedActors(*Unit);
+		}
+		// Deletion can clear direct native references on another owner. Select
+		// the actual property candidates from declarations before reading their
+		// captured values. Target/ordering/graph/collection values have no reader
+		// here; visiting a complete typed Model would decode them only to reject
+		// them. Missing local capture is never evidence of deletion.
+		int32 ReferencePropertyCandidates = 0, ReferenceLeafSkips = 0, ReferenceContainerSkips = 0, ReferenceTargetSkips = 0, ReferenceValueReads = 0;
+		if (!RemovedObjectPaths.IsEmpty() && !TryReadCapturedReferenceScope([&]() {
+			return Source->GetModel()->VisitDeclarations([&](const FSemanticUnit::FDeclarationView& SourceUnit, int32) {
+			const bool bComponent = SourceUnit.GetSemanticTypeRef() == ComponentPropertySemanticId;
+			const bool bWorld = SourceUnit.GetSemanticTypeRef() == WorldPropertySemanticId;
+			if (!bComponent && !bWorld && SourceUnit.GetSemanticTypeRef() != ActorPropertySemanticId) return true;
+			++ReferencePropertyCandidates;
+			bool bClosedContainer = false, bIncompatibleReference = false;
+			if (!MayContainNativeObjectReference(*Source, SourceUnit, &bClosedContainer, RemovedObjects, &bIncompatibleReference)) {
+				if (bIncompatibleReference) ++ReferenceTargetSkips;
+				else if (bClosedContainer) ++ReferenceContainerSkips; else ++ReferenceLeafSkips; return true;
+			}
+			++ReferenceValueReads;
+			// No captured value: observe this candidate property's actual owner,
+			// not a complete World and not a guessed absent reference.
+			TOptional<bool> ReferencesRemoved;
+			if (!Source->TryBaselineContainsAnyString(SourceUnit.GetUnitId(), [&](const FString& Value) {
+				return RemovedObjectPaths.Contains(Value);
+			}, ReferencesRemoved, Error)) return false;
+			const bool bReferencesRemoved = !ReferencesRemoved.IsSet() || ReferencesRemoved.GetValue();
+			if (!bReferencesRemoved) return true;
+			UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
+			if (!UeAgentAuthoringIdentity::ParseCanonicalKey(SourceUnit.GetTargetIdentityKey(), Identity, Diagnostic))
+			{ Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+			if (bWorld) {
+				WorldPropertyNames.Add(Identity.GetSelector(TEXT("property_path")));
+				return true;
+			}
+			const auto Target = MakeShared<FJsonObject>();
+			Target->SetStringField(TEXT("world_path"), GetWorldPath(World));
+			Target->SetStringField(TEXT("actor_guid"), Identity.GetSelector(bComponent ? TEXT("owner_actor_guid") : TEXT("actor_guid")));
+			Target->SetStringField(TEXT("managed_id"), Identity.GetSelector(bComponent ? TEXT("owner_managed_id") : TEXT("managed_id")));
+			AActor* Actor = FindActorExact(World, Target, Diagnostic);
+			// An already absent source owner cannot acquire a new ref->null
+			// effect. It is not deleted by this operation and is not re-created.
+			if (!Actor) return true;
+			if (bComponent) {
+				UActorComponent* Component = FindComponentExact(*Actor, Identity.GetSelector(TEXT("component_name")), Diagnostic);
+				if (Component) IncludeComponent(Component);
+			} else IncludeCompleteActor(Actor);
+			return true;
+			});
+		}, Error)) return false;
+		if (!RemovedObjectPaths.IsEmpty()) UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=level_reference_candidates properties=%d excluded_codec_leaves=%d excluded_closed_containers=%d excluded_target_classes=%d value_candidates=%d scope=declared_target"),
+			ReferencePropertyCandidates, ReferenceLeafSkips, ReferenceContainerSkips, ReferenceTargetSkips, ReferenceValueReads);
+		// This is the declared attribution boundary, not a claim about arbitrary
+		// global notification receivers. Normal notifications still execute;
+		// undeclared effects outside it remain for ordinary incremental export.
+		TArray<AActor*> CompleteActors;
+		for (const auto& Pair : ActorScopes) if (Pair.Value.bAllComponents) CompleteActors.Add(Pair.Key);
+		for (AActor* Actor : CompleteActors) {
+			for (AActor* Parent = Actor->GetAttachParentActor(); Parent; Parent = Parent->GetAttachParentActor()) IncludeCompleteActor(Parent);
+			TArray<AActor*> Attached;
+			Actor->GetAttachedActors(Attached, true, true);
+			for (AActor* Child : Attached) IncludeCompleteActor(Child);
+		}
+		for (const auto& Pair : ActorScopes) {
+			Scope.Add(Pair.Value);
+		}
+		Scope.Append(PlannedActors);
+		if (!TryCaptureLevelScopedNativeState(World, Scope, Capture, Diagnostic, ProfileId, WorldPropertyNames))
+		{ Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+		Capture.WorldPropertyNames = MoveTemp(WorldPropertyNames);
+		const double NativeReady = FPlatformTime::Seconds();
+		auto Resources = MakeSemanticWorkspaceResourceTracker();
+		const FKeyedMemberNameLookup KeyedNames = [Source, &Resources](const FString& Id, const FString& RootField,
+			FKeyedMemberNameVisitor Visitor, FWorkspaceError& Failure) {
+			return Source->VisitBaselineMemberNames(Id, RootField, Visitor, Resources, Failure);
+		};
+		if (!TryBuildScopedCanonicalAuthoringCapture(TEXT("ue.level.asset"), ProfileId, Capture.Snapshot,
+			Resources, Capture.CanonicalSnapshot, Capture.Model, Error, &Source->GetModel().Get(), {}, KeyedNames)) return false;
+		// Key allocation consumed captured stable identities at the original
+		// composition owner above. A subset no longer invents another ordinal
+		// namespace or needs complete native values to compare that namespace.
+		// Native binding and addressed member conflicts remain in FindActorExact
+		// and the ordinary scoped rebase, respectively.
+		for (const auto& Unit : Capture.Model->GetUnits()) {
+			Coverage.BindingUnits.Add(Unit.GetUnitId());
+			if (Unit.GetRole() == TEXT("property_definition") || Source->GetEditedUnitIds()->Contains(Unit.GetUnitId()))
+				Coverage.ValueUnits.Add(Unit.GetUnitId());
+		}
+		// The addressed field must really be observable. The native field/type
+		// owner reports an unavailable value; extra Actors cannot supply it.
+		for (const auto& Id : *Source->GetEditedUnitIds()) if (!Coverage.ValueUnits.Contains(Id)) return Missing(TEXT("current_property_not_exportable"));
+		Capture.bScopedPreflight = true;
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=level_scoped_preflight scope=component_closure actors=%d components=%d requests=%d edited_units=%d scope_units=%d actor_operation_rows=%d current_model_compile=false selection_and_native_s=%.6f canonical_and_baseline_s=%.6f total_s=%.6f"),
+			Capture.ActorCount, Capture.ComponentCount, Capture.Snapshot.Num(), Source->GetEditedUnitIds()->Num(), Capture.Model->GetUnits().Num(),
+			ActorOperationRows,
+			NativeReady - Started, FPlatformTime::Seconds() - NativeReady, FPlatformTime::Seconds() - Started);
+		return true;
+	}
+
+static bool IsLevelScalarPropertyValue(const UeAgentAuthoringState::FStateEntry& Entry)
+{
+	const auto Carrier = Entry.Value.IsValid() && Entry.Value->Type == EJson::Object ? Entry.Value->AsObject() : nullptr;
+	const auto Literal = Carrier ? Carrier->TryGetField(TEXT("literal")) : nullptr;
+	return Carrier && Carrier->Values.Num() == 1 && Literal && (Literal->Type == EJson::Number || Literal->Type == EJson::Boolean);
+}
+
+/** Level owns the owner relation; composition still owns all unit/definition conversion. */
+	static bool SelectLevelPropertyClosure(const UeAgentAuthoringState::FStateSnapshot& Snapshot,
+		const TArray<int32>& PropertyIndices, UeAgentAuthoringState::FStateSnapshot& Out)
+	{
+		using namespace UeAgentLevelAuthoring;
+		TArray<int32> Indices = PropertyIndices;
+		Contract::FDiagnostic Diagnostic;
+		const auto AddTarget = [&](const TCHAR* Model, const TCHAR* Kind, const TCHAR* Semantic, const TMap<FString, FString>& Selectors) {
+			UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
+			if (!UeAgentAuthoringIdentity::BuildCanonicalIdentity(Model, Kind, Selectors, Identity, Diagnostic)) return false;
+			const int32 Index = Snapshot.FindEntryIndex(Semantic, Identity.CanonicalKey);
+			if (Index == INDEX_NONE) return false;
+			Indices.AddUnique(Index); return true;
+		};
+		for (const int32 Index : PropertyIndices) {
+			const auto& Entry = Snapshot.ReadAuthoringEntry(Index);
+			const auto& S = Entry.TargetIdentity.Selectors;
+			auto ComponentSelectors = S;
+			ComponentSelectors.Remove(TEXT("property_path"));
+			if (!AddTarget(WorldIdentityModelId, TEXT("level_world"), WorldTargetSemanticId,
+				{{TEXT("world_path"), S.FindRef(TEXT("world_path"))}})
+				|| !AddTarget(ActorIdentityModelId, TEXT("level_actor"), ActorTargetSemanticId,
+				{{TEXT("world_path"), S.FindRef(TEXT("world_path"))}, {TEXT("actor_guid"), S.FindRef(TEXT("owner_actor_guid"))},
+				 {TEXT("managed_id"), S.FindRef(TEXT("owner_managed_id"))}})
+				|| !AddTarget(ComponentIdentityModelId, TEXT("level_component"), ComponentTargetSemanticId, ComponentSelectors)) return false;
+		}
+		return Snapshot.TrySelectEntries(Indices, Out);
+	}
+
+	static bool TryRetainPartitionReadScope(UWorld& World, const FResolvedSemanticWorkspace& Source,
+		TSharedRef<TArray<UeAgentLevelAuthoring::FLevelActorCaptureScope>> LogicalScope,
+		TFunction<void(UWorld*, TArray<UPackage*>*)>& OutScope, FWorkspaceError& Error)
+	{
+		OutScope = {};
+		UWorldPartition* Partition = World.GetWorldPartition();
+		if (!Partition || !Source.GetEditedUnitIds().IsSet()) return true;
+		auto Guids = MakeShared<TSet<FGuid>>();
+		TSet<FString> Mentioned, RemovedPaths;
+		TSet<FGuid> RemovedGuids;
+		const auto AddIdentity = [&](const FSemanticUnit::FDeclarationView& Declaration) {
+			UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
+			Contract::FDiagnostic Failure;
+			if (!UeAgentAuthoringIdentity::ParseCanonicalKey(Declaration.GetTargetIdentityKey(), Identity, Failure)) return;
+			FGuid Guid;
+			for (const TCHAR* Field : {TEXT("actor_guid"), TEXT("owner_actor_guid")})
+				if (FGuid::Parse(Identity.GetSelector(Field), Guid)) Guids->Add(Guid);
+		};
+		TFunction<void(const StateSemantic::FUeAgentCanonicalValue&)> Observe;
+		Observe = [&](const StateSemantic::FUeAgentCanonicalValue& Value) {
+			if (Value.GetKind() == EUeAgentValueKind::String) {
+				Mentioned.Add(Value.GetText());
+				FGuid Guid; if (FGuid::Parse(Value.GetText(), Guid) && Partition->GetActorDescInstance(Guid)) Guids->Add(Guid);
+			} else if (Value.GetKind() == EUeAgentValueKind::Object) {
+				for (const auto& Field : Value.GetObjectItems()) Observe(Field.Value.Get());
+			} else if (Value.GetKind() == EUeAgentValueKind::Array) {
+				for (const auto& Item : Value.GetArrayItems()) Observe(Item.Get());
+			}
+		};
+		for (const auto& Id : *Source.GetEditedUnitIds()) {
+			const auto* Unit = Source.GetModel()->FindUnit(Id);
+			if (!Unit) continue; // The original Source/native owner diagnoses a missing requested row.
+			AddIdentity(Unit->GetDeclaration());
+			if (const auto Owner = Source.GetModel()->FindDeclaration(Unit->GetOwnerRef())) AddIdentity(*Owner);
+			for (const auto& Field : Unit->GetValues()) Observe(Field.Value.Get());
+			if (Unit->GetUnitKind() == ESemanticUnitKind::PropertySet) {
+				if (const auto* Before = Source.FindBaselineUnit(Id))
+					for (const auto& Field : Before->GetValues()) Observe(Field.Value.Get());
+			}
+			if (Unit->GetRole() == TEXT("actor_component_hierarchy"))
+				if (const auto* Actors = Unit->GetValues().Find(TEXT("actors")))
+					for (const auto& Row : (*Actors)->GetObjectItems()) {
+						if (Row.Value->GetKind() != EUeAgentValueKind::Object) continue;
+						const auto* Operation = Row.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("operation"); });
+						if (!Operation || Operation->Value->GetText() != TEXT("remove")) continue;
+						for (const auto& Field : Row.Value->GetObjectItems()) if (Field.Key == TEXT("actor_guid")) {
+							FGuid Guid;
+							if (FGuid::Parse(Field.Value->GetText(), Guid)) {
+								RemovedGuids.Add(Guid);
+								if (const auto* Desc = Partition->GetActorDescInstance(Guid)) RemovedPaths.Add(Desc->GetActorSoftPath().ToString());
+							}
+						}
+					}
+			if (Unit->GetRole() == TEXT("level_components")) {
+				const auto Owner = Source.GetModel()->FindDeclaration(Unit->GetOwnerRef());
+				UeAgentAuthoringIdentity::FCanonicalIdentity Identity; Contract::FDiagnostic Failure; FGuid Guid;
+				if (Owner && UeAgentAuthoringIdentity::ParseCanonicalKey(Owner->GetTargetIdentityKey(), Identity, Failure)
+					&& FGuid::Parse(Identity.GetSelector(TEXT("actor_guid")), Guid))
+					if (const auto* Desc = Partition->GetActorDescInstance(Guid))
+						if (const auto* Components = Unit->GetValues().Find(TEXT("components")))
+							for (const auto& Row : (*Components)->GetObjectItems()) {
+								if (Row.Value->GetKind() != EUeAgentValueKind::Object) continue;
+								const auto* Operation = Row.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("operation"); });
+								if (!Operation || Operation->Value->GetText() != TEXT("remove")) continue;
+								const auto* Name = Row.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("component_name"); });
+								RemovedPaths.Add(Desc->GetActorSoftPath().ToString() + TEXT(".") + (Name ? Name->Value->GetText() : Row.Key));
+								RemovedGuids.Add(Guid);
+							}
+			}
+		}
+		// Managed ids are authoring identities; descriptors own current native
+		// GUID/path membership. Consult declaration selectors and descriptor
+		// metadata, without loading or reading every Actor's properties.
+		Source.GetModel()->VisitDeclarations([&](const FSemanticUnit::FDeclarationView& Declaration, int32) {
+			UeAgentAuthoringIdentity::FCanonicalIdentity Identity; Contract::FDiagnostic Failure;
+			if (UeAgentAuthoringIdentity::ParseCanonicalKey(Declaration.GetTargetIdentityKey(), Identity, Failure))
+				for (const TCHAR* Field : {TEXT("managed_id"), TEXT("owner_managed_id")})
+					if (!Identity.GetSelector(Field).IsEmpty() && Mentioned.Contains(Identity.GetSelector(Field))) { AddIdentity(Declaration); break; }
+			return true;
+		});
+		FWorldPartitionHelpers::ForEachActorDescInstance<AActor>(Partition, [&](const FWorldPartitionActorDescInstance* Desc) {
+			const FString Path = Desc->GetActorSoftPath().ToString();
+			for (const auto& Text : Mentioned) if (Text == Path || Text.StartsWith(Path + TEXT("."), ESearchCase::CaseSensitive)) { Guids->Add(Desc->GetGuid()); break; }
+			for (const FGuid& Reference : Desc->GetReferences()) if (RemovedGuids.Contains(Reference)) { Guids->Add(Desc->GetGuid()); break; }
+			return true;
+		});
+		if (!RemovedPaths.IsEmpty()) {
+			int32 ReferencePropertyCandidates = 0, ReferenceLeafSkips = 0, ReferenceContainerSkips = 0, ReferenceValueReads = 0;
+			if (!TryReadCapturedReferenceScope([&]() {
+				return Source.GetModel()->VisitDeclarations([&](const FSemanticUnit::FDeclarationView& Declaration, int32) {
+				if (Declaration.GetSemanticTypeRef() != UeAgentLevelAuthoring::ActorPropertySemanticId
+					&& Declaration.GetSemanticTypeRef() != UeAgentLevelAuthoring::ComponentPropertySemanticId) return true;
+				++ReferencePropertyCandidates;
+				bool bClosedContainer = false;
+				if (!MayContainNativeObjectReference(Source, Declaration, &bClosedContainer)) {
+					if (bClosedContainer) ++ReferenceContainerSkips; else ++ReferenceLeafSkips; return true;
+				}
+				++ReferenceValueReads;
+				TOptional<bool> ReferencesRemoved;
+				if (!Source.TryBaselineContainsAnyString(Declaration.GetUnitId(), [&](const FString& Value) {
+					for (const auto& Path : RemovedPaths) if (Value == Path || Value.StartsWith(Path + TEXT("."), ESearchCase::CaseSensitive)) return true;
+					return false;
+				}, ReferencesRemoved, Error)) return false;
+				if (ReferencesRemoved.IsSet() && ReferencesRemoved.GetValue()) AddIdentity(Declaration);
+				return true;
+				});
+			}, Error)) return false;
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=partition_reference_candidates properties=%d excluded_codec_leaves=%d excluded_closed_containers=%d value_candidates=%d scope=declared_target"),
+				ReferencePropertyCandidates, ReferenceLeafSkips, ReferenceContainerSkips, ReferenceValueReads);
+		}
+		if (!Source.GetModel()->CheckValueReadResult(Error)) return false;
+		auto References = MakeShared<FWorldPartitionHelpers::FForEachActorWithLoadingResult>();
+		auto CurrentWorld = MakeShared<TWeakObjectPtr<UWorld>>();
+		OutScope = [Guids, References, LogicalScope, CurrentWorld](UWorld* Reloaded, TArray<UPackage*>* Packages) {
+			if (Packages) {
+				if (!Reloaded) return;
+				int32 LoadedActors = 0, SelectedActors = 0;
+				for (TActorIterator<AActor> It(Reloaded); It; ++It) {
+					++LoadedActors;
+					// Loading a referenced Actor is not permission to save its
+					// package. Only the actual native observation/write scope owns it.
+					bool bSelected = false;
+					for (const auto& Slot : *LogicalScope)
+						if ((Slot.ActorGuid.IsValid() && Slot.ActorGuid == It->GetActorGuid())
+							|| (!Slot.ManagedId.IsEmpty() && Slot.ManagedId == UeAgentLevelAuthoring::GetManagedActorId(**It))) { bSelected = true; break; }
+					if (bSelected) { ++SelectedActors; if (UPackage* Package = It->GetExternalPackage()) Packages->AddUnique(Package); }
+				}
+				if (Reloaded->PersistentLevel && Reloaded->PersistentLevel->MapBuildData)
+					Packages->AddUnique(Reloaded->PersistentLevel->MapBuildData->GetOutermost());
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=partition_package_scope loaded_actor_identities=%d selected_actors=%d owned_packages=%d actor_values_read=0"),
+					LoadedActors, SelectedActors, Packages->Num());
+				return;
+			}
+			if (!Reloaded) {
+				// Newly created Actors acquire their real GUID during native spawn.
+				// Capture only matching logical slots before releasing old bindings.
+				if (CurrentWorld->IsValid()) for (TActorIterator<AActor> It(CurrentWorld->Get()); It; ++It)
+					for (const auto& Slot : *LogicalScope)
+						if ((Slot.ActorGuid.IsValid() && Slot.ActorGuid == It->GetActorGuid())
+							|| (!Slot.ManagedId.IsEmpty() && Slot.ManagedId == UeAgentLevelAuthoring::GetManagedActorId(**It))) Guids->Add(It->GetActorGuid());
+				References->ActorReferences.Reset(); CurrentWorld->Reset(); return;
+			}
+			*CurrentWorld = Reloaded;
+			if (Guids->IsEmpty() || !Reloaded->GetWorldPartition()) return; // Empty ActorGuids means ALL to UE.
+			FWorldPartitionHelpers::FForEachActorWithLoadingParams Params;
+			Params.bKeepReferences = true; Params.ActorClasses = {AActor::StaticClass()}; Params.ActorGuids = Guids->Array();
+			FWorldPartitionHelpers::ForEachActorWithLoading(Reloaded->GetWorldPartition(),
+				[](const FWorldPartitionActorDescInstance*) { return true; }, Params, *References);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=partition_read_scope requested_guids=%d loaded_reference_closure=%d complete_actor_values=false"), Guids->Num(), References->ActorReferences.Num());
+		};
+		OutScope(&World, nullptr);
+		return true;
+	}
 
 	bool TryPrepareLevelWorkspace(UWorld& World, const FString& WorkspaceRoot, const FString& ProfileId,
 		Composition::HjsonImport::FPreparedAuthoringImportPtr& OutPrepared,
 		TSharedRef<FJsonObject>& OutBundle, FWorkspaceError& OutError,
 		TFunction<Contract::FSourceLocation(const FString&, const FString&)>* OutSourceResolver,
-		UeAgentLevelAuthoring::FLevelAuthoringCapture* OutCapture)
+		UeAgentLevelAuthoring::FLevelAuthoringCapture* OutCapture, TFunction<void(UWorld*, TArray<UPackage*>*)>* OutPartitionReadScope)
 	{
 			if (!EnsureAuthoringRegistered(OutError)) return false;
+			FUeAgentResourceTracker Resources = MakeSemanticWorkspaceResourceTracker();
+			// Source intent precedes native capture for every caller, including
+			// analysis consumers which do not retain the optional capture output.
+			if (!GetAcceptedSemanticWorkspace(WorkspaceRoot)) {
+				FResolvedSemanticWorkspacePtr Source;
+				if (!TryLoadHjsonImportSource(FWorkspaceSource::Directory(WorkspaceRoot), ESemanticWorkspaceMode::State,
+					Resources, Source, OutError)) return false;
+			}
 			UeAgentLevelAuthoring::FLevelAuthoringCapture Capture;
+			auto LogicalScope = MakeShared<TArray<UeAgentLevelAuthoring::FLevelActorCaptureScope>>();
+			TFunction<void(UWorld*, TArray<UPackage*>*)> PartitionScope;
+			ON_SCOPE_EXIT {
+				if (PartitionScope) {
+					// Failure and read-only callers have no native transaction to
+					// perform the last release. Clear native buffers first, then
+					// permit the selected external Actors to unload.
+					Capture.Snapshot.ReleaseNativeValues();
+					PartitionScope(nullptr, nullptr);
+				}
+			};
+			const auto AcceptedSource = GetAcceptedSemanticWorkspace(WorkspaceRoot);
+			if (!AcceptedSource) {
+				OutError.SetSourceFailure(TEXT("level_semantic_source_missing"), TEXT("Level preparation returned no authored Source."), WorkspaceRoot);
+				return false;
+			}
+			auto EffectiveSource = AcceptedSource.ToSharedRef();
+			if (!TryResolveUnconsumedAuthoring(WorkspaceRoot, EffectiveSource, Resources, EffectiveSource, OutError)
+				|| !TryRetainPartitionReadScope(World, *EffectiveSource, LogicalScope, PartitionScope, OutError)) return false;
 			UE::UAI::Contract::FDiagnostic CaptureError;
-			if (!UeAgentLevelAuthoring::TryCaptureLevelAuthoringState(
+			Composition::HjsonImport::FScopedCurrentCoverage Coverage;
+			const auto Scoped = TryCaptureScopedLevelPreflight(World, WorkspaceRoot, ProfileId, Capture, Coverage, OutError, EffectiveSource, *LogicalScope);
+			if (Scoped.IsSet() && !Scoped.GetValue()) return false;
+			if ((!Scoped.IsSet() && !UeAgentLevelAuthoring::TryCaptureLevelAuthoringState(
 					World, Capture, CaptureError, ProfileId)
+				)
 				|| !Capture.CanonicalSnapshot.IsValid()
 				|| !Capture.Model.IsValid())
 			{
@@ -1728,7 +2479,6 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), World.GetPathName()));
 				return false;
 			}
-			FUeAgentResourceTracker Resources = MakeSemanticWorkspaceResourceTracker();
 			UE::UAI::Composition::HjsonImport::FSemanticWorkspaceImportError ImportError;
 			const Contract::FUeAgentCallerContext Caller(
 				TEXT("level-world-semantic-import"),
@@ -1740,12 +2490,10 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				ESemanticWorkspaceMode::State,
 				Capture.Model.ToSharedRef(),
 				Capture.CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("level.semantic_workspace"), 1,
-					TEXT("sha256:0000000000000000000000000000000000000000000000000000000000000000")),
+				DomainAuthoring::BuildSemanticWorkspaceImportDescriptor(TEXT("level.semantic_workspace"), *Capture.Model),
 				TEXT("level-semantic-import"),
 				TEXT("level-semantic-import"),
-				Caller, false, FString(), FString(), Resources, OutPrepared, ImportError)
+				Caller, false, FString(), FString(), Resources, OutPrepared, ImportError, Capture.bScopedPreflight ? &Coverage : nullptr)
 			|| !OutPrepared.IsValid())
 		{
 			OutError.SetFailure(!ImportError.IsEmpty() ? MoveTemp(ImportError) : LevelNativeFact(TEXT("level_semantic_preparation_missing"),
@@ -1753,8 +2501,10 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), World.GetPathName()));
 			return false;
 		}
-		if (!TryBuildLevelSemanticWorkspaceBundle(OutPrepared->GetWorkspace(),
-			OutPrepared->GetChangeSetDraft().GetChanges(), OutBundle, OutError, OutSourceResolver)) return false;
+		if (!TryBuildLevelSemanticWorkspaceBundleWithSnapshot(OutPrepared->GetWorkspace(),
+			OutPrepared->GetChangeSetDraft().GetChanges(), OutBundle, OutError, OutSourceResolver, Capture.CanonicalSnapshot.Get())) return false;
+			if (Capture.bScopedPreflight) Capture.AttributionScope = LogicalScope;
+			if (OutPartitionReadScope) *OutPartitionReadScope = MoveTemp(PartitionScope);
 		if (OutCapture) *OutCapture = MoveTemp(Capture);
 		return true;
 	}
@@ -1775,8 +2525,9 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 		TSharedRef<FJsonObject> Bundle = MakeShared<FJsonObject>();
 		TFunction<Contract::FSourceLocation(const FString&, const FString&)> SourceResolver;
 		UeAgentLevelAuthoring::FLevelAuthoringCapture BeforeCapture;
+		TFunction<void(UWorld*, TArray<UPackage*>*)> PartitionReadScope;
 		if (!TryPrepareLevelWorkspace(World, WorkspaceRoot, WorkspaceProfileId,
-			Prepared, Bundle, OutError, &SourceResolver, Options.bPersistentReadback ? &BeforeCapture : nullptr)) return false;
+			Prepared, Bundle, OutError, &SourceResolver, Options.bPersistentReadback ? &BeforeCapture : nullptr, &PartitionReadScope)) return false;
 		if (!AnalysisRef.IsEmpty())
 		{
 			Contract::FDiagnostic AnalysisError;
@@ -1786,9 +2537,196 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 		auto Source = UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeInlineObject(
 			Bundle, TEXT("inline://semantic-level-workspace"));
 		Source.ResolveSource = MoveTemp(SourceResolver);
-		if (Options.bPersistentReadback) UeAgentLevelAuthoring::PrepareLevelCaptureReuse(World, BeforeCapture, WorkspaceProfileId);
+		TOptional<UeAgentAuthoringState::FStateSnapshot> AttributionBefore;
+		TOptional<FCompositionSnapshotBinding> AttributionBinding;
+		if (BeforeCapture.bScopedPreflight) {
+			const double Started = FPlatformTime::Seconds();
+			// Preparation and apply run synchronously on the same Editor thread.
+			// Reuse the selected component closure, not a second World capture.
+			AttributionBinding.Emplace(BuildNativeAuthoringCaptureBinding(TEXT("ue.level.asset.component_scope"), BeforeCapture.Snapshot));
+			const double Bound = FPlatformTime::Seconds();
+			AttributionBefore.Emplace(BeforeCapture.Snapshot.MakeAuthoringOnlySnapshot());
+			const double Retained = FPlatformTime::Seconds();
+			const int32 NativeCount = BeforeCapture.Snapshot.Num();
+			UeAgentLevelAuthoring::PrepareLevelCaptureReuse(World, BeforeCapture, WorkspaceProfileId);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=level_attribution_before scope=component_closure reused_preflight=true complete_entries=0 total_observed_entries=%d binding_s=%.6f retain_s=%.6f reuse_prepare_s=%.6f full_canonical=false total_s=%.6f"),
+				NativeCount, Bound - Started,
+				Retained - Bound, FPlatformTime::Seconds() - Retained, FPlatformTime::Seconds() - Started);
+		} else if (Options.bPersistentReadback) UeAgentLevelAuthoring::PrepareLevelCaptureReuse(World, BeforeCapture, WorkspaceProfileId);
 		auto ApplyOptions = Options;
+		ApplyOptions.PartitionReadScope = MoveTemp(PartitionReadScope);
+		ApplyOptions.bScopedPackageCapture = BeforeCapture.bScopedPreflight;
 		ApplyOptions.AuthoringProfileId = Prepared->GetWorkspace()->GetModel()->GetProfileId();
+		TUniquePtr<FCommittedWorkspaceTransaction> CommittedTransaction;
+		if (Options.bPersistentReadback && BeforeCapture.bScopedPreflight) {
+			if (!BeforeCapture.Model || !BeforeCapture.AttributionScope || !AttributionBefore.IsSet() || !AttributionBinding.IsSet()) {
+				OutError.SetSourceFailure(TEXT("level_committed_capture_missing"), TEXT("Scoped preflight has no Actor attribution evidence.")); return false;
+			}
+			const FString WorldPath = World.GetPathName();
+			const FString Profile = ApplyOptions.AuthoringProfileId;
+			const auto LocalModel = BeforeCapture.Model.ToSharedRef();
+			const auto NamingBaseline = Prepared->GetWorkspace();
+			bool bPropertyIntent = NamingBaseline->GetEditedUnitIds().IsSet();
+			if (bPropertyIntent) {
+				for (const auto& Id : *NamingBaseline->GetEditedUnitIds()) {
+					const auto* Unit = LocalModel->FindUnit(Id);
+					if (!Unit || Unit->GetSemanticTypeRef() != UeAgentLevelAuthoring::ComponentPropertySemanticId) {
+						bPropertyIntent = false;
+						break;
+					}
+				}
+			}
+			const auto AttributionScope = BeforeCapture.AttributionScope.ToSharedRef();
+			ApplyOptions.OnActorMoved = [AttributionScope](const FGuid& Previous, const AActor& Moved) {
+				const FString Managed = UeAgentLevelAuthoring::GetManagedActorId(Moved);
+				for (auto& Slot : *AttributionScope) {
+					if (Slot.ActorGuid.IsValid() ? Slot.ActorGuid != Previous : Slot.ManagedId.IsEmpty() || Slot.ManagedId != Managed) continue;
+					Slot.ActorGuid = Moved.GetActorGuid();
+					Slot.ManagedId = Managed;
+					Slot.RelocatedActorPath = Moved.GetPathName();
+				}
+			};
+			const auto WorldPropertyNames = BeforeCapture.WorldPropertyNames;
+			CommittedTransaction = MakeUnique<FCommittedWorkspaceTransaction>(TEXT("ue.level.asset"), WorldPath, WorkspaceRoot,
+				Prepared->GetWorkspace()->GetWorkspaceFingerprint(), FString(), LocalModel, AttributionBinding.GetValue(),
+				[WorldPath, Profile, LocalModel, NamingBaseline, bPropertyIntent, AttributionScope, WorldPropertyNames, Before = MoveTemp(AttributionBefore.GetValue())](
+					TSharedPtr<FJsonObject>& Delta, TSharedPtr<const FCommittedWorkspaceDelta>& Typed, TOptional<FCompositionSnapshotBinding>& Binding, FString& Scope, FWorkspaceError& Error) {
+					const double Started = FPlatformTime::Seconds();
+					UWorld* CurrentWorld = FindObject<UWorld>(nullptr, *WorldPath);
+					if (!CurrentWorld) { Error.SetSourceFailure(TEXT("level_committed_world_unavailable"), TEXT("The transaction world is unavailable."), WorldPath); return false; }
+					for (const auto& Slot : *AttributionScope) if (!Slot.RelocatedActorPath.IsEmpty() && !Slot.bAllowMissing) {
+						const auto* Moved = FindObject<AActor>(nullptr, *Slot.RelocatedActorPath);
+						if (!Moved || Moved->GetWorld() != CurrentWorld || Moved->GetActorGuid() != Slot.ActorGuid
+							|| !UeAgentLevelAuthoring::EvaluateActorAuthorability(*CurrentWorld, *Moved).bAuthorable) {
+							Error.SetSourceFailure(TEXT("level_relocated_actor_binding_missing"), TEXT("The actor returned by the native move could not be rebound for actual observation."), Slot.RelocatedActorPath);
+							return false;
+						}
+					}
+					UeAgentLevelAuthoring::FLevelAuthoringCapture After;
+					Contract::FDiagnostic Diagnostic;
+					// The same selected fields/relationships own both observations.
+					// Capturing the complete current World against an older published
+					// baseline would attribute unrelated external changes to this edit.
+					if (!UeAgentLevelAuthoring::TryCaptureLevelScopedNativeState(*CurrentWorld, *AttributionScope, After, Diagnostic, Profile, WorldPropertyNames))
+					{ Error.SetFailure(MoveTemp(Diagnostic)); return false; }
+					const double Observed = FPlatformTime::Seconds();
+					TArray<int32> Changed;
+					bool bPropertyScope = Before.TryFindAuthoringChanges(After.Snapshot, Changed) && bPropertyIntent;
+					for (const int32 Index : Changed) {
+						if (!bPropertyScope) break;
+						const auto& Old = Before.ReadAuthoringEntry(Index);
+						const auto& New = After.Snapshot.ReadAuthoringEntry(Index);
+						bPropertyScope = UeAgentAuthoringState::HaveSameStateEntryDeclaration(Old, New)
+							&& Old.SemanticId == UeAgentLevelAuthoring::ComponentPropertySemanticId;
+						if (bPropertyScope) {
+							if (!Old.bAvailable || !Old.bAuthoringVisible || !Old.Value || !New.Value) {
+								Error.SetSourceFailure(TEXT("level_actual_property_closure_missing"), TEXT("The selected actual property delta has no matching before/after closure. No larger projection was selected."), WorldPath); return false;
+							}
+							bPropertyScope = IsLevelScalarPropertyValue(Old) && IsLevelScalarPropertyValue(New);
+						}
+					}
+					const double Compared = FPlatformTime::Seconds();
+					auto Resources = MakeSemanticWorkspaceResourceTracker();
+					const FKeyedMemberNameLookup KeyedNames = [NamingBaseline, &Resources](const FString& Id, const FString& RootField,
+						FKeyedMemberNameVisitor Visitor, FWorkspaceError& Failure) {
+						return NamingBaseline->VisitBaselineMemberNames(Id, RootField, Visitor, Resources, Failure);
+						};
+					// The property-delta owner reads only these selected declarations
+					// and their dependencies. Native preflight already bound them to
+					// the authored source. Full publication values belong to refresh.
+					const auto Baseline = LocalModel;
+					FAuthoringModelPtr BeforeModel = LocalModel, AfterModel = LocalModel;
+					StateSemantic::FUeAgentCanonicalSnapshotPtr BeforeCanonical, AfterCanonical;
+					TArray<FString> ChangedUnits;
+					if (bPropertyScope && !Changed.IsEmpty()) {
+						UeAgentAuthoringState::FStateSnapshot BeforePart, AfterPart;
+						if (!SelectLevelPropertyClosure(Before, Changed, BeforePart)
+							|| !SelectLevelPropertyClosure(After.Snapshot, Changed, AfterPart)) {
+							Error.SetSourceFailure(TEXT("level_actual_property_closure_missing"), TEXT("The selected actual property delta has no matching before/after closure. No larger projection was selected."), WorldPath); return false;
+							}
+						if (bPropertyScope) {
+							if (!TryBuildScopedCanonicalAuthoringCapture(TEXT("ue.level.asset"), Profile, BeforePart, Resources, BeforeCanonical, BeforeModel, Error, &Baseline.Get(), {}, KeyedNames)
+								|| !TryBuildScopedCanonicalAuthoringCapture(TEXT("ue.level.asset"), Profile, AfterPart, Resources, AfterCanonical, AfterModel, Error, &Baseline.Get(), {}, KeyedNames)) return false;
+							for (const auto& Unit : BeforeModel->GetUnits()) if (Unit.GetUnitKind() == ESemanticUnitKind::PropertySet
+								&& Unit.GetSemanticTypeRef() == UeAgentLevelAuthoring::ComponentPropertySemanticId) ChangedUnits.Add(Unit.GetUnitId());
+							if (ChangedUnits.Num() != Changed.Num()) {
+								Error.SetSourceFailure(TEXT("level_actual_property_binding_missing"), TEXT("The selected actual properties did not produce matching stable units. No larger projection was selected."), WorldPath); return false;
+								}
+						}
+					}
+					TOptional<bool> Built;
+					if (bPropertyScope) {
+						Binding.Emplace(BuildNativeAuthoringCaptureBinding(TEXT("ue.level.asset.component_scope"), After.Snapshot));
+						Built = TryBuildCommittedPropertyDelta(*Baseline, *BeforeModel, *AfterModel, ChangedUnits,
+							Binding->Revision.GetGeneration(), Resources, Delta, Error, &Typed);
+					}
+					if (Built.IsSet() && !Built.GetValue()) return false;
+					if (bPropertyScope && !Built.IsSet()) {
+						Error.SetSourceFailure(TEXT("level_actual_property_delta_missing"), TEXT("The selected property-delta producer did not return its result. No structural projection was selected."), WorldPath); return false;
+						}
+					if (!Built.IsSet()) {
+						// Aggregate/collision/definition changes use the same complete
+						// Actor observations. Missing World rows are not deletions:
+						// shared delta applies only differences inside this scope.
+						BeforeModel = LocalModel;
+						if (!TryBuildScopedCanonicalAuthoringCapture(TEXT("ue.level.asset"), Profile, After.Snapshot,
+							Resources, AfterCanonical, AfterModel, Error, &Baseline.Get(), {}, KeyedNames)
+							|| !TryBuildCommittedWorkspaceDelta(*BeforeModel, *AfterModel, Resources, Delta, Error, &Typed)) return false;
+						// The complete semantic delta carries AfterModel's canonical
+						// generation. Keep its matching binding; the raw observation
+						// binding has a different (equally valid) revision grammar.
+						Binding.Emplace(FCompositionSnapshotBinding{AfterCanonical->GetSnapshotId(),
+							AfterCanonical->GetRevision(), AfterCanonical->GetProvenance().GetEvidenceId()});
+						Scope = TEXT("component_closure_semantic_projection");
+					} else Scope = TEXT("component_closure_changed_property_projection");
+					UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=level_attribution_after scope=component_closure complete_entries=0 attribution_entries=%d changed_entries=%d changed_units=%d native_s=%.6f compare_s=%.6f projection_and_delta_s=%.6f full_canonical=%s total_s=%.6f"),
+						After.Snapshot.Num(), Changed.Num(), ChangedUnits.Num(), Observed - Started, Compared - Observed,
+						FPlatformTime::Seconds() - Compared, Built.IsSet() ? TEXT("false") : TEXT("true"), FPlatformTime::Seconds() - Started);
+					AttachAcceptedActualUnits(&NamingBaseline.Get(), *AfterModel, Typed);
+					if (bPropertyScope && Typed && NamingBaseline->GetEditedUnitIds().IsSet()) {
+						// The paired native observations proved every unselected row
+						// unchanged. Keep the accepted setter's real value even when
+						// its delta is zero beside another changed property.
+						auto WithActual = MakeShared<FCommittedWorkspaceDelta>(*Typed);
+						for (const auto& Id : *NamingBaseline->GetEditedUnitIds())
+							if (!WithActual->AcceptedActualUnits.Contains(Id) && !ChangedUnits.Contains(Id))
+								if (const auto* Unit = LocalModel->FindUnit(Id)) WithActual->AcceptedActualUnits.Add(Id, *Unit);
+						Typed = MoveTemp(WithActual);
+					}
+					return true;
+				}, GetAcceptedSemanticWorkspace(WorkspaceRoot));
+		} else if (Options.bPersistentReadback) {
+			auto Resources = MakeSemanticWorkspaceResourceTracker();
+			FString BootstrapState;
+			const FCompositionSnapshotBinding Binding{BeforeCapture.CanonicalSnapshot->GetSnapshotId(),
+				BeforeCapture.CanonicalSnapshot->GetRevision(), BeforeCapture.CanonicalSnapshot->GetProvenance().GetEvidenceId()};
+			if (!TryPrepareCommittedImportState(WorkspaceRoot, TEXT("ue.level.asset"), World.GetPathName(),
+				*BeforeCapture.Model, Binding, Resources, BootstrapState, OutError)) return false;
+			const FString WorldPath = World.GetPathName();
+			const FString Profile = ApplyOptions.AuthoringProfileId;
+			CommittedTransaction = MakeUnique<FCommittedWorkspaceTransaction>(TEXT("ue.level.asset"), WorldPath,
+				WorkspaceRoot, Prepared->GetWorkspace()->GetWorkspaceFingerprint(), MoveTemp(BootstrapState), BeforeCapture.Model.ToSharedRef(),
+				[WorldPath, Profile](FAuthoringModelPtr& Model, TOptional<FCompositionSnapshotBinding>& AfterBinding,
+					FString& ObservationScope, FWorkspaceError& Error) {
+					UWorld* CurrentWorld = FindObject<UWorld>(nullptr, *WorldPath);
+					if (!CurrentWorld) {
+						Error.SetSourceFailure(TEXT("level_committed_world_unavailable"),
+							TEXT("The transaction's current world is unavailable for its actual export evidence."), WorldPath);
+						return false;
+					}
+					UeAgentLevelAuthoring::FLevelAuthoringCapture After;
+					Contract::FDiagnostic Diagnostic;
+					if (!UeAgentLevelAuthoring::TryCaptureLevelAuthoringState(*CurrentWorld, After, Diagnostic, Profile)) {
+						Error.SetFailure(MoveTemp(Diagnostic)); return false;
+					}
+					Model = MoveTemp(After.Model);
+					AfterBinding.Emplace(FCompositionSnapshotBinding{After.CanonicalSnapshot->GetSnapshotId(),
+						After.CanonicalSnapshot->GetRevision(), After.CanonicalSnapshot->GetProvenance().GetEvidenceId()});
+					ObservationScope = TEXT("complete_world_topology_action");
+					return true;
+				}, GetAcceptedSemanticWorkspace(WorkspaceRoot));
+		}
+		if (CommittedTransaction && !CommittedTransaction->IsReady(OutError)) return false;
 		bMutationStarted = true;
 		const bool bApplied = UeAgentLevelAuthoring::ApplyWorkspaceSource(
 			World,
@@ -2097,29 +3035,6 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			return Frame;
 		}
 
-		void RetainWorldPartitionActorsForAuthoring(
-			UWorld& World,
-			FWorldPartitionHelpers::FForEachActorWithLoadingResult& OutLoadResult)
-		{
-			UWorldPartition* const WorldPartition = World.GetWorldPartition();
-			if (!WorldPartition)
-			{
-				return;
-			}
-
-			FWorldPartitionHelpers::FForEachActorWithLoadingParams LoadParams;
-			LoadParams.bKeepReferences = true;
-			LoadParams.ActorClasses = {AActor::StaticClass()};
-			FWorldPartitionHelpers::ForEachActorWithLoading(
-				WorldPartition,
-				[](const FWorldPartitionActorDescInstance*)
-				{
-					return true;
-				},
-				LoadParams,
-				OutLoadResult);
-		}
-
 		bool ReadInputStringSet(
 			const TSharedPtr<FJsonObject>& Params,
 			const TCHAR* Field,
@@ -2299,7 +3214,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			TArray<AActor*> Actors;
 			FWorldPartitionHelpers::FForEachActorWithLoadingResult
 				WorldPartitionLoadResult;
-			RetainWorldPartitionActorsForAuthoring(
+			UeAgentLevelAuthoring::RetainWorldPartitionActorsForAuthoring(
 				World, WorldPartitionLoadResult);
 			for (TActorIterator<AActor> It(&World, AActor::StaticClass(), EActorIteratorFlags::SkipPendingKill); It; ++It)
 			{
@@ -2540,8 +3455,9 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 
 			UeAgentLevelAuthoring::FLevelExportResult ExportResult;
 			UE::UAI::Contract::FDiagnostic ExportError;
+			if (PreparedExport) PreparedExport->bIncludeResultFileDetails = false;
 			if (!UeAgentLevelAuthoring::ExportLevelWorkspace(World, WorkspacePath, ProfileId, ExportResult, PreparedExport)
-				|| (PreparedExport ? !PreparedExport->Plan.IsValid() : !ExportResult.IsWritten()))
+				|| (PreparedExport && PreparedExport->bPrepareOnly ? !PreparedExport->Plan.IsValid() : !ExportResult.IsWritten()))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic.IsEmpty() ? LevelNativeFact(TEXT("level_world_domain_export_failed"),
 					TEXT("Level workspace export did not produce a written workspace receipt."), TEXT("/workspace_export/written"),
@@ -2549,7 +3465,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
                 return false;
 			}
 
-			if (PreparedExport)
+			if (PreparedExport && PreparedExport->bPrepareOnly)
 			{
 				const TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
 				Response->SetStringField(TEXT("status"), TEXT("prepared"));
@@ -2564,22 +3480,10 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 		bool FinalizeWorldImport(const FString& Target, const FString& PackageName,
 			UWorld& World, FString& OutPayload, FWorkspaceError& OutError, const FString& AnalysisRef)
 		{
-			FString Revision, Readback;
-			if (!StableRevision(PackageName, Revision, OutError)
-				|| !CaptureWorld(World, TEXT("content_graph.structure"), MakeShared<FJsonObject>(), Readback, OutError)) return false;
-			TSharedPtr<FJsonObject> ReadbackObject;
+			// Persisted operation readback already reports actual values and warnings.
+			// This response consumes only success and the optional requested analysis.
 			UE::UAI::Contract::FDiagnostic JsonError;
-			if (!Json::TryParseObject(Readback, ReadbackObject, JsonError) || !ReadbackObject.IsValid())
-				return Fail(OutError, JsonError.IsValid() ? AsLevelNativeResult(MoveTemp(JsonError)) : LevelNativeFact(
-					TEXT("level_world_domain_independent_readback_invalid"), TEXT("The independent world readback returned no object."),
-					TEXT("/world_readback"), MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("object")), Target));
-			DomainAuthoring::FDomainHjsonImportLifecycleReceipt Receipt;
-			Receipt.bMutationApplied = true;
-			Receipt.bNativeUpdateSettled = true;
-			Receipt.bPackageSaved = true;
-			Receipt.PersistenceReceiptId = TEXT("map-reload:") + PackageName;
-			if (!DomainAuthoring::TryBuildImportSuccessPayload(ProviderId, Target, Revision,
-				Receipt, ReadbackObject, MakeShared<FJsonObject>(), OutPayload, OutError)) return false;
+			OutPayload = TEXT("{\"status\":\"succeeded\"}");
 			if (AnalysisRef.IsEmpty()) return true;
 			TSharedPtr<FJsonObject> PayloadObject;
 			if (!Json::TryParseObject(OutPayload, PayloadObject, JsonError))
@@ -2669,8 +3573,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			{
 				FExecutionOptions Execution;
 				Execution.RequestId = RequestId;
-				Execution.JournalRoot = FPaths::ConvertRelativePathToFull(
-					FPaths::ProjectSavedDir() / TEXT("UeAgentInterface/Authoring/WorldImport"));
+				Execution.JournalRoot = GetDurableTransactionRoot(true);
 				if (Durable.Prepare(Execution, Target + TEXT(":") + RequestId,
 					WorldDurableArtifacts(PackageName, World), Durability, DurableFailure)) return true;
 				OutError.SetFailure(DurableFailure.Diagnostic);
@@ -2710,7 +3613,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), PackageName);
 						if (World && BeforeMutation.CanonicalSnapshot.IsValid())
 						{
-							RetainWorldPartitionActorsForAuthoring(*World, WorldPartitionLoadResult);
+							UeAgentLevelAuthoring::RetainWorldPartitionActorsForAuthoring(*World, WorldPartitionLoadResult);
 							bRecovered = UeAgentLevelAuthoring::VerifyLevelAuthoringReadback(*World,
 								BeforeMutation.Snapshot, RecoveryError);
 						}
@@ -2755,8 +3658,9 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					PackageName, ObjectName, !bExists, bWorldPartition, Restore, World, OutError,
 					[&]() { bNativeMutationStarted = true; }))
 				return false;
-			const bool bPersistentUpdate = bExists && !World->IsPartitionedWorld();
-			if (bPersistentUpdate && DataLayers && !DataLayers->IsEmpty())
+			const bool bPersistentUpdate = bExists && (!World->IsPartitionedWorld()
+				|| (!SemanticWorkspaceRoot.IsEmpty() && (!DataLayers || DataLayers->IsEmpty())));
+			if (!World->IsPartitionedWorld() && DataLayers && !DataLayers->IsEmpty())
 			{
 				OutError.SetFailure(LevelNativeFact(TEXT("level_world_domain_data_layers_require_partitioned_world"),
 					TEXT("Applying data layers to an existing world requires World Partition."), TEXT("/world/partitioned"),
@@ -2774,7 +3678,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				if (!Restore.Restore(RestoreError)) OutError.Append(RestoreError);
 				return false;
 			}
-			RetainWorldPartitionActorsForAuthoring(*World, WorldPartitionLoadResult);
+			if (!bPersistentUpdate) UeAgentLevelAuthoring::RetainWorldPartitionActorsForAuthoring(*World, WorldPartitionLoadResult);
 			if (!bPersistentUpdate && bExists)
 			{
 				// These before-images represent disk state; do not discard unrelated
@@ -2817,12 +3721,6 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target);
 					return false;
 				};
-				if (Restore.bSwitched)
-					Options.RestoreEditorContext = [&](UeAgentAuthoringOperationApply::FOperationFailure& Failure)
-					{
-						if (Restore.Restore(OutError)) return true;
-						Failure.Diagnostic = OutError.GetDiagnostic(); return false;
-					};
 			}
 			UeAgentLevelAuthoring::FWorkspaceApplyResult ApplyResult;
 			bool bApplied = false;
@@ -2868,7 +3766,35 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
                 OutError.SetFailure(MoveTemp(Diagnostic));
                 return false;
             }
-                        if (bPersistentUpdate) return true;
+            if (bPersistentUpdate)
+            {
+                FWorkspaceError RestoreError;
+                if (!Restore.Restore(RestoreError))
+                {
+                    // The native/durable transaction is already committed.
+                    // Context cleanup cannot authorize rollback or replay.
+                    TSharedPtr<FJsonObject> Payload;
+                    UE::UAI::Contract::FDiagnostic JsonError;
+                    if (Json::TryParseObject(OutPayload, Payload, JsonError) && Payload)
+                    {
+                        Payload->SetBoolField(TEXT("editor_context_restored"), false);
+                        Payload->SetBoolField(TEXT("retry_safe"), false);
+                        auto Warning = RestoreError.GetDiagnostic();
+                        Warning.Severity = Contract::ESeverity::Warning;
+                        Warning.AssetApplied = true;
+                        Warning.RetryImport = false;
+                        TArray<TSharedPtr<FJsonValue>> Warnings;
+                        const TArray<TSharedPtr<FJsonValue>>* Existing = nullptr;
+                        if (Payload->TryGetArrayField(TEXT("warnings"), Existing)) Warnings = *Existing;
+                        Warnings.Add(MakeShared<FJsonValueObject>(Warning.ToPublicJson()));
+                        Payload->SetArrayField(TEXT("warnings"), MoveTemp(Warnings));
+                        return CanonicalObject(Payload.ToSharedRef(), OutPayload, OutError);
+                    }
+                    UE_LOG(LogTemp, Warning, TEXT("UAI committed world import: Editor context restoration failed: %s"),
+                        *RestoreError.GetDiagnostic().PublicMessage);
+                }
+                return true;
+            }
                         if (!ApplyDataLayers(*World, DataLayers, OutError)) {
                           return false;
                         }
@@ -2904,7 +3830,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					TEXT("The saved imported world could not be reloaded."), TEXT("/world_import/world_reloaded"),
 					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), PackageName));
 			}
-			RetainWorldPartitionActorsForAuthoring(*World, WorldPartitionLoadResult);
+			UeAgentLevelAuthoring::RetainWorldPartitionActorsForAuthoring(*World, WorldPartitionLoadResult);
                         if (!UeAgentLevelAuthoring::VerifyLevelAuthoringReadback(*World,
                             BeforeSave.Snapshot, ReadbackError)) {
                           auto Diagnostic = ReadbackError;
@@ -3094,13 +4020,18 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 				TEXT("The level-world domain requires a content_graph command."), TEXT("/command_id"),
 				MakeShared<FJsonValueString>(CommandId), MakeShared<FJsonValueString>(TEXT("content_graph command")), Target));
 		}
+		const bool bTimeWorkspaceExport = CommandId == TEXT("content_graph.export_workspace");
+		const double OpenStarted = bTimeWorkspaceExport ? FPlatformTime::Seconds() : 0;
 		FMapRestoreContext Restore;
 		UWorld* World = nullptr;
 		if (!OpenWorld(PackageName, ObjectName, false, false,
 				Restore, World, OutError))
 			return false;
-		FString Revision;
-		bool bCaptured = StableRevision(PackageName, Revision, OutError);
+		const double OpenFinished = bTimeWorkspaceExport ? FPlatformTime::Seconds() : 0;
+		// This branch only needs the existing persisted/readable/nonempty error
+		// contract. Its former revision text had no consumer, including export.
+		bool bCaptured = ReadPersistedMap(PackageName, nullptr, OutError);
+		const double RevisionFinished = bTimeWorkspaceExport ? FPlatformTime::Seconds() : 0;
 		if (bCaptured)
 		{
 			if (CommandId == TEXT("content_graph.export_workspace"))
@@ -3114,6 +4045,7 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 					OutPayloadJson, OutError);
 			}
 		}
+		const double ExportFinished = bTimeWorkspaceExport ? FPlatformTime::Seconds() : 0;
 		FWorkspaceError RestoreError;
 		if (!Restore.Restore(RestoreError))
 		{
@@ -3121,6 +4053,10 @@ LevelField(Extension, TEXT("data_layers")), MakeShared<FJsonValueString>(TEXT("a
 			return Fail(OutError, RestoreError.GetDiagnostic());
 		}
 		bOutReadOnly = bCaptured;
+		if (bTimeWorkspaceExport) UE_LOG(LogTemp, Display,
+			TEXT("UAI export timing phase=level_world_export_shell open_s=%.6f persisted_check_s=%.6f export_s=%.6f restore_s=%.6f total_s=%.6f persisted_revision_generated=false"),
+			OpenFinished - OpenStarted, RevisionFinished - OpenFinished, ExportFinished - RevisionFinished,
+			FPlatformTime::Seconds() - ExportFinished, FPlatformTime::Seconds() - OpenStarted);
 		return bCaptured;
 	}
 }

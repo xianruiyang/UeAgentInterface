@@ -70,6 +70,12 @@ namespace UE::UAI::HjsonWorkspace
 		FGraphAuthoringAliasProjection& OutProjection,
 		FWorkspaceError& OutError);
 
+	/** Metadata-only filter shared by graph naming and placement consumers. */
+	bool IsGraphNodeNativeNameProperty(const FString& PropertyName);
+
+	/** Captured TG pin evaluation is output content, never a pin name/type/owner or placement input. */
+	bool IsGraphItemContentOnlyField(const FString& SemanticType, const FString& FieldName);
+
 	/** Read only native naming properties from the existing scalar/literal property representation. */
 	const UE::UAI::StateSemantic::FUeAgentCanonicalValueRef* FindGraphNodeNativeNameProperty(
 		const FString& PropertyName,
@@ -83,6 +89,10 @@ namespace UE::UAI::HjsonWorkspace
 	/** The native identity already carried by a captured graph node. */
 	FString ReadGraphNodeNativeIdentity(
 		const TMap<FString, UE::UAI::StateSemantic::FUeAgentCanonicalValueRef>& Values);
+
+/** Resolve an ItemState's graph for naming, including graph nodes nested under other items. */
+FString ResolveGraphModelItemOwner(const FAuthoringModel& Model,
+	const FString& ItemSemanticType, const FString& ItemOwner);
 
 	/** Shared node membership and names for graph references and physical navigation. */
 	bool TryBuildGraphModelNodeAliases(const FAuthoringModel& Model, const FString& GraphId,

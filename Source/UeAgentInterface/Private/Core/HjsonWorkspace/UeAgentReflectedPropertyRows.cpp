@@ -8,6 +8,24 @@
 namespace UE::UAI::HjsonWorkspace
 {
 using namespace StateSemantic;
+namespace
+{
+	void AppendRowFailure(UE::UAI::Contract::FDiagnostic& Failures, const TCHAR* Code,
+		const FString& Reason, const FString& Path, const FString& Expected,
+		const FUeAgentCanonicalValue* Actual, bool bNative = false)
+	{
+		TSharedPtr<FJsonValue> Json; UE::UAI::Contract::FDiagnostic Error;
+		if (Actual && !CanonicalJson::TryToJsonValue(*Actual, Json, Error))
+			UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, Path);
+		auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Path,
+			Expected.IsEmpty() ? TSharedPtr<FJsonValue>() : MakeShared<FJsonValueString>(Expected), Json,
+			TEXT("input_decode"), Reason);
+		if (Actual) Diagnostic.ActualValuePresent = true;
+		if (bNative) Diagnostic.SourceKind = TEXT("native_result");
+		if (!Error.IsEmpty()) Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(MoveTemp(Error));
+		Failures.Append(Diagnostic);
+	}
+}
 		FString ReadablePropertyCategory(const TArray<FString>& CategoryPath)
 		{
 			TArray<FString> Segments;
@@ -169,6 +187,41 @@ bool TryDescribeReadableProperty(const FUeAgentCanonicalValue& Descriptor, const
 	return bHasCategory && !OutSchema.Name.IsEmpty() && !OutSchema.Type.IsEmpty();
 }
 
+bool TryReadReadablePropertyRow(const FUeAgentCanonicalValue& Descriptor, const FReadablePropertySchema& Schema,
+	FUeAgentCanonicalValuePtr& OutValue, FUeAgentStateSemanticError& OutError, const FString& Path)
+{
+	OutValue.Reset();
+	OutError = FUeAgentStateSemanticError();
+	const auto Report = [&](const TCHAR* Code, const FString& Reason, const FString& Pointer,
+		const FString& Expected, const FUeAgentCanonicalValue* Actual, bool bNative = false)
+	{ AppendRowFailure(OutError, Code, Reason, Pointer, Expected, Actual, bNative); };
+	if (Descriptor.GetKind() != EUeAgentValueKind::Object) {
+		Report(TEXT("hjson_initial_property_invalid"), TEXT("A property row must be an object."), Path, TEXT("object"), &Descriptor);
+		return false;
+	}
+	const FUeAgentCanonicalValue* Type = nullptr;
+	const FUeAgentCanonicalValue* Definition = nullptr;
+	for (const auto& Member : Descriptor.GetObjectItems()) {
+		if (Member.Key == TEXT("type")) Type = &Member.Value.Get();
+		else if (Member.Key == TEXT("value")) OutValue = Member.Value;
+		else if (Member.Key == TEXT("definition")) Definition = &Member.Value.Get();
+		else Report(TEXT("hjson_initial_property_invalid"), TEXT("This field is not supported in a property row."),
+			Path + TEXT("/") + Member.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")), TEXT("type, value, definition"), nullptr);
+	}
+	if (!Type || Type->GetKind() != EUeAgentValueKind::String)
+		Report(TEXT("semantic_workspace_property_type_missing"), Type ? TEXT("Property type must be a string.") : TEXT("Property type is required."), Path + TEXT("/type"), Schema.Type, Type);
+	else if (!Type->GetText().TrimStartAndEnd().Equals(Schema.Type.TrimStartAndEnd(), ESearchCase::CaseSensitive))
+		Report(TEXT("semantic_workspace_property_type_mismatch"), TEXT("Property type does not match its schema."), Path + TEXT("/type"), Schema.Type, Type);
+	if (!OutValue)
+		Report(TEXT("hjson_initial_property_value_missing"), TEXT("Property value is required."), Path + TEXT("/value"), FString(), nullptr);
+	if (Definition && (Definition->GetKind() != EUeAgentValueKind::String
+		|| (!Schema.Definition.IsEmpty() && Definition->GetText() != Schema.Definition)))
+		Report(TEXT("semantic_workspace_property_definition_mismatch"), TEXT("Property definition must be a string matching its schema definition."), Path + TEXT("/definition"), Schema.Definition, Definition);
+	if (Schema.Type.IsEmpty())
+		Report(TEXT("hjson_import_property_type_missing"), TEXT("The native property schema did not provide a type."), Path + TEXT("/type"), FString(), nullptr, true);
+	return OutError.IsEmpty();
+}
+
 bool TryReadReadablePropertyRows(const FUeAgentCanonicalValue& Categories,
 	const TArray<FReadablePropertySchema>& Schema, TArray<FResolvedReadableProperty>& OutRows,
 	FUeAgentStateSemanticError& OutError)
@@ -180,16 +233,7 @@ bool TryReadReadablePropertyRows(const FUeAgentCanonicalValue& Categories,
 	auto Report = [&](const TCHAR* Code, const FString& Reason, const FString& Path, const FString& Expected,
 		const FUeAgentCanonicalValue* Actual, bool bNative = false)
 	{
-		TSharedPtr<FJsonValue> Json; UE::UAI::Contract::FDiagnostic Error;
-		if (Actual && !CanonicalJson::TryToJsonValue(*Actual, Json, Error))
-			UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, Path);
-		auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Path,
-			Expected.IsEmpty() ? TSharedPtr<FJsonValue>() : MakeShared<FJsonValueString>(Expected), Json,
-			TEXT("input_decode"), Reason);
-		if (Actual) Diagnostic.ActualValuePresent = true;
-		if (bNative) Diagnostic.SourceKind = TEXT("native_result");
-		if (!Error.IsEmpty()) Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(MoveTemp(Error));
-		Failures.Append(Diagnostic);
+		AppendRowFailure(Failures, Code, Reason, Path, Expected, Actual, bNative);
 	};
 	if (Categories.GetKind() != EUeAgentValueKind::Object)
 		Report(TEXT("hjson_initial_categories_invalid"), TEXT("Property categories must be an object."), TEXT("/"), TEXT("object"), &Categories);
@@ -214,31 +258,10 @@ bool TryReadReadablePropertyRows(const FUeAgentCanonicalValue& Categories,
 			if (Seen.Contains(Found))
 			{ Report(TEXT("hjson_initial_property_path_duplicate"), TEXT("This property schema entry has already been supplied."), Path, FString(), nullptr); continue; }
 			Seen.Add(Found);
-			if (Field.Value->GetKind() != EUeAgentValueKind::Object)
-			{ Report(TEXT("hjson_initial_property_invalid"), TEXT("A property row must be an object."), Path, TEXT("object"), &Field.Value.Get()); continue; }
-			const FUeAgentCanonicalValue* Type = nullptr;
-			const FUeAgentCanonicalValue* Definition = nullptr;
-			FUeAgentCanonicalValuePtr Value; bool bValid = true;
-			for (const auto& Member : Field.Value->GetObjectItems())
-			{
-				if (Member.Key == TEXT("type")) Type = &Member.Value.Get();
-				else if (Member.Key == TEXT("value")) Value = Member.Value;
-				else if (Member.Key == TEXT("definition")) Definition = &Member.Value.Get();
-				else { Report(TEXT("hjson_initial_property_invalid"), TEXT("This field is not supported in a property row."), Path + TEXT("/") + Segment(Member.Key),
-					TEXT("type, value, definition"), nullptr); bValid = false; }
-			}
-			if (!Type || Type->GetKind() != EUeAgentValueKind::String)
-			{ Report(TEXT("semantic_workspace_property_type_missing"), Type ? TEXT("Property type must be a string.") : TEXT("Property type is required."), Path + TEXT("/type"), Schema[Found].Type, Type); bValid = false; }
-			else if (!Type->GetText().TrimStartAndEnd().Equals(Schema[Found].Type.TrimStartAndEnd(), ESearchCase::CaseSensitive))
-			{ Report(TEXT("semantic_workspace_property_type_mismatch"), TEXT("Property type does not match its schema."), Path + TEXT("/type"), Schema[Found].Type, Type); bValid = false; }
-			if (!Value)
-			{ Report(TEXT("hjson_initial_property_value_missing"), TEXT("Property value is required."), Path + TEXT("/value"), FString(), nullptr); bValid = false; }
-			if (Definition && (Definition->GetKind() != EUeAgentValueKind::String
-				|| (!Schema[Found].Definition.IsEmpty() && Definition->GetText() != Schema[Found].Definition)))
-			{ Report(TEXT("semantic_workspace_property_definition_mismatch"), TEXT("Property definition must be a string matching its schema definition."), Path + TEXT("/definition"), Schema[Found].Definition, Definition); bValid = false; }
-			if (Schema[Found].Type.IsEmpty())
-			{ Report(TEXT("hjson_import_property_type_missing"), TEXT("The native property schema did not provide a type."), Path + TEXT("/type"), FString(), nullptr, true); bValid = false; }
-			if (bValid) OutRows.Add({Found, Value});
+			FUeAgentCanonicalValuePtr Value;
+			FUeAgentStateSemanticError RowError;
+			if (TryReadReadablePropertyRow(Field.Value.Get(), Schema[Found], Value, RowError, Path)) OutRows.Add({Found, Value});
+			else Failures.Append(RowError);
 		}
 	}
 	if (!Failures.Code.IsEmpty())

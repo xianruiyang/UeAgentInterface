@@ -14,6 +14,23 @@ namespace UE::UAI::HjsonWorkspace
 {
 	class FHjsonNode;
 	struct FPreparedWorkspaceExport;
+	struct FAcceptedWorkspaceInventoryRow;
+	/** Metadata projection of this accepted row, without captured native values. */
+	bool TryBuildPublishedInventoryMetadata(const FAcceptedWorkspaceInventoryRow& Row,
+		ContextResource::FUeAgentResourceTracker& Resources, StateSemantic::FUeAgentCanonicalValuePtr& Out,
+		FWorkspaceError& Error);
+	/** Original machine writer: persist the byte ranges just produced for this
+	 * same baseline, then serialize its corresponding inventory rows. */
+	bool TrySerializePublishedInventoryWithEnvelopeSpans(
+		const TArray<StateSemantic::FUeAgentCanonicalValueRef>& Rows, const TArray<FIntPoint>& EnvelopeSpans,
+		ContextResource::FUeAgentResourceTracker& Resources, TArray<uint8>& OutBytes,
+		TArray<FIntPoint>& OutSpans, FWorkspaceError& Error, const FString& Path);
+	/** Original machine-row writer's physical organization. This computes a
+	 * location only; callers still bind it to the accepted publication bytes. */
+	FString GetPublishedMachineEnvelopePath(const FString& Document, bool bScopedOwners);
+	bool TryPreservePendingAuthoringValues(FPreparedWorkspaceExport& Prepared,
+		const FAuthoringModelRef& ActualModel, ContextResource::FUeAgentResourceTracker& Resources,
+		FWorkspaceError& Error, TSet<FString>& OutPendingDocuments);
 	enum class EAuthoringSurfaceKind : uint8
 	{
 		Properties,
@@ -94,6 +111,9 @@ namespace UE::UAI::HjsonWorkspace
 		bool FindContract(
 			const FString& TargetKind,
 			FTargetCompositionContract& OutContract) const;
+		/** Resolve under this owner's read lock; copy only the selected route. */
+		bool ResolveSemanticRoute(const FString& TargetKind, const FString& SemanticId,
+			FCompositionSemanticRouteContract& OutRoute) const;
 		TArray<FTargetCompositionContract> ListContracts() const;
 
 	private:
@@ -119,6 +139,18 @@ namespace UE::UAI::HjsonWorkspace
 		TArray<UE::UAI::StateSemantic::FUeAgentStateEntry> Entries;
 	};
 
+	// The composition producer's typed output before any complete-model
+	// compilation/index/fingerprint. It owns only the supplied observation scope.
+	struct FCompositionUnitSet
+	{
+		FString ContractId, ProfileId, BaseRevision;
+		int32 ContractVersion = 0;
+		TArray<FSemanticUnit> Units;
+		TArray<FString> TargetUnitIds;
+	};
+	// Borrow established keyed naming rows synchronously, without a full model.
+	using FCompositionUnitLookup = TFunction<const FSemanticUnit*(const FString&)>;
+
 	struct UEAGENTINTERFACE_API FCompositionSnapshotBinding
 	{
 		FString SnapshotId;
@@ -130,6 +162,8 @@ namespace UE::UAI::HjsonWorkspace
 
 	UEAGENTINTERFACE_API FString
 	GetTargetCompositionContractSchemaId();
+	/** Release the current capture candidate at the owning server lifecycle boundary. */
+	UEAGENTINTERFACE_API void ResetCanonicalCaptureReuse();
 
 	UEAGENTINTERFACE_API bool ValidateTargetCompositionContract(
 		const FTargetCompositionContract& Contract,
@@ -145,6 +179,9 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& TargetKind,
 		const FString& SemanticId,
 		FCompositionSemanticRouteContract& OutRoute);
+	/** Same identity/target route used by composition; not a domain naming heuristic. */
+	UEAGENTINTERFACE_API bool IsTargetCompositionIdentitySemantic(const FString& TargetKind, const FString& SemanticId);
+	bool IsStableItemOrdering(const FSemanticUnit& Ordering, const FString& OwnerId);
 
 	UEAGENTINTERFACE_API FString ResolveTargetCompositionKind(
 		const FString& SourceTargetKind,
@@ -161,6 +198,11 @@ namespace UE::UAI::HjsonWorkspace
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FAuthoringModelPtr& OutModel,
 		FWorkspaceError& OutError);
+	bool TryComposeScopedAuthoringUnits(const FString& TargetKind, const FString& ProfileId,
+		StateSemantic::FUeAgentCanonicalSnapshotPtr& Snapshot,
+		ContextResource::FUeAgentResourceTracker& Resources, FCompositionUnitSet& OutUnits,
+		FWorkspaceError& OutError, const FAuthoringModel* AcceptedBindingBaseline = nullptr,
+		const FCompositionUnitLookup& KeyedBaseline = {}, const FKeyedMemberNameLookup& KeyedNames = {});
 
 	/** Source addresses produced by the same document decomposition used for apply.
 	 * They are transient projection metadata, never editable HJSON or state values. */
@@ -225,6 +267,56 @@ namespace UE::UAI::HjsonWorkspace
 		StateSemantic::FUeAgentCanonicalSnapshotPtr& OutSnapshot,
 		FAuthoringModelPtr& OutModel,
 		FWorkspaceError& OutError);
+	/** Complete capture for a caller whose selected publication contract does
+	 * not consume the legacy whole-model fingerprint. All current values,
+	 * declarations, reference validation and per-row output hashes remain real. */
+	UEAGENTINTERFACE_API bool TryBuildCanonicalAuthoringCapture(
+		const FString& TargetKind, const FString& ProfileId,
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		StateSemantic::FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+		FAuthoringModelPtr& OutModel, FWorkspaceError& OutError,
+		bool bBuildLegacyFingerprint);
+	/** Canonicalize a declared observation subset for scoped preflight. The model
+	 * is not a complete current asset and does not seed complete-capture reuse. */
+	bool TryBuildScopedCanonicalAuthoringCapture(const FString& TargetKind, const FString& ProfileId,
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot, ContextResource::FUeAgentResourceTracker& Resources,
+		StateSemantic::FUeAgentCanonicalSnapshotPtr& OutSnapshot, FAuthoringModelPtr& OutModel, FWorkspaceError& OutError,
+		const FAuthoringModel* AcceptedBindingBaseline = nullptr, const FCompositionUnitLookup& KeyedBaseline = {},
+		const FKeyedMemberNameLookup& KeyedNames = {});
+	bool TryBuildScopedCanonicalAuthoringCapture(const FString& TargetKind, const FString& ProfileId,
+		StateSemantic::FUeAgentCanonicalSnapshotPtr& Snapshot, ContextResource::FUeAgentResourceTracker& Resources,
+		FAuthoringModelPtr& OutModel, FWorkspaceError& OutError, const FAuthoringModel* AcceptedBindingBaseline = nullptr);
+	bool TryBuildCanonicalAuthoringSnapshot(const FString& TargetKind, const FString& ProfileId,
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot, ContextResource::FUeAgentResourceTracker& Resources,
+		StateSemantic::FUeAgentCanonicalSnapshotPtr& OutSnapshot, FWorkspaceError& OutError,
+		bool bIncludeAuthoringMetadata = true, bool bCompleteObservation = false);
+	/** Seal only the observer-visible entries for a published authoring projection. */
+	bool TryBuildVisibleAuthoringProjection(const FString& TargetKind, const FString& ProfileId,
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot, ContextResource::FUeAgentResourceTracker& Resources,
+		StateSemantic::FUeAgentCanonicalSnapshotPtr& OutSnapshot, FWorkspaceError& OutError);
+	/** Project a public profile value before a native verifier wraps that same observation. */
+	bool TryBuildVisibleAuthoringProjection(UeAgentAuthoringState::FStateEntry Entry,
+		StateSemantic::FUeAgentCanonicalSnapshotPtr& OutSnapshot, FWorkspaceError& OutError);
+	/** Readable namespace allocation over actual item observations. Uses the same
+	 * item identity/order and alias allocator as composition, without a Model. */
+	bool TryVisitSnapshotKeyedMemberNames(const FString& TargetKind, const StateSemantic::FUeAgentCanonicalSnapshot& Snapshot,
+		const FString& ItemSemanticId, const FString& RootField, FKeyedMemberNameVisitor Visitor, FWorkspaceError& OutError);
+	/** Original full capture revision grammar over an actual complete native
+	 * observation, without materializing every canonical entry/model. */
+	FCompositionSnapshotBinding BuildNativeAuthoringCaptureBinding(const FString& TargetKind,
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot);
+	/** Direct complete-output consumer. The native owner remains alive through
+	 * this synchronous projection; no second canonical snapshot is manufactured. */
+	bool TryBuildDirectAuthoringCapture(const FString& TargetKind, const FString& ProfileId,
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot, ContextResource::FUeAgentResourceTracker& Resources,
+		TOptional<FCompositionSnapshotBinding>& OutBinding, FAuthoringModelPtr& OutModel, FWorkspaceError& OutError);
+
+	/** Original header-only publication producer for net-zero actual output and
+	 * a proved old consumer-state migration. Public bodies remain untouched. */
+	bool TryBuildCommittedPublicationHeader(const FCompositionSnapshotBinding& Binding,
+		const FString& TargetKind, const FPreparedWorkspaceExport& Settings,
+		ContextResource::FUeAgentResourceTracker& Resources, FExportWorkspacePlanPtr& OutPlan, FWorkspaceError& Error);
 
 	UEAGENTINTERFACE_API bool TryBuildCompositionExportPlan(
 		FAuthoringModelRef Model,
@@ -239,7 +331,9 @@ namespace UE::UAI::HjsonWorkspace
 		TMap<FString, int64> Telemetry,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FExportWorkspacePlanPtr& OutPlan,
-		FWorkspaceError& OutError, const FString& TargetKind = FString());
+		FWorkspaceError& OutError, const FString& TargetKind = FString(),
+		const FPreparedWorkspaceExport* ExportSettings = nullptr,
+		TMap<FString, TPair<FString, FString>>* OutPendingAuthorLocations = nullptr);
 
 	UEAGENTINTERFACE_API bool TryExportCompositionWorkspace(
 		const FString& TargetKind,
@@ -248,6 +342,10 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& WorkspaceRoot,
 		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
 		FPreparedWorkspaceExport* PreparedExport = nullptr);
+	/** Shared mode/watermark finalization for every composition producer. */
+	bool TryPrepareCompositionExportState(const FString& TargetKind, const FAuthoringModel& Model,
+		const FCompositionSnapshotBinding& SnapshotBinding, ContextResource::FUeAgentResourceTracker& Resources,
+		FPreparedWorkspaceExport* PreparedExport, FWorkspaceError& Error);
 
 	/** Publish an already-built capture through the same planner and publisher.
 	 * Model and snapshot binding must come from the same canonical capture. */
@@ -277,6 +375,15 @@ namespace UE::UAI::HjsonWorkspace
 		const UeAgentAuthoringState::FStateSnapshot& Snapshot,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FAuthoringModelPtr& OutModel, FWorkspaceError& OutError);
+
+	bool IsCompositionDependencyPathField(const FString& Key);
+	bool IsCompositionAssetDependencies(const FSemanticUnit& Unit, const FString& OwnerId);
+	// Reprojects the derived dependency set only for domains whose contributing
+	// capture values are losslessly retained by the public units. False leaves
+	// the caller on its ordinary aggregate-conflict path.
+	UEAGENTINTERFACE_API bool TryCollectCompositionDependencyPaths(
+		const FSemanticUnit& Target, TConstArrayView<FSemanticUnit> Units,
+		TArray<FString>& OutPaths);
 
 	/** Reuses composition's type/value and definition projection for nested reflected records. */
 	UEAGENTINTERFACE_API bool TryProjectReflectedRecord(

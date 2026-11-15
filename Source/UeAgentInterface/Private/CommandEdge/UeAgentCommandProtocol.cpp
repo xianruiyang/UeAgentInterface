@@ -728,6 +728,32 @@ namespace UE::UAI::CommandEdge
 			Root->SetObjectField(TEXT("error"), Result.ToPublicError());
 			}
 		}
+		// Recovery custody is a machine result, including application failures.
+		// Project it before private diagnostic evidence is intentionally omitted
+		// from the public error. Do not reduce it to a human-only notice.
+		TArray<TSharedPtr<FJsonValue>> Journals;
+		TSet<FString> JournalIds;
+		TFunction<void(const FDiagnostic&)> CollectCustody = [&](const FDiagnostic& Diagnostic) {
+			if (Diagnostic.Code == TEXT("durable_recovery_custody_available") && Diagnostic.ActualEvidence.IsValid()
+				&& Diagnostic.ActualEvidence->Type == EJson::Object) {
+				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+				if (Diagnostic.ActualEvidence->AsObject()->TryGetArrayField(TEXT("durable_journals"), Values))
+					for (const auto& Value : *Values) {
+						FString Id;
+						if (Value.IsValid() && Value->Type == EJson::Object && Value->AsObject()->TryGetStringField(TEXT("journal_id"), Id)
+							&& !Id.IsEmpty() && !JournalIds.Contains(Id)) { JournalIds.Add(Id); Journals.Add(Value); }
+					}
+			}
+			for (const auto& Child : Diagnostic.Diagnostics) CollectCustody(Child);
+			if (Diagnostic.PublicCause) CollectCustody(*Diagnostic.PublicCause);
+		};
+		CollectCustody(Result.GetDiagnostic());
+		for (const auto& Diagnostic : Result.GetDiagnostics()) CollectCustody(Diagnostic);
+		if (!Journals.IsEmpty()) {
+			const TSharedPtr<FJsonObject>* Payload = nullptr;
+			if (Root->TryGetObjectField(TEXT("payload"), Payload)) (*Payload)->SetArrayField(TEXT("durable_journals"), MoveTemp(Journals));
+			else Root->SetArrayField(TEXT("durable_journals"), MoveTemp(Journals));
+		}
 		OutObject = MoveTemp(Root);
 		return true;
 	}

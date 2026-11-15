@@ -10,6 +10,7 @@
 #include "Utilities/AuthoringExport/UeAgentExportWorkspaceWriter.h"
 
 class UObject;
+namespace UE::UAI::HjsonWorkspace { class FResolvedSemanticWorkspace; }
 
 namespace UeAgentMaterialAuthoring
 {
@@ -37,11 +38,13 @@ namespace UeAgentMaterialAuthoring
 		UObject& Asset,
 		const FString& ProfileId,
 		FMaterialAuthoringCapture& OutCapture,
-		UE::UAI::Contract::FDiagnostic& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const UE::UAI::HjsonWorkspace::FResolvedSemanticWorkspace* ImportWorkspace = nullptr);
 
 	UEAGENTINTERFACE_API bool ExportAssetWorkspace(
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

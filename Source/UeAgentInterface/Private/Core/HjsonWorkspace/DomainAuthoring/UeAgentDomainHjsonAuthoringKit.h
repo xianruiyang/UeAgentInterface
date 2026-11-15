@@ -11,7 +11,7 @@
 #include "Templates/UniquePtr.h"
 
 class UBlueprint;
-namespace UeAgentAuthoringState { struct FReadRequest; }
+namespace UeAgentAuthoringState { class FStateSnapshot; struct FReadRequest; struct FCaptureResult; }
 namespace UeAgentAuthoringDiagnostics { class FScopedSourceLocations; }
 
 
@@ -107,6 +107,9 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		FString CompileNotSettledErrorCode;
 		// Same native read-request owner as export, regenerated after mutation.
 		TFunction<bool(TArray<UeAgentAuthoringState::FReadRequest>&, Contract::FDiagnostic&)> BuildFinalReadRequests;
+		// Structures consumed by the native operation, not the container query accessor.
+		TSet<FString> NativeStructureSemanticIds;
+		FProjectObservedGraphNodeFields ProjectObservedGraphNodeFields = nullptr;
 	};
 
 	UEAGENTINTERFACE_API bool TryReadNativeMutationPayload(const FString& Target,
@@ -159,6 +162,15 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture& OutCapture,
 		FWorkspaceError& OutError);
 
+	// Import consumers which capture their own typed authoring state need only
+	// the native object and its domain type admission, not a discarded graph.
+	UEAGENTINTERFACE_API bool TryLoadObjectTarget(
+		const FString& TargetIdentity, const TArray<FString>& ExpectedRootTypeIdentities,
+		UObject*& OutObject, FWorkspaceError& OutError);
+	UEAGENTINTERFACE_API bool TryLoadObjectTarget(
+		const FString& TargetIdentity, const FString& ExpectedRootTypeIdentity,
+		UObject*& OutObject, FWorkspaceError& OutError);
+
 	UEAGENTINTERFACE_API bool TryCaptureObject(
 		const FString& TargetIdentity,
 		const TArray<FString>& ExpectedRootTypeIdentities,
@@ -205,15 +217,6 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		const TSharedPtr<FJsonObject>& Document,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FExportWorkspacePlanPtr& OutPlan,
-		FWorkspaceError& OutError);
-
-	UEAGENTINTERFACE_API bool TryVerifyDomainHjsonStagedWorkspace(
-		const FString& StagedWorkspacePath,
-		const FString& TargetIdentity,
-		const FDomainHjsonDocumentContract& Contract,
-		const FString& BaseRevision,
-		const FString& EntryFile,
-		ContextResource::FUeAgentResourceTracker& Resources,
 		FWorkspaceError& OutError);
 
 	UEAGENTINTERFACE_API void SetWorkspaceErrorFromCommandFailure(
@@ -264,6 +267,11 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 		FString& OutRevision,
 		FWorkspaceError& OutError);
 
+	/** Identity of this adapter's declared import contract, not its current values.
+	 * Native before/changes and their evidence remain in the planning draft. */
+	UEAGENTINTERFACE_API Contract::FUeAgentDescriptorIdentity BuildSemanticWorkspaceImportDescriptor(
+		const FString& DescriptorId, const FAuthoringModel& Model, int32 DescriptorVersion = 1);
+
 	UEAGENTINTERFACE_API bool TryCoordinateRootPropertyImport(
 		const FResolvedSemanticWorkspaceRef& Workspace,
 		const FAuthoringModelRef& CurrentModel,
@@ -302,6 +310,23 @@ namespace UE::UAI::HjsonWorkspace::DomainAuthoring
 			FWorkspaceError& OutReadError)> TryReadback,
 		FString& OutPayloadJson,
 		FWorkspaceError& OutError);
+	/** Select actual field reads for an admitted property-only source view.
+	 * Keeps each domain's existing request policy/native binding; structural inputs are unchanged. */
+	UEAGENTINTERFACE_API void SelectPropertyImportReadRequests(
+		const FResolvedSemanticWorkspace& Workspace, TArray<UeAgentAuthoringState::FReadRequest>& Requests,
+		const FString& TargetSemanticId = FString());
+	/** Use the scoped composer when root-only selection narrowed the native planning capture. */
+	UEAGENTINTERFACE_API bool TryBuildPropertyImportCurrentCapture(const FResolvedSemanticWorkspace* Workspace,
+		const FString& TargetKind, const FString& ProfileId, const UeAgentAuthoringState::FStateSnapshot& Snapshot,
+		ContextResource::FUeAgentResourceTracker& Resources, StateSemantic::FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+		FAuthoringModelPtr& OutModel, FWorkspaceError& OutError);
+	UEAGENTINTERFACE_API bool HasOnlyRootPropertyIntents(const FResolvedSemanticWorkspace& Workspace);
+	UEAGENTINTERFACE_API void SelectRootPropertyImportReadRequests(
+		const FResolvedSemanticWorkspace& Workspace, TArray<UeAgentAuthoringState::FReadRequest>& Requests);
+	/** Pass already captured native root identity and unedited root properties to the committed consumer. */
+	UEAGENTINTERFACE_API bool CapturePropertyImportState(const FResolvedSemanticWorkspace& Workspace,
+		const TArray<UeAgentAuthoringState::FReadRequest>& Requests, UeAgentAuthoringState::FCaptureResult& OutCapture,
+		const FString& TargetSemanticId = FString());
 
 	UEAGENTINTERFACE_API bool TryReadCandidateSelector(
 		const TSharedPtr<const FJsonObject>& Candidate,

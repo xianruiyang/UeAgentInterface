@@ -2,6 +2,10 @@
 
 #include "CoreMinimal.h"
 
+class FJsonObject;
+namespace UeAgentAuthoringState { struct FReadRequest; struct FStateEntry; class FStateSnapshot; }
+namespace UE::UAI::Contract { struct FDiagnostic; }
+
 namespace UE::UAI::HjsonWorkspace
 {
 	/** A reference resolved by the import owner before native mutation. Final
@@ -15,4 +19,8 @@ namespace UE::UAI::HjsonWorkspace
 		FString AuthoredReference;
 		FString NativeReference;
 	};
+	/** Project authored node fields backed by separate entries in this final capture. */
+	using FProjectObservedGraphNodeFields = bool (*)(
+		FJsonObject&, UeAgentAuthoringState::FStateEntry&, const UeAgentAuthoringState::FStateSnapshot&,
+		const TArray<UeAgentAuthoringState::FReadRequest>*, Contract::FDiagnostic&);
 }

@@ -63,8 +63,9 @@ owned objects, optional ownership overrides, and cross-object references. Types
 are exact `/Script/...` identities. This provider supports the registered
 `UeAgentRecursiveDataAsset` root and `UeAgentRecursiveOwnedObject` children;
 it does not promise arbitrary DataAsset creation. The production owner parses through the
-common HJSON parser, builds the unified semantic model, and uses the common
-import-initialization planner before any write.
+common HJSON parser and gives the real node classes, explicit values, ownership
+and reference edges to the common import-initialization planner before any write.
+It does not compile an empty twelve-unit model or wrap an unused Unified model.
 
 Execution creates the root through AssetTools and `UDataAssetFactory`. Owned
 objects use `NewObject` with their real parent as `Outer`; native constructors
@@ -81,7 +82,7 @@ creation, and post-creation reference binding remain domain mechanics because
 the shared initialization planner only plans ordering and edges. Scalar and
 container values use the common UObject property codec/apply path. The domain
 maps the document fields `label`, `explicit_number`, `numbers`, and
-`named_numbers` to their native properties; omitted fields are not synthesized
+`named_numbers` within each node's `values` object to their native properties; omitted fields are not synthesized
 and therefore retain constructor defaults.
 
 Before creating the root, the provider prepares every node's scalar/container

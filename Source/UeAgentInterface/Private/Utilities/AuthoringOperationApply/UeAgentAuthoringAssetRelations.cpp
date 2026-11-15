@@ -211,7 +211,7 @@ bool FPlan::AppendReadRequests(bool bExpected, TArray<UeAgentAuthoringState::FRe
 			UeAgentAuthoringTargetLocator::FResolveResult Result;
 			UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
 			UE::UAI::Contract::FDiagnostic Error;
-			if (!UeAgentAuthoringState::BuildPropertyReadRequest(Object, Property.ToString(), TEXT("core.property"), Request, Result, Node.ObjectPath))
+			if (!UeAgentAuthoringState::BuildPropertyReadRequest(Object, Property.ToString(), TEXT("core.property"), Request, Result))
 			{
 				OutFailure.Diagnostic = UE::UAI::Contract::FDiagnostic::WrapFailure(
 					TEXT("asset_relation_snapshot_invalid"), Result.Diagnostic, TEXT("asset_relation_readback"));
@@ -224,6 +224,9 @@ bool FPlan::AppendReadRequests(bool bExpected, TArray<UeAgentAuthoringState::FRe
 				return false;
 			}
 			Request.SnapshotIdentityOverride = Identity;
+			// The profile publishes the selected asset's child list. These native
+			// reads verify each affected object's two sides, including preview objects.
+			Request.MarkVerificationOnly();
 			OutRequests.Add(MoveTemp(Request));
 		}
 	}

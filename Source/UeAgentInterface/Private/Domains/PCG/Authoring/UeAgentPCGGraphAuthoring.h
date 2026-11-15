@@ -9,6 +9,7 @@
 
 class FJsonObject;
 class UPCGGraph;
+class UPCGNode;
 
 namespace UE::UAI::HjsonWorkspace { class FResolvedSemanticWorkspace; struct FGraphAuthoringConnectionContext; }
 
@@ -30,6 +31,7 @@ namespace UeAgentPCGAuthoring
 		const FString& FromPin,
 		const FString& ToNode,
 		const FString& ToPin);
+	TSharedRef<FJsonObject> BuildNodeState(UPCGGraph& Graph, UPCGNode& Node);
 	UEAGENTINTERFACE_API bool BuildGraphDocument(
 		UPCGGraph& Graph,
 		TSharedPtr<FJsonObject>& OutDocument,

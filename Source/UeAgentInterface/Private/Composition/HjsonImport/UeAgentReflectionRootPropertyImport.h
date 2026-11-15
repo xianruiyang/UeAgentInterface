@@ -3,12 +3,14 @@
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 
 namespace UeAgentReflectionAuthoring { struct FProfile; }
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
 
 namespace UE::UAI::Composition::HjsonImport
 {
 	UEAGENTINTERFACE_API bool TryExportReflectionRootWorkspace(
 		const UeAgentReflectionAuthoring::FProfile& Profile, const FString& Target,
-		const FString& WorkspacePath, FString& OutPayload, HjsonWorkspace::FWorkspaceError& OutError);
+		const FString& WorkspacePath, FString& OutPayload, HjsonWorkspace::FWorkspaceError& OutError,
+		HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 	/** Reflection capture/apply bridge. Domain-specific property ordering stays with the caller. */
 	UEAGENTINTERFACE_API bool TryImportReflectionWorkspace(
 		const UeAgentReflectionAuthoring::FProfile& Profile,

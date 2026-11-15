@@ -5,6 +5,8 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDocuments.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
+#include "Animation/AnimBlueprint.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
 #include "UObject/Object.h"
@@ -103,6 +105,21 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
     if (Profile->Kind == EAssetKind::AnimSequence || Profile->Kind == EAssetKind::BlendSpace ||
         Profile->Kind == EAssetKind::Skeleton || Profile->Kind == EAssetKind::AnimMontage || Profile->Kind == EAssetKind::PoseAsset)
       OutValue.bEditable = true;
+    if (Profile->Kind == EAssetKind::AnimBlueprint) {
+      const FString* Graphs = Request.Context.Find(UeAgentBlueprintAuthoring::ObservedGraphGuidsContext);
+      if (Graphs) {
+        OutValue.bAuthoringVisible = false;
+        if (Request.bCaptureAuthoringProjection) {
+          const FString Path = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+          TArray<UeAgentAuthoringState::FReadRequest> Roots;
+          if (!AddRequest(*Profile, Profile->ExportTargetSemanticId, Path, Asset, false, Roots, OutError)
+              || !AddRequest(*Profile, AnimBlueprintSettingsSemanticId, Path, Asset, false, Roots, OutError)
+              || !UeAgentBlueprintAuthoring::CaptureObservedGraphBodies(*CastChecked<UAnimBlueprint>(Asset),
+                  Path, *Graphs, TEXT("ue.anim_blueprint.asset"), MoveTemp(Roots), OutValue, OutError, &Request.Context))
+            return UeAgentAuthoringState::EReadOutcome::Failed;
+        }
+      }
+    }
   } else {
     OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_state_semantic_unsupported"),
         TEXT("The requested semantic is not supported by this animation state profile."), TEXT("state_capture"), Request.SemanticId);
@@ -213,6 +230,7 @@ bool BuildAssetExportSnapshotReadRequests(
   if (!AddRequest(Profile, Profile.ExportTargetSemanticId, AssetPath, &Asset,
                   false, OutRequests, OutError))
     return false;
+  OutRequests.Last().MarkExportTarget();
   UeAgentAuthoringState::FEditablePropertyReadOptions Options;
   Options.SemanticId = TEXT("core.property");
   Options.ExcludedProperties = GetDomainOwnedRootProperties(Profile.Kind);

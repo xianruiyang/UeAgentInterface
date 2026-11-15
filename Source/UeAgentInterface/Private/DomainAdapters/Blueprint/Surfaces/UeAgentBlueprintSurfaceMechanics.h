@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 {
 	UEAGENTINTERFACE_API bool TryExecuteContentGraph(
@@ -11,5 +13,6 @@ namespace UE::UAI::DomainAdapters::Blueprint::Surfaces
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		HjsonWorkspace::FWorkspaceError& OutError);
+		HjsonWorkspace::FWorkspaceError& OutError,
+		HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

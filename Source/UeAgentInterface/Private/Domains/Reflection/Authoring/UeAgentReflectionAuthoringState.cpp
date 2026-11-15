@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringState.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Domains/Reflection/Authoring/UeAgentPaperAtlasAuthoringState.h"
 #include "Domains/Material/Authoring/UeAgentMaterialCollectionAuthoring.h"
 #include "Domains/PCG/Authoring/UeAgentPcgDataAssetAuthoring.h"
@@ -144,6 +146,21 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
         OutError.ExpectedValue = MakeShared<FJsonValueString>(*AtlasMode);
         return UeAgentAuthoringState::EReadOutcome::Failed;
       }
+      if (Request.bCaptureAuthoringProjection) {
+        // Seal the real public target before adding the private comparison of atlas slots and pages.
+        UeAgentAuthoringState::FStateEntry Public;
+        Public.SemanticId = Request.SemanticId;
+        Public.TargetIdentity = Request.TargetIdentity;
+        Public.Type = OutValue.Type;
+        Public.Provenance = OutValue.Provenance;
+        Public.Value = MakeShared<FJsonValueObject>(Value);
+        UE::UAI::HjsonWorkspace::FWorkspaceError Error;
+        if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(MoveTemp(Public), OutValue.AuthoringProjection, Error)) {
+          OutError = Error.GetDiagnostic();
+          return UeAgentAuthoringState::EReadOutcome::Failed;
+        }
+        OutValue.bAuthoringVisible = false;
+      }
       Value->SetField(TEXT("atlas_state"), AtlasState->Capture(*AtlasMode == TEXT("expected")));
     }
     if (const auto* Sequence = Cast<ULevelSequence>(Asset))
@@ -153,10 +170,12 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
              Request.SemanticId == Profile->ProfileStateSemanticId) {
     TSharedPtr<FJsonValue> ProfileStateValue;
     bool bAuthoringVisible = true;
+    TOptional<UeAgentAuthoringState::FStateSnapshot> PublicStructure;
     if (!ProfileState::Read(
             *Profile, *Asset,
             Request.TargetIdentity.GetSelector(TEXT("asset_path")),
-            ProfileStateValue, bAuthoringVisible, OutError)) {
+            ProfileStateValue, bAuthoringVisible, OutError,
+            Request.bCaptureAuthoringProjection ? &PublicStructure : nullptr)) {
       return UeAgentAuthoringState::EReadOutcome::Failed;
     }
     if (!ProfileStateValue.IsValid()) {
@@ -164,7 +183,38 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
       OutValue.AvailabilityReason = TEXT("profile_state_absent");
       return UeAgentAuthoringState::EReadOutcome::Unavailable;
     }
-    if (Request.Context.FindRef(SequenceMetadataContext) == TEXT("true")) {
+    const bool bSequenceMetadata = Request.Context.FindRef(SequenceMetadataContext) == TEXT("true");
+    const bool bPcgPreservation = Request.Context.Contains(PcgDataPreservationContext);
+    if (PublicStructure.IsSet()) {
+      // The private verification document and the exported structure were read
+      // together. The separate target request already supplies the public root.
+      auto Resources = UE::UAI::HjsonWorkspace::MakeSemanticWorkspaceResourceTracker();
+      UE::UAI::HjsonWorkspace::FWorkspaceError Error;
+      const FString Kind = UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(Profile->TargetKind, Profile->TypeId);
+      if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(
+              Kind, TEXT("llm_authoring"), *PublicStructure, Resources, OutValue.AuthoringProjection, Error)) {
+        OutError = Error.GetDiagnostic();
+        return UeAgentAuthoringState::EReadOutcome::Failed;
+      }
+      bAuthoringVisible = false;
+    } else if (Request.bCaptureAuthoringProjection && bAuthoringVisible && (bSequenceMetadata || bPcgPreservation)) {
+      // The native comparison below needs private preservation fields. The
+      // public consumer needs the structure exactly as read, before wrapping.
+      UeAgentAuthoringState::FStateEntry Public;
+      Public.SemanticId = Request.SemanticId;
+      Public.TargetIdentity = Request.TargetIdentity;
+      Public.Type = OutValue.Type;
+      Public.Value = ProfileStateValue;
+      Public.Provenance = OutValue.Provenance;
+      Public.bEditable = true;
+      if (bPcgPreservation) Public.ValueDefinition = MakeShared<FJsonValueObject>(UeAgentPcgDataAssetAuthoring::BuildValueDefinition());
+      UE::UAI::HjsonWorkspace::FWorkspaceError Error;
+      if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(MoveTemp(Public), OutValue.AuthoringProjection, Error)) {
+        OutError = Error.GetDiagnostic();
+        return UeAgentAuthoringState::EReadOutcome::Failed;
+      }
+    }
+    if (bSequenceMetadata) {
       const ULevelSequence* Sequence = Cast<ULevelSequence>(Asset);
       TSharedPtr<FJsonObject> Metadata;
       UE::UAI::DomainAdapters::TimelineAnimation::FUeAgentTimelineAnimationExecutionError Error;
@@ -182,7 +232,7 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
       ProfileStateValue = MakeShared<FJsonValueObject>(InternalState);
       bAuthoringVisible = false;
     }
-    if (Request.Context.Contains(PcgDataPreservationContext)) {
+    if (bPcgPreservation) {
       auto* Data = Cast<UPCGDataAsset>(Asset);
       if (!Data) { OutError = ProfileState::TargetFailure(TEXT("pcg_data_target_invalid"), *Asset, *UPCGDataAsset::StaticClass(), TEXT("state_capture")); return UeAgentAuthoringState::EReadOutcome::Failed; }
       UeAgentPcgDataAssetAuthoring::AppendPreservationSnapshot(*Data, ProfileStateValue);
@@ -307,6 +357,7 @@ bool BuildAssetExportSnapshotReadRequests(
   if (!AddRequest(Profile, Profile.ExportTargetSemanticId, AssetPath, &Asset,
                   false, OutRequests, OutError))
     return false;
+  OutRequests.Last().MarkExportTarget();
   if (!Profile.GenerationInputSemanticId.IsEmpty() &&
       (!AddRequest(Profile, Profile.GenerationInputSemanticId, AssetPath, &Asset, false, OutRequests, OutError) ||
        !AddRequest(Profile, Profile.GeneratedStateSemanticId, AssetPath, &Asset, false, OutRequests, OutError))) return false;

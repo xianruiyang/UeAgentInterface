@@ -1018,6 +1018,7 @@ bool BuildAssetSnapshotReadRequests(
                   {{TEXT("asset_path"), AssetPath}})) {
     return false;
   }
+  OutRequests.Last().MarkExportTarget();
   if (!bIncludeStack)
     return true;
 

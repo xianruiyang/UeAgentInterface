@@ -5,6 +5,7 @@
 #include "Composition/HjsonImport/UeAgentSemanticWorkspaceImport.h"
 
 class UWorld;
+class UPackage;
 class FJsonObject;
 
 namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
@@ -19,7 +20,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		Composition::HjsonImport::FPreparedAuthoringImportPtr& OutPrepared,
 		TSharedRef<FJsonObject>& OutBundle, HjsonWorkspace::FWorkspaceError& OutError,
 		TFunction<Contract::FSourceLocation(const FString&, const FString&)>* OutSourceResolver = nullptr,
-		UeAgentLevelAuthoring::FLevelAuthoringCapture* OutCapture = nullptr);
+		UeAgentLevelAuthoring::FLevelAuthoringCapture* OutCapture = nullptr,
+		TFunction<void(UWorld*, TArray<UPackage*>*)>* OutPartitionReadScope = nullptr);
 	struct UEAGENTINTERFACE_API FUeAgentWorldActorCandidateQuery final
 	{
 		FString Target;

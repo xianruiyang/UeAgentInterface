@@ -970,7 +970,8 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 			const FString& RootType,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -993,7 +994,7 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 			}
 
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
-			if (!UeAgentAnimationAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentAnimationAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic, Target);
 				return false;
@@ -1010,7 +1011,8 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -1093,7 +1095,8 @@ namespace UE::UAI::DomainAdapters::AnimationCurve
 				RootTypeIdentity,
 				Params,
 				OutPayloadJson,
-				OutError);
+				OutError,
+				PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

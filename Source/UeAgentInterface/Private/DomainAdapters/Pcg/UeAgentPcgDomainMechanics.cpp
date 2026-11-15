@@ -338,9 +338,7 @@ namespace UE::UAI::DomainAdapters::Pcg
 				using namespace UE::UAI::Composition::HjsonImport;
 
 				UObject* TargetObject = nullptr;
-				DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture TargetCapture;
-				if (!TryCaptureObject(
-						Target, GraphType, TargetObject, TargetCapture, OutError))
+				if (!TryLoadObjectTarget(Target, GraphType, TargetObject, OutError))
 				{
 					return false;
 				}
@@ -383,8 +381,9 @@ namespace UE::UAI::DomainAdapters::Pcg
 					OutError.SetFailure(CaptureError, Target);
 					return false;
 				}
+				SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
 				UeAgentAuthoringState::FCaptureResult Capture;
-				if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+				if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 				{
 					OutError.SetFailure(Capture.Diagnostic, Target);
 					return false;
@@ -394,7 +393,7 @@ namespace UE::UAI::DomainAdapters::Pcg
 					MakeSemanticWorkspaceResourceTracker();
 				StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 				FAuthoringModelPtr Model;
-				if (!TryBuildCanonicalAuthoringCapture(
+				if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(),
 					TEXT("ue.pcg_graph.asset"), TEXT("llm_authoring"),
 					Capture.Snapshot, Resources, CanonicalSnapshot, Model, OutError))
 				{
@@ -407,9 +406,7 @@ namespace UE::UAI::DomainAdapters::Pcg
 				return TryCoordinateSemanticWorkspaceImport(
 					Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 					CanonicalSnapshot.ToSharedRef(),
-					Contract::FUeAgentDescriptorIdentity(
-						TEXT("pcg.semantic_workspace"), 1,
-						Model->GetSemanticFingerprint()),
+					BuildSemanticWorkspaceImportDescriptor(TEXT("pcg.semantic_workspace"), *Model),
 					TargetObjectPath, Resources,
 					{
 						TEXT("pcg-domain-provider"), Target, TargetObjectPath,
@@ -440,9 +437,10 @@ namespace UE::UAI::DomainAdapters::Pcg
 						TSharedPtr<FJsonObject> GraphDocument;
 						auto Connections = MakeShared<UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext>();
 						UE::UAI::Contract::FDiagnostic ProjectionError;
-						if (!UeAgentPCGAuthoring::TryBuildNativeGraphDocumentFromSemanticModel(
+						const bool bRootPropertiesOnly = HasOnlyRootPropertyIntents(*Prepared.GetWorkspace());
+						if (!bRootPropertiesOnly && (!UeAgentPCGAuthoring::TryBuildNativeGraphDocumentFromSemanticModel(
 							Prepared.GetWorkspace()->GetModel(), GraphDocument, ProjectionError, &Prepared.GetWorkspace().Get(), &Connections.Get())
-							|| !AppendResolvedNodeProperties(Prepared, Projection, GraphDocument, ProjectionError))
+							|| !AppendResolvedNodeProperties(Prepared, Projection, GraphDocument, ProjectionError)))
 						{
 							if (ProjectionError.TargetPath.IsEmpty()) ProjectionError.TargetPath = TargetPackage;
 							OutOutcome.Diagnostic = ProjectionError;
@@ -460,7 +458,7 @@ namespace UE::UAI::DomainAdapters::Pcg
 						ApplyRequest.bSave = true;
 						ApplyRequest.FinalReadback = OutOutcome.FinalReadback;
 						FString ParameterUnitId;
-						for (const auto& Unit : Prepared.GetWorkspace()->GetModel()->GetUnits())
+						if (!bRootPropertiesOnly) for (const auto& Unit : Prepared.GetWorkspace()->GetModel()->GetUnits())
 						{
 							if (Unit.GetSemanticTypeRef() != UeAgentPCGAuthoring::ExportParametersSemanticId) continue;
 							ParameterUnitId = Unit.GetUnitId();
@@ -713,7 +711,8 @@ namespace UE::UAI::DomainAdapters::Pcg
 			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -741,7 +740,7 @@ namespace UE::UAI::DomainAdapters::Pcg
 			}
 			if (!EnsureAuthoringRegistered(OutError)) return false;
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
-			if (!UeAgentPCGAuthoring::ExportAssetWorkspace(*Graph, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentPCGAuthoring::ExportAssetWorkspace(*Graph, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic, Target);
 				return false;
@@ -758,7 +757,8 @@ namespace UE::UAI::DomainAdapters::Pcg
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -794,7 +794,7 @@ namespace UE::UAI::DomainAdapters::Pcg
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return TryExport(Target, Params, OutPayloadJson, OutError);
+			return TryExport(Target, Params, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

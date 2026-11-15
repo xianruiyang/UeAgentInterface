@@ -72,15 +72,22 @@ namespace UE::UAI::HjsonWorkspace
 		}
 		else if (Kind == TEXT("keys"))
 		{
-			Row = O({{TEXT("time"), O({{TEXT("tick"), S(TEXT("0"))}, {TEXT("rate"), O({
+			const auto Time = O({{TEXT("tick"), S(TEXT("0"))}, {TEXT("rate"), O({
 				{TEXT("numerator"), S(TEXT("<current tick resolution numerator>"))},
-				{TEXT("denominator"), S(TEXT("<current tick resolution denominator>"))}})}})},
-				{TEXT("value"), S(TEXT("<value of this channel's declared type>"))}});
-			Notes.Add(TEXT("Replace rate placeholders with the current timeline's positive integer tick resolution; keep its native clock. Replace value with this channel's typed value. Native child defaults supply omitted interpolation/tangent fields."));
+				{TEXT("denominator"), S(TEXT("<current tick resolution denominator>"))}})}});
+			const auto NewKey = [&Time](const TCHAR* Field, const V& Value) {
+				return O({{TEXT("NewItem"), O({{TEXT("time"), Time}, {Field, Value}})}});
+			};
+			return {
+				{TEXT("scalar_key"), NewKey(TEXT("value_lexeme"), S(TEXT("<channel value as text>"))),
+					{TEXT("For numeric, string, boolean and enum channels, supply the channel's exact text lexeme. Use the current tick resolution. Preserve existing keys; native defaults supply omitted interpolation and tangent fields.")}},
+				{TEXT("reference_key"), NewKey(TEXT("value"), O({{TEXT("path"), S(TEXT("<compatible object or class path>"))}})),
+					{TEXT("For ObjectPath channels, supply a reference compatible with the native property or a null path. Use the current tick resolution and preserve existing keys.")}}
+			};
 		}
 		else if (Kind == TEXT("rig_elements"))
 		{
-			Key = TEXT("Null:Example"); Row = O({{TEXT("kind"), S(TEXT("Null"))}, {TEXT("name"), S(TEXT("Example"))}});
+			Key = TEXT("null:Example"); Row = O({{TEXT("kind"), S(TEXT("null"))}, {TEXT("name"), S(TEXT("Example"))}});
 		}
 		else if (Kind == TEXT("rig_graphs"))
 		{

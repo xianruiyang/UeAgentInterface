@@ -3,6 +3,7 @@
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringExport.h"
 
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringDescriptors.h"
 #include "Dom/JsonValue.h"
 #include "UObject/Class.h"
@@ -16,7 +17,8 @@ namespace UeAgentMaterialAuthoring
 		UObject& Asset,
 		const FString& ProfileId,
 		FMaterialAuthoringCapture& OutCapture,
-		UE::UAI::Contract::FDiagnostic& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const UE::UAI::HjsonWorkspace::FResolvedSemanticWorkspace* ImportWorkspace)
 	{
 		OutCapture = FMaterialAuthoringCapture();
 		OutError.Reset();
@@ -49,12 +51,19 @@ namespace UeAgentMaterialAuthoring
 		}
 
 		TArray<UeAgentAuthoringState::FReadRequest> Requests;
-		if (!BuildAssetExportSnapshotReadRequests(Asset, Requests, OutError))
+		const bool bScopedRoot = ImportWorkspace && !ImportWorkspace->GetModel()->IsCompiled()
+			&& UE::UAI::HjsonWorkspace::DomainAuthoring::HasOnlyRootPropertyIntents(*ImportWorkspace);
+		const auto BuildRequests = bScopedRoot ? BuildRootPropertyReadRequests : BuildAssetExportSnapshotReadRequests;
+		if (!BuildRequests(Asset, Requests, OutError))
 		{
 			return false;
 		}
+		if (ImportWorkspace) UE::UAI::HjsonWorkspace::DomainAuthoring::SelectRootPropertyImportReadRequests(*ImportWorkspace, Requests);
 		UeAgentAuthoringState::FCaptureResult Capture;
-		if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+		const bool bCaptured = ImportWorkspace
+			? UE::UAI::HjsonWorkspace::DomainAuthoring::CapturePropertyImportState(*ImportWorkspace, Requests, Capture)
+			: UeAgentAuthoringState::CaptureSnapshot(Requests, Capture);
+		if (!bCaptured)
 		{
 			OutError = Capture.Diagnostic;
 			return false;
@@ -63,7 +72,7 @@ namespace UeAgentMaterialAuthoring
 		UE::UAI::ContextResource::FUeAgentResourceTracker Resources =
 			UE::UAI::HjsonWorkspace::MakeSemanticWorkspaceResourceTracker();
 		UE::UAI::HjsonWorkspace::FWorkspaceError WorkspaceError;
-		if (!UE::UAI::HjsonWorkspace::TryBuildCanonicalAuthoringCapture(
+		if (!UE::UAI::HjsonWorkspace::DomainAuthoring::TryBuildPropertyImportCurrentCapture(ImportWorkspace,
 				OutCapture.TargetKind,
 				ProfileId,
 				OutCapture.Snapshot,
@@ -102,7 +111,8 @@ namespace UeAgentMaterialAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport)
 	{
   auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
@@ -115,6 +125,6 @@ namespace UeAgentMaterialAuthoring
 			return false;
 		}
 
-		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(Capture.TargetKind, ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
+		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(Capture.TargetKind, ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult, PreparedExport);
 	}
 }

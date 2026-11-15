@@ -398,6 +398,13 @@ namespace UeAgentReflectionAuthoring::ProfileState
 		bool& bOutAuthoringVisible,
 		UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		return Read(Profile, Asset, SemanticAssetPath, OutValue, bOutAuthoringVisible, OutError, nullptr);
+	}
+
+	bool Read(const FProfile& Profile, UObject& Asset, const FString& SemanticAssetPath,
+		TSharedPtr<FJsonValue>& OutValue, bool& bOutAuthoringVisible,
+		UE::UAI::Contract::FDiagnostic& OutError, TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
+	{
 		ON_SCOPE_EXIT { BindTarget(OutError, Asset.GetPathName(), SemanticAssetPath); };
         if (Profile.TypeId == TEXT("physics_asset")) {
             bOutAuthoringVisible = true;
@@ -473,13 +480,13 @@ namespace UeAgentReflectionAuthoring::ProfileState
 		}
 		if (ProfileStateAI::Supports(Profile))
 		{
-			return ProfileStateAI::Read(Profile, Asset, OutValue, OutError);
+			return ProfileStateAI::Read(Profile, Asset, OutValue, OutError, OutStructure);
 		}
 		if (ProfileStateSequenceStateTree::Supports(Profile))
 		{
 			return ProfileStateSequenceStateTree::Read(
 				Profile, Asset, SemanticAssetPath, OutValue,
-				bOutAuthoringVisible, OutError);
+			bOutAuthoringVisible, OutError, OutStructure);
 		}
 		OutError = SurfaceFailure(Profile);
 		return false;

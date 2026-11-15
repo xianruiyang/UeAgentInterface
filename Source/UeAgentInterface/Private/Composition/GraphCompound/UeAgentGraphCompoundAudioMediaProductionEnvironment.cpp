@@ -15,6 +15,7 @@
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/StateSemantic/UeAgentStateSemanticEvidence.h"
 #include "Core/Verification/UeAgentIndependentReadback.h"
 #include "DomainAdapters/AudioMediaGraph/UeAgentAudioMediaGraphMetaSoundNativeHook.h"
 #include "DomainAdapters/AudioMediaGraph/UeAgentAudioMediaGraphSoundCueNativeHook.h"
@@ -3378,15 +3379,6 @@ namespace UE::UAI::Composition::GraphCompound
 				return false;
 			}
 		}
-		const FString Expected = Plan->GetObservedRevision().GetGeneration();
-		if (Expected.IsEmpty())
-		{
-			OutError = AudioMediaFailure(TEXT("texture_graph_semantic_composite_revision_missing"),
-				TEXT("The TextureGraph semantic composite plan has no observed revision generation."),
-				Request.TargetRef, TEXT("plan.observed_revision.generation.present"),
-				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
-			return false;
-		}
 		using namespace DomainAdapters::ContentGraphRead;
 		FUeAgentContentGraphCapture Capture;
 		FUeAgentContentGraphReadError CaptureError;
@@ -3400,7 +3392,15 @@ namespace UE::UAI::Composition::GraphCompound
 				Request.TargetRef, TEXT("asset"), nullptr, MakeShared<FJsonValueString>(TEXT("loadable TextureGraph asset")));
 			return false;
 		}
-		if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(*Asset, Capture, CaptureError)
+		TMap<int32, TSet<FString>> Fields;
+		for (const auto& Change : Plan->GetChangeSet().GetChanges()) {
+			if (Change.GetIdentity().GetSemanticId() != TEXT("uai.semantic.texture_graph.setting")) continue;
+			int32 NodeIndex = INDEX_NONE;
+			if (LexTryParseString(NodeIndex, *Change.GetIdentity().GetSelector(TEXT("node_index"))) && NodeIndex >= 0)
+				Fields.FindOrAdd(NodeIndex).Add(Change.GetIdentity().GetSelector(TEXT("property_path")));
+		}
+		const bool bTopology = Request.BeforeSnapshot.IsValid();
+		if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureTextureGraphSettings(*Asset, Fields, Capture, CaptureError, bTopology)
 			|| !TryBuildContentGraphAuthoringSnapshot(Capture, Resources, Snapshot, CaptureError))
 		{
 			OutError = CaptureError;
@@ -3408,36 +3408,77 @@ namespace UE::UAI::Composition::GraphCompound
 			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.TargetRef;
 			return false;
 		}
-		if (Snapshot->GetRevision() != Plan->GetObservedRevision())
-		{
-			const FUeAgentStateRevision& ActualRevision = Snapshot->GetRevision();
-			const FUeAgentStateRevision& ExpectedRevision = Plan->GetObservedRevision();
-			if (ActualRevision.GetSourceId() != ExpectedRevision.GetSourceId())
-			{
-				OutError = AudioMediaFailure(TEXT("graph_compound_audio_media_revision_conflict"),
-					TEXT("The current TextureGraph revision source differs from the plan's observed source."),
-					Request.TargetRef, TEXT("revision.source_matches_expected"),
-					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
-				OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualRevision.GetSourceId());
-				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedRevision.GetSourceId());
+		// Observation generation describes captured content/scope, not the
+		// native identity. Index the existing identity with only generation
+		// normalized, then bind the freshly read facts to the original key.
+		auto IsNativeBefore = [](const FUeAgentStateEntry& Entry) {
+			const auto& Semantic = Entry.GetIdentity().GetSemanticId();
+			// Compact editable inputs/aliases are already captured in their node.
+			// Evaluated pin output is observation, not a write-before invariant.
+			return Semantic != TEXT("uai.semantic.texture_graph.pin_value")
+				&& Semantic != TEXT("uai.semantic.texture_graph.parameter");
+		};
+		auto BeforeValue = [&](const FUeAgentStateEntry& Entry, FUeAgentCanonicalValuePtr& OutValue) {
+			OutValue = Entry.GetValue();
+			const auto& Semantic = Entry.GetIdentity().GetSemanticId();
+			if (Semantic != TEXT("uai.semantic.texture_graph.node") && Semantic != TEXT("uai.semantic.texture_graph.pin")) return true;
+			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
+			for (const auto& Field : Entry.GetValue()->GetObjectItems()) {
+				if ((Semantic == TEXT("uai.semantic.texture_graph.node") && Field.Key == TEXT("name"))
+					|| (Semantic == TEXT("uai.semantic.texture_graph.pin") && Field.Key == TEXT("value"))) continue;
+				Fields.Add(Field);
 			}
-			else if (ActualRevision.GetGeneration() != ExpectedRevision.GetGeneration())
-			{
-				OutError = AudioMediaFailure(TEXT("graph_compound_audio_media_revision_conflict"),
-					TEXT("The current TextureGraph revision generation differs from the plan's observed generation."),
-					Request.TargetRef, TEXT("revision.generation_matches_expected"),
-					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
-				OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualRevision.GetGeneration());
-				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedRevision.GetGeneration());
+			FUeAgentStateSemanticError Error;
+			if (!FUeAgentCanonicalValue::TryObject(Fields, *Resources, OutValue, Error)) { OutError = MoveTemp(Error); return false; }
+			return true;
+		};
+		TMap<FString, const FUeAgentStateEntry*> BeforeByNativeKey;
+		if (bTopology) for (const auto& Entry : Request.BeforeSnapshot->GetEntries())
+			if (IsNativeBefore(Entry)) BeforeByNativeKey.Add(Entry.GetIdentity().WithGeneration(TEXT("authoring-binding/1")).GetCanonicalKey(), &Entry);
+		TArray<FUeAgentStateEntry> Entries;
+		Entries.Reserve(Snapshot->NumEntries());
+		int32 ComparedEntries = 0;
+		for (const auto& Captured : Snapshot->GetEntries()) {
+			auto Entry = Captured;
+			if (bTopology && IsNativeBefore(Entry)) {
+				const auto* Before = BeforeByNativeKey.FindRef(Entry.GetIdentity().WithGeneration(TEXT("authoring-binding/1")).GetCanonicalKey());
+				if (!Before) return FailRequest(TEXT("The observed TextureGraph topology or native binding changed before application."),
+					TEXT("/before/native_identity"), MakeShared<FJsonValueString>(Entry.GetIdentity().GetCanonicalKey()),
+					MakeShared<FJsonValueString>(TEXT("the captured native binding")));
+				FUeAgentSemanticComparison Comparison;
+				FUeAgentStateSemanticError StateError;
+				FUeAgentCanonicalValuePtr ExpectedValue, CurrentValue;
+				if (!BeforeValue(*Before, ExpectedValue) || !BeforeValue(Entry, CurrentValue)) return false;
+				if (!TryCompareValues(ExpectedValue.ToSharedRef(), CurrentValue.ToSharedRef(), TEXT("/before/entries/") + FString::FromInt(ComparedEntries), *Resources, Comparison, StateError)) {
+					OutError = MoveTemp(StateError); return false;
+				}
+				if (!Comparison.IsEquivalent()) {
+					OutError = MakeComparisonDiagnostic(Comparison, TEXT("texture_graph_semantic_before_conflict"),
+						TEXT("The captured TextureGraph topology, compact input or selected setting changed before application."), TEXT("preflight"), TEXT("uai.authoring.diagnostic/1"));
+					OutError.TargetPath = Request.TargetRef; return false;
+				}
+				Entry = Entry.WithIdentityAndDefault(Before->GetIdentity(), Entry.GetDefault(), Entry.GetObservedRevision());
+				++ComparedEntries;
+			} else for (const auto& Condition : Plan->GetPreconditions()) {
+				const auto Identity = Entry.GetIdentity().WithCapturedBinding(Condition.GetIdentity().GetCanonicalKey());
+				if (Identity.IsSet()) { Entry = Entry.WithIdentityAndDefault(Identity.GetValue(), Entry.GetDefault(), Entry.GetObservedRevision()); break; }
 			}
-			else
-				OutError = AudioMediaFailure(TEXT("graph_compound_audio_media_revision_conflict"),
-					TEXT("The current TextureGraph revision sequence differs from the plan's observed sequence."),
-					Request.TargetRef, TEXT("revision.sequence"),
-					MakeShared<FJsonValueString>(::LexToString(ActualRevision.GetSequence())),
-					MakeShared<FJsonValueString>(::LexToString(ExpectedRevision.GetSequence())));
-			return false;
+			Entries.Add(MoveTemp(Entry));
 		}
+		if (bTopology && ComparedEntries != BeforeByNativeKey.Num())
+			return FailRequest(TEXT("A captured TextureGraph node, port, relation or selected setting disappeared before application."),
+				TEXT("/before/observed_entries"), MakeShared<FJsonValueNumber>(ComparedEntries), MakeShared<FJsonValueNumber>(BeforeByNativeKey.Num()));
+		FUeAgentCanonicalSnapshotPtr Bound;
+		FUeAgentStateSemanticError StateError;
+		if (!FUeAgentCanonicalSnapshot::TryCreate(Snapshot->GetSnapshotId(), Snapshot->GetStatePlane(), Snapshot->GetRevision(),
+			Snapshot->GetCapturedAt(), Snapshot->GetProvenance(), MoveTemp(Entries), *Resources, Bound, StateError)) {
+			OutError = MoveTemp(StateError); return false;
+		}
+		FPlanningPreflightError Error;
+		const FUeAgentCallerContext Caller(Plan->GetCallerId(), Plan->GetAuthorityScopes(), Plan->GetRequestId());
+		if (!TryRevalidateFieldPlan(Plan, Bound.ToSharedRef(), Caller, *Resources, Error)) { OutError = MoveTemp(Error); return false; }
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=texture_semantic_preconditions fields=%d topology_entries=%d complete_asset_capture=false revision_identity=false"),
+			Plan->GetPreconditions().Num(), ComparedEntries);
 		return true;
 	}
 

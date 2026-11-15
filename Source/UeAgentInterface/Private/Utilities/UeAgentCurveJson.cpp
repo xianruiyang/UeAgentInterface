@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Utilities/UeAgentCurveJson.h"
+#include "Utilities/UeAgentNativeNumberFormat.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
@@ -296,28 +297,28 @@ namespace UeAgentCurveJson
 	{
 		TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
 		if (!bAuthoring) KeyObj->SetNumberField(TEXT("key_index"), KeyIndex);
-		KeyObj->SetNumberField(TEXT("time"), Key.Time);
-		if (!bAuthoring) KeyObj->SetNumberField(TEXT("time_seconds"), Key.Time);
-		KeyObj->SetNumberField(TEXT("value"), Key.Value);
+		KeyObj->SetField(TEXT("time"), UeAgentNumericFormatting::MakeNativeValue(Key.Time));
+		if (!bAuthoring) KeyObj->SetField(TEXT("time_seconds"), UeAgentNumericFormatting::MakeNativeValue(Key.Time));
+		KeyObj->SetField(TEXT("value"), UeAgentNumericFormatting::MakeNativeValue(Key.Value));
 		KeyObj->SetStringField(TEXT("interp_mode"), InterpModeToString(Key.InterpMode));
 		KeyObj->SetStringField(TEXT("tangent_mode"), TangentModeToString(Key.TangentMode));
 		KeyObj->SetStringField(TEXT("tangent_weight_mode"), TangentWeightModeToString(Key.TangentWeightMode));
-		KeyObj->SetNumberField(TEXT("arrive_tangent"), Key.ArriveTangent);
-		KeyObj->SetNumberField(TEXT("leave_tangent"), Key.LeaveTangent);
-		KeyObj->SetNumberField(TEXT("arrive_tangent_weight"), Key.ArriveTangentWeight);
-		KeyObj->SetNumberField(TEXT("leave_tangent_weight"), Key.LeaveTangentWeight);
+		KeyObj->SetField(TEXT("arrive_tangent"), UeAgentNumericFormatting::MakeNativeValue(Key.ArriveTangent));
+		KeyObj->SetField(TEXT("leave_tangent"), UeAgentNumericFormatting::MakeNativeValue(Key.LeaveTangent));
+		KeyObj->SetField(TEXT("arrive_tangent_weight"), UeAgentNumericFormatting::MakeNativeValue(Key.ArriveTangentWeight));
+		KeyObj->SetField(TEXT("leave_tangent_weight"), UeAgentNumericFormatting::MakeNativeValue(Key.LeaveTangentWeight));
 		return KeyObj;
 	}
 
 	static TSharedPtr<FJsonObject> BuildKeyJson(const FSimpleCurveKey& Key, int32 KeyIndex, bool bAuthoring)
 	{
 		const auto Result = MakeShared<FJsonObject>();
-		Result->SetNumberField(TEXT("time"), Key.Time);
-		Result->SetNumberField(TEXT("value"), Key.Value);
+		Result->SetField(TEXT("time"), UeAgentNumericFormatting::MakeNativeValue(Key.Time));
+		Result->SetField(TEXT("value"), UeAgentNumericFormatting::MakeNativeValue(Key.Value));
 		if (!bAuthoring)
 		{
 			Result->SetNumberField(TEXT("key_index"), KeyIndex);
-			Result->SetNumberField(TEXT("time_seconds"), Key.Time);
+			Result->SetField(TEXT("time_seconds"), UeAgentNumericFormatting::MakeNativeValue(Key.Time));
 		}
 		return Result;
 	}
@@ -332,7 +333,7 @@ namespace UeAgentCurveJson
 		DefaultObj->SetBoolField(TEXT("enabled"), bHasDefault);
 		if (bHasDefault)
 		{
-			DefaultObj->SetNumberField(TEXT("value"), Curve.GetDefaultValue());
+			DefaultObj->SetField(TEXT("value"), UeAgentNumericFormatting::MakeNativeValue(Curve.GetDefaultValue()));
 		}
 		ChannelObj->SetObjectField(TEXT("default_value"), DefaultObj);
 

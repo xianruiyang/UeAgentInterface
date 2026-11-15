@@ -9,6 +9,8 @@
 
 class UObject;
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UeAgentNiagaraAuthoring
 {
 	inline constexpr const TCHAR* ExportContractId = TEXT("uai.export.niagara.asset");
@@ -19,5 +21,6 @@ namespace UeAgentNiagaraAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

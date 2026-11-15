@@ -18,6 +18,22 @@ class FJsonObject;
 
 namespace UeAgentLevelAuthoring
 {
+	struct FLevelSemanticFactsSet;
+	/** Level-local, synchronous observation. Retains values only, never native roots. */
+	class FScopedLevelSemanticFacts
+	{
+	public:
+		FScopedLevelSemanticFacts();
+		~FScopedLevelSemanticFacts();
+		FScopedLevelSemanticFacts(const FScopedLevelSemanticFacts&) = delete;
+		FScopedLevelSemanticFacts& operator=(const FScopedLevelSemanticFacts&) = delete;
+		bool ObserveUnchanged(const UeAgentAuthoringState::FReadRequest& Request,
+			const TSharedPtr<const FLevelSemanticFactsSet>& Baseline);
+		TSharedPtr<const FLevelSemanticFactsSet> GetFacts() const;
+	private:
+		TSharedPtr<FLevelSemanticFactsSet> Facts;
+		FLevelSemanticFactsSet* Previous = nullptr;
+	};
 	inline constexpr TCHAR SceneEditingProfileId[] = TEXT("scene_editing");
 	/** Reflected Actor/Component properties in the optional scene-editing projection.
 	 * Spatial state and hierarchy keep their existing dedicated contracts. */
@@ -107,16 +123,40 @@ namespace UeAgentLevelAuthoring
 		bool bExpectedAbsent,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
 		UE::UAI::Contract::FDiagnostic& OutError);
+	/** World binding only; Actor scopes do not read unrelated WorldSettings. */
+	bool BuildWorldExportIdentityReadRequests(UWorld& World,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool BuildWorldExportReadRequests(
 		UWorld& World,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		UE::UAI::Contract::FDiagnostic& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const TSet<FString>* PropertyNames = nullptr, bool bWorldState = true);
 	UEAGENTINTERFACE_API bool BuildActorExportReadRequests(
 		AActor& Actor,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
 		UE::UAI::Contract::FDiagnostic& OutError,
 		bool bSceneEditing = false);
 	TSet<FName> ComponentStructuralProperties(const UActorComponent& Component);
+	bool BuildActorExportReadRequests(AActor& Actor,
+		TArray<UeAgentAuthoringState::FReadRequestBinding>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing = false);
+	bool BuildActorExportScopedReadRequests(AActor& Actor,
+		TArray<UeAgentAuthoringState::FReadRequestBinding>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing,
+		bool bIncludeState, bool bIncludeProperties);
+	bool BuildActorExportScopedReadRequests(AActor& Actor,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing,
+		bool bIncludeState, bool bIncludeProperties);
+	bool BuildComponentExportReadRequests(UActorComponent& Component,
+		TArray<UeAgentAuthoringState::FReadRequestBinding>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing = false,
+		bool bIncludeProperties = true);
+	bool BuildComponentExportReadRequests(UActorComponent& Component,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing,
+		bool bIncludeProperties);
 
 	UEAGENTINTERFACE_API bool BuildComponentExportReadRequests(
 		UActorComponent& Component,

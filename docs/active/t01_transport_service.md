@@ -43,7 +43,7 @@ replaces the Engine HTTPServer route host and does not change global Engine HTTP
 listener settings. HTTP payloads remain opaque bytes; command decoding and
 business dispatch stay in their existing owners.
 
-Complete command requests enter one FIFO queue and execute on the GameThread,
+Commands normally enter one FIFO queue and execute on the GameThread,
 one request per ticker dispatch with a reentrancy guard. The pending queue holds
 at most 128 requests. Full admission returns HTTP 503 with
 `transport_backpressured` and an explicit message that this request did not
@@ -51,6 +51,19 @@ execute; increasing the TCP backlog is not the scheduling mechanism. The ping
 route executes on the network thread and observes only synchronized transport
 state. A successful ping proves reachability, not command completion or
 authentication.
+
+Exact `operation.status` and `operation.receipt` requests may instead complete
+on the network thread through the same authenticated command ingress, parameter,
+permission and result validation. The lifecycle owner seals only its current
+snapshot/receipt wire strings on the original mutation thread. A short read
+capability holds the current runtime, operation and custody stable with TryLock;
+it does not transfer mutable JSON, UObject state or an owning operation reference.
+The production runtime wrapper borrows its port only while that capability holds
+the host lifetime lock. Contention, missing or over-budget wire state, unsupported
+handlers and large control requests retain the ordinary GameThread path.
+Current wire storage is bounded to 1 MiB per operation and 8 MiB total; no history
+is retained. Resume, cancellation, takeover, release and native work stay on the
+GameThread. This does not change Editor background throttling or command APIs.
 
 An exchange owns its reply until delivery or disconnection. A disconnected
 request still waiting for execution is removed immediately, releasing both its
@@ -65,7 +78,8 @@ snapshot through an ordinary response; their operation owner controls later
 execution and polling. The unused transport-level `Deferred` reply fields and
 callback path have been removed. There is one transport reply path.
 
-Unbinding invalidates the owned route. Stopping atomically closes queue admission
+Unbinding invalidates the owned route and drains any synchronous control read
+before its handler owners are destroyed. Stopping atomically closes queue admission
 and detaches pending work, removes the GameThread ticker, and rejects pending
 unexecuted requests with `transport_stopping`. The network thread closes the
 listening socket as soon as it observes stop, before draining existing replies.

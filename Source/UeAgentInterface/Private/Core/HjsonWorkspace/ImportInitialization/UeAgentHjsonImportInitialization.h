@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentDiagnostic.h"
-#include "Core/HjsonWorkspace/SemanticModel/UeAgentUnifiedHjsonSemanticModel.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 
 namespace UE::UAI::HjsonWorkspace
 {
@@ -129,7 +129,6 @@ namespace UE::UAI::HjsonWorkspace
 	public:
 		FImportInitializationPlanningRequest(
 			EImportSourceCarrier InCarrier,
-			FUnifiedHjsonSemanticModelRef InModel,
 			FString InTargetIdentity,
 			FUeAgentStateRevision InExpectedTargetRevision,
 			FString InSourceBaselineFingerprint,
@@ -141,7 +140,6 @@ namespace UE::UAI::HjsonWorkspace
 			FString InAuthorizationId);
 
 		EImportSourceCarrier GetCarrier() const;
-		const FUnifiedHjsonSemanticModelRef& GetModel() const;
 		const FString& GetTargetIdentity() const;
 		const FUeAgentStateRevision& GetExpectedTargetRevision() const;
 		const FString& GetSourceBaselineFingerprint() const;
@@ -156,7 +154,6 @@ namespace UE::UAI::HjsonWorkspace
 
 	private:
 		EImportSourceCarrier Carrier = EImportSourceCarrier::Inline;
-		FUnifiedHjsonSemanticModelRef Model;
 		FString TargetIdentity;
 		FUeAgentStateRevision ExpectedTargetRevision;
 		FString SourceBaselineFingerprint;
@@ -202,7 +199,6 @@ namespace UE::UAI::HjsonWorkspace
 	class UEAGENTINTERFACE_API FImportInitializationPlan final
 	{
 	public:
-		const FString& GetSourceModelFingerprint() const;
 		const FString& GetTargetIdentity() const;
 		const FUeAgentStateRevision& GetExpectedTargetRevision() const;
 		const TArray<FImportChange>& GetChanges() const;
@@ -217,7 +213,6 @@ namespace UE::UAI::HjsonWorkspace
 
 	private:
 		FImportInitializationPlan(
-			FString InSourceModelFingerprint,
 			FString InTargetIdentity,
 			FUeAgentStateRevision InExpectedTargetRevision,
 			TArray<FImportChange> InChanges,
@@ -227,7 +222,6 @@ namespace UE::UAI::HjsonWorkspace
 			TArray<FString> InImpactScopes,
 			FString InPlanFingerprint);
 
-		FString SourceModelFingerprint;
 		FString TargetIdentity;
 		FUeAgentStateRevision ExpectedTargetRevision;
 		TArray<FImportChange> Changes;

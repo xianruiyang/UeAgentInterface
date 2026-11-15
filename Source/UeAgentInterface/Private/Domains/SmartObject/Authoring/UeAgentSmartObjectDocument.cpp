@@ -9,6 +9,7 @@
 
 #include "Domains/SmartObject/Authoring/UeAgentSmartObjectAuthoringState.h"
 #include "Domains/SmartObject/Authoring/UeAgentSmartObjectNativeCapture.h"
+#include "QueryOwners/AiBehavior/UeAgentSmartObjectMenu.h"
 #include "Annotations/SmartObjectSlotLinkAnnotation.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -555,6 +556,14 @@ namespace UeAgentSmartObjectAuthoring
 		}
 		TArray<TObjectPtr<USmartObjectBehaviorDefinition>> Defaults;
 		TArray<FSmartObjectDefinitionDataProxy> Data;
+		TArray<FString> NewBehaviors;
+		TMap<FGuid, const FSmartObjectDefinitionDataProxy*> PreviousData;
+		if (bForwardAuthoring)
+		{
+			for (const auto& Proxy : Before.DefinitionData) PreviousData.Add(Proxy.ID, &Proxy);
+			for (const auto& Slot : Before.Slots)
+				for (const auto& Proxy : Slot.DefinitionData) PreviousData.Add(Proxy.ID, &Proxy);
+		}
 		for (const auto& Key : Keys)
 		{
 			const auto Item = Items->GetObjectField(Key);
@@ -568,6 +577,13 @@ namespace UeAgentSmartObjectAuthoring
 					Behavior = Behaviors.FindRef(Name);
 					if (!Behavior)
 					{
+						// Keep the new cell empty until its actual customized element handle can vet this class.
+						if (bForwardAuthoring)
+						{
+							NewBehaviors.Add(Key);
+							(Parent == TEXT("root") ? Defaults : Slots[SlotIndices.FindChecked(Parent)].BehaviorDefinitions).Add(nullptr);
+							continue;
+						}
 						Behavior = NewObject<USmartObjectBehaviorDefinition>(&Definition,
 							LoadObject<UClass>(nullptr, *ClassPath), FName(*Name), RF_Transactional);
 						Behaviors.Add(Name, Behavior);
@@ -580,7 +596,14 @@ namespace UeAgentSmartObjectAuthoring
 				FSmartObjectDefinitionDataProxy Proxy;
 				Proxy.ID = Guid(Key);
 				const FString ClassPath = Text(Item, TEXT("class_path"));
-				if (!ClassPath.IsEmpty()) Proxy.Data.InitializeAsScriptStruct(LoadObject<UScriptStruct>(nullptr, *ClassPath));
+				if (!ClassPath.IsEmpty())
+				{
+					const auto* Existing = PreviousData.FindRef(Proxy.ID);
+					if (Existing && Existing->Data.IsValid() && Existing->Data.GetScriptStruct()->GetPathName() == ClassPath)
+						Proxy.Data = Existing->Data;
+					else
+						Proxy.Data.InitializeAsScriptStruct(LoadObject<UScriptStruct>(nullptr, *ClassPath));
+				}
 				(Parent == TEXT("root") ? Data : Slots[SlotIndices.FindChecked(Parent)].DefinitionData).Add(MoveTemp(Proxy));
 			}
 		}
@@ -597,6 +620,23 @@ namespace UeAgentSmartObjectAuthoring
 		*FindFProperty<FArrayProperty>(Definition.GetClass(), TEXT("DefinitionData"))->ContainerPtrToValuePtr<TArray<FSmartObjectDefinitionDataProxy>>(&Definition) = MoveTemp(Data);
 		*FindFProperty<FStructProperty>(Definition.GetClass(), TEXT("RootID"))->ContainerPtrToValuePtr<FGuid>(&Definition) = Guid(Text(Items->GetObjectField(TEXT("root")), TEXT("native_id")));
 		*FindFProperty<FStructProperty>(Definition.GetClass(), TEXT("ParametersID"))->ContainerPtrToValuePtr<FGuid>(&Definition) = Guid(Text(Items->GetObjectField(TEXT("parameters")), TEXT("native_id")));
+		for (const FString& Key : NewBehaviors)
+		{
+			const auto Item = Items->GetObjectField(Key);
+			const FString Parent = Text(Item, TEXT("parent"));
+			const int32 SlotIndex = Parent == TEXT("root") ? INDEX_NONE : SlotIndices.FindChecked(Parent);
+			const int32 Index = Item->GetIntegerField(TEXT("index"));
+			const FString ClassPath = Text(Item, TEXT("class_path"));
+			auto* Class = LoadObject<UClass>(nullptr, *ClassPath);
+			if (!Class || !UE::UAI::QueryOwners::AiBehavior::CanAssignSmartObjectBehavior(Definition, SlotIndex, Index, *Class))
+				return ItemFailure(OutError, TEXT("smart_object_behavior_class_unavailable"),
+					TEXT("The inline behavior class is unavailable on the destination element's native Details picker."),
+					*Item, Key, TEXT("class_path"), Item->TryGetField(TEXT("class_path")), nullptr);
+			auto& Array = SlotIndex == INDEX_NONE
+				? *FindFieldChecked<FArrayProperty>(Definition.GetClass(), TEXT("DefaultBehaviorDefinitions"))->ContainerPtrToValuePtr<TArray<TObjectPtr<USmartObjectBehaviorDefinition>>>(&Definition)
+				: Definition.GetMutableSlot(SlotIndex).BehaviorDefinitions;
+			Array[Index] = NewObject<USmartObjectBehaviorDefinition>(&Definition, Class, FName(*Text(Item, TEXT("object_name"))), RF_Transactional);
+		}
 		if (bForwardAuthoring)
 		{
 			// Native property notifications must see the desired binding state. Do

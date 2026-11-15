@@ -500,90 +500,10 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 		public:
 			FWorkspaceVerification(
 				TWeakObjectPtr<UWorld> InWorld,
-				int32 InPieInstance,
-				FString InSessionRef,
-				int64 InPauseEpoch,
-				int64 InWorkspaceRevision)
+				int32 InPieInstance)
 				: World(InWorld)
 				, PieInstance(InPieInstance)
-				, SessionRef(MoveTemp(InSessionRef))
-				, PauseEpoch(InPauseEpoch)
-				, WorkspaceRevision(InWorkspaceRevision)
 			{
-			}
-
-			bool TryVerifyStagedWorkspace(
-				const FString& StagedWorkspacePath,
-				EWorkspaceKind WorkspaceKind,
-				const FString& InEntryFile,
-				FUeAgentResourceTracker& Resources,
-				FArtifactPublishError& OutError) override
-			{
-				if (WorkspaceKind != EWorkspaceKind::Directory || InEntryFile != EntryFile)
-				{
-					OutError = Native(TEXT("pie_runtime_workspace_shape_invalid"), TEXT("The staged PIE snapshot must be a directory with the registered entry file."),
-						TEXT("artifact_publish"), TEXT("workspace_shape"),
-						Facts({ { TEXT("kind"), Number(static_cast<int32>(WorkspaceKind)) }, { TEXT("entry_file"), MakeShared<FJsonValueString>(InEntryFile) } }),
-						Facts({ { TEXT("kind"), Number(static_cast<int32>(EWorkspaceKind::Directory)) }, { TEXT("entry_file"), MakeShared<FJsonValueString>(EntryFile) } }));
-					return false;
-				}
-				FWorkspaceError DomainError;
-				if (!DomainAuthoring::TryVerifyDomainHjsonStagedWorkspace(
-						StagedWorkspacePath, RuntimeTargetIdentity(SessionRef), RuntimeContract(),
-						RuntimeBaseRevision(PauseEpoch, WorkspaceRevision), EntryFile,
-						Resources, DomainError))
-				{
-					OutError = DomainError.GetDiagnostic();
-					return false;
-				}
-				FString Text;
-				if (!FFileHelper::LoadFileToString(Text, *(StagedWorkspacePath / EntryFile)))
-				{
-					OutError = Native(TEXT("pie_runtime_workspace_read_failed"), TEXT("The staged PIE snapshot entry file could not be read."),
-						TEXT("artifact_publish"), TEXT("entry_file_read"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
-					OutError.InternalContext = StagedWorkspacePath / EntryFile;
-					return false;
-				}
-				FHjsonDocumentPtr HjsonDocument;
-				FWorkspaceError HjsonError;
-				if (!TryParseHjsonDocument(
-						Text,
-						StagedWorkspacePath / EntryFile,
-						Resources,
-						HjsonDocument,
-						HjsonError)
-					|| !HjsonDocument.IsValid())
-				{
-					OutError = HjsonError.GetDiagnostic();
-					if (OutError.IsEmpty())
-					{
-						OutError = Native(TEXT("pie_runtime_workspace_hjson_parse_failed"), TEXT("The staged PIE snapshot parser returned no document."),
-							TEXT("artifact_publish"), TEXT("parsed_document_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
-						OutError.InternalContext = StagedWorkspacePath / EntryFile;
-					}
-					return false;
-				}
-				const FHjsonNode* Schema = HjsonDocument->Find(TEXT("/schema"));
-				const FHjsonNode* RootType = HjsonDocument->Find(TEXT("/root/type"));
-				if (!Schema || Schema->GetKind() != EHjsonNodeKind::String
-					|| Schema->GetText() != RuntimeSchemaId
-					|| !RootType || RootType->GetKind() != EHjsonNodeKind::String
-					|| RootType->GetText() != TEXT("pie_runtime_snapshot"))
-				{
-					const bool bSchemaInvalid = !Schema || Schema->GetKind() != EHjsonNodeKind::String || Schema->GetText() != RuntimeSchemaId;
-					const FHjsonNode* InvalidNode = bSchemaInvalid ? Schema : RootType;
-					TSharedPtr<FJsonValue> Actual;
-					if (InvalidNode) Actual = InvalidNode->GetKind() == EHjsonNodeKind::String
-						? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(InvalidNode->GetText()))
-						: Facts({ { TEXT("node_kind"), Number(static_cast<int32>(InvalidNode->GetKind())) } });
-					OutError = Native(TEXT("pie_runtime_workspace_identity_mismatch"), TEXT("The staged PIE snapshot has the wrong schema or root type."),
-						TEXT("artifact_publish"), bSchemaInvalid ? TEXT("schema") : TEXT("root/type"), Actual,
-						MakeShared<FJsonValueString>(bSchemaInvalid ? RuntimeSchemaId : TEXT("pie_runtime_snapshot")));
-					OutError.InternalContext = StagedWorkspacePath / EntryFile;
-					OutError.Source.InternalJsonPath = bSchemaInvalid ? TEXT("/schema") : TEXT("/root/type");
-					return false;
-				}
-				return true;
 			}
 
 			bool TryRecheckTargetVersion(FArtifactPublishError& OutError) override
@@ -608,22 +528,9 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				return true;
 			}
 
-			TMap<FString, FString> GetSemanticVerificationFields() const override
-			{
-				return {
-					{TEXT("schema"), RuntimeSchemaId},
-					{TEXT("session_ref"), SessionRef},
-					{TEXT("pause_epoch"), FString::Printf(TEXT("%lld"), PauseEpoch)},
-					{TEXT("workspace_revision"), FString::Printf(TEXT("%lld"), WorkspaceRevision)},
-				};
-			}
-
 		private:
 			TWeakObjectPtr<UWorld> World;
 			int32 PieInstance = INDEX_NONE;
-			FString SessionRef;
-			int64 PauseEpoch = 0;
-			int64 WorkspaceRevision = 0;
 		};
 	}
 
@@ -964,10 +871,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 			const TSharedRef<FWorkspaceVerification> Verification =
 				MakeShared<FWorkspaceVerification>(
 					State.Snapshot.World,
-					State.Snapshot.PieInstance,
-					State.Snapshot.SessionRef,
-					State.Snapshot.PauseEpoch,
-					NewRevision);
+					State.Snapshot.PieInstance);
 			if (!TryPublishExportPlan(
 					FArtifactPublishRequest(
 						Plan.ToSharedRef(),

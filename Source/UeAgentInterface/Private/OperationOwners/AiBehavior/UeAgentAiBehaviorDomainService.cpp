@@ -9,6 +9,8 @@
 #include "Domains/BehaviorTree/Authoring/UeAgentBehaviorTreeGraphDocument.h"
 #include "Domains/Eqs/Authoring/UeAgentEqsGraphDocument.h"
 #include "EnvironmentQuery/EnvQuery.h"
+#include "StateTree.h"
+#include "SmartObjectDefinition.h"
 #include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
@@ -207,6 +209,17 @@ namespace UE::UAI::OperationOwners::AiBehavior
 				FAiBehaviorCandidateQueryResult QueryResult;
 				FAiBehaviorCandidateQueryError QueryError;
 				FAiBehaviorCandidateContext Context;
+				Context.bTargetMenu = true;
+				FString RequestedPlacement;
+				Params->TryGetStringField(TEXT("attachment_kind"), RequestedPlacement);
+				if (Params->HasField(TEXT("target_path"))
+					&& (!TargetObject->IsA<UStateTree>()
+						|| !Params->TryGetStringField(TEXT("target_path"), Context.TargetPath)
+						|| Context.TargetPath.TrimStartAndEnd().IsEmpty()
+						|| RequestedPlacement != TEXT("property_function")))
+					return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_target_field_invalid"),
+						TEXT("target_path identifies a receiving field for a StateTree property_function placement."),
+						TEXT("/target_path"), Params->TryGetField(TEXT("target_path")), MakeShared<FJsonValueString>(TEXT("StateTree property_function field")), Target));
 				if (Params->HasField(TEXT("graph_owner")))
 				{
 					FString Owner;
@@ -230,10 +243,13 @@ namespace UE::UAI::OperationOwners::AiBehavior
 					FString Parent;
 					UBehaviorTree* Tree = Cast<UBehaviorTree>(TargetObject);
 					UEnvQuery* Eqs = Cast<UEnvQuery>(TargetObject);
-					if (!Tree && !Eqs)
-						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_attachment_context_invalid"), TEXT("Attachment candidate context requires a BehaviorTree or EnvQuery asset."),
-							TEXT("/target"), MakeShared<FJsonValueString>(TargetObject->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("BehaviorTree or EnvQuery")), Target));
-					if (!Params->TryGetStringField(TEXT("parent"), Parent) || Parent.IsEmpty())
+					const bool bStateTree = TargetObject->IsA<UStateTree>();
+					const bool bSmartObject = TargetObject->IsA<USmartObjectDefinition>();
+					if (!Tree && !Eqs && !bStateTree && !bSmartObject)
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_attachment_context_invalid"), TEXT("This asset does not accept placement context."),
+							TEXT("/target"), MakeShared<FJsonValueString>(TargetObject->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("BehaviorTree, EnvQuery, StateTree or SmartObjectDefinition")), Target));
+					Params->TryGetStringField(TEXT("parent"), Parent);
+					if (Parent.IsEmpty() && !bStateTree && !bSmartObject)
 						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_attachment_context_invalid"), TEXT("Attachment candidate context requires a nonempty parent reference."),
 							TEXT("/parent"), Params->TryGetField(TEXT("parent")), MakeShared<FJsonValueString>(TEXT("nonempty parent reference")), Target));
 					if (!Params->TryGetStringField(TEXT("attachment_kind"), Context.AttachmentKind))
@@ -252,12 +268,13 @@ namespace UE::UAI::OperationOwners::AiBehavior
 							return ForwardDiagnostic(OutError, ContextError.GetDiagnostic(), Parent);
 						Context.Parent = ParentNode;
 					}
+					else if (bStateTree || bSmartObject) Context.ParentAlias = MoveTemp(Parent);
 					else if (!UeAgentEqsAuthoring::TryResolveCapturedNodeReference(*Eqs, Parent, Context.Parent, ContextError))
 						return ForwardDiagnostic(OutError, ContextError.GetDiagnostic(), Parent);
 				}
 				const auto Scope = MakeShared<FJsonObject>();
 				Scope->SetStringField(TEXT("target"), Target.TrimStartAndEnd());
-				for (const TCHAR* Key : {TEXT("parent"), TEXT("attachment_kind"), TEXT("graph_owner")})
+				for (const TCHAR* Key : {TEXT("parent"), TEXT("attachment_kind"), TEXT("graph_owner"), TEXT("target_path")})
 				{
 					FString Value;
 					if (Params->TryGetStringField(Key, Value)) Scope->SetStringField(Key, Value);

@@ -10,6 +10,7 @@
 #include "Factories/Factory.h"
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntimeResolvers.h"
 #include "Misc/ScopeExit.h"
+#include "Misc/Guid.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -116,6 +117,7 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 		{
 			AssetDataSimpleEffect::FUeAgentAssetDataSimpleEffectFactoryBinding Factory;
 			HjsonWorkspace::FImportInitializationPlanPtr Plan;
+			FString RequestId;
 		};
 
 		bool Fail(FOperationFailure& Failure, UE::UAI::Contract::FDiagnostic Diagnostic) { Failure.Diagnostic = MoveTemp(Diagnostic); return false; }
@@ -309,7 +311,7 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 			}
 			for (const auto& Edge : Capture.Relations)
 			{
-				if (Edge.RelationKind != TEXT("texture_graph_edge")) continue;
+				if (Edge.RelationKind != TEXT("connection")) continue;
 				TSharedPtr<FJsonValue> Value;
 				if (!Edge.State.IsValid())
 				{
@@ -363,6 +365,17 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 			OutValue.ValueDefinition = MakeShared<FJsonValueObject>(Definition);
 			OutValue.Provenance = AccessorId;
 			OutValue.bEditable = true;
+			// This wrapper is native verification state, not an editable HJSON
+			// property. Transfer its already captured public semantic facts only
+			// when the real before/final consumer requests them.
+			OutValue.bAuthoringVisible = false;
+			if (Request.bCaptureAuthoringProjection) {
+				auto Resources = HjsonWorkspace::MakeSemanticWorkspaceResourceTrackerOwner();
+				FUeAgentContentGraphReadError ProjectionError;
+				if (!TryBuildContentGraphAuthoringSnapshot(Capture, Resources, OutValue.AuthoringProjection, ProjectionError))
+					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("texture_graph_authoring_observation_pending"),
+						ProjectionError, TEXT("texture_graph_observation"));
+			}
 			return EReadOutcome::Resolved;
 		}
 
@@ -446,6 +459,8 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 			{ return Read(Proposed.Get(), ProposedBindings, ProposedIntents, R, E); }
 			bool BuildActualReadRequests(TArray<UeAgentAuthoringState::FReadRequest>& R, FOperationFailure& E) const override
 			{ return Read(Actual, ActualBindings, ActualIntents, R, E); }
+			bool BuildBeforeReadRequests(TArray<UeAgentAuthoringState::FReadRequest>& R, FOperationFailure& E) const override
+			{ return Read(Actual, ActualBindings, {}, R, E); }
 			bool ApplyLifecycle(FOperationFailure& Failure) override
 			{
 				FGraphCompoundRuntimeError Error;
@@ -566,7 +581,11 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 						TEXT("The TextureGraph target is missing while building a state read request."), TEXT("/target"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return Fail(Failure, MoveTemp(Diagnostic));
 				}
-				if (Asset && !VerifySettingIntents(*Asset, Request.TargetRef, Bindings, Intents, Failure)) return false;
+				if (Asset && !VerifySettingIntents(*Asset, Request.TargetRef, Bindings, Intents, Failure)) {
+					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Failure.Diagnostic.Code,
+						Failure.Diagnostic, TEXT("texture_graph_settings_observation"));
+					Failure = FOperationFailure();
+				}
 				UeAgentAuthoringState::FReadRequest ReadRequest;
 				ReadRequest.SemanticId = SemanticId;
 				ReadRequest.RootObject = Asset;
@@ -616,8 +635,8 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 						TEXT("TextureGraph preparation requires an input contract, workspace unit and operation input."),
 						TEXT("/prepare_request"), MakeShared<FJsonValueObject>(Facts), MakeShared<FJsonValueString>(TEXT("contract, unit and input present"))));
 				}
-				if (!Initialization && !TryValidateTextureGraphSemanticComposite(Request, Plan.ToSharedRef(), Cancellation, Error))
-					return Fail(Failure, MoveTemp(Error));
+				// Validate the real target once, immediately before ApplyLifecycle.
+				// Preparation builds an isolated proposal and does not write it.
 				UTextureGraph* Actual = nullptr;
 				TStrongObjectPtr<UTextureGraph> Proposed;
 				if (Initialization)
@@ -792,7 +811,7 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 		{ Error = Load.Diagnostic; return false; }
 		UeAgentAuthoringAssetWorkspaceApply::FFailure Failure;
 		const bool bApplied = UeAgentAuthoringAssetWorkspaceApply::Execute(WorkspaceContract,
-			Load.Workspace, Providers, Initialization ? TEXT("texture-graph-initialize") : Plan->GetRequestId(), true, Options, OutResult, Failure);
+			Load.Workspace, Providers, Initialization ? Initialization->RequestId : Plan->GetRequestId(), true, Options, OutResult, Failure);
 		if (!bApplied)
 		{
 			auto Diagnostic = Failure.Diagnostic;
@@ -966,13 +985,6 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 		auto Bindings = Composite.NodeBindings;
 		if (!TryApplyTextureGraphSemanticCompositeNative(*Template, Composite, NativeError, Bindings))
 		{ Error = NativeError; return false; }
-		TMap<EUnifiedHjsonCompositionKind, TArray<FString>> Compositions;
-		for (auto Kind : GetAllUnifiedHjsonCompositionKinds()) Compositions.Add(Kind, {});
-		Compositions[EUnifiedHjsonCompositionKind::Target] = {TEXT("target")};
-		Compositions[EUnifiedHjsonCompositionKind::Structure] = {TEXT("graph")};
-		FUnifiedHjsonSemanticModelPtr Unified;
-		if (!TryCreateUnifiedHjsonSemanticModel(Model.ToSharedRef(), EUnifiedHjsonAuthoringIntent::MinimalCreate, MoveTemp(Compositions), *Resources, Unified, WorkspaceError))
-		{ Error = WorkspaceError.GetDiagnostic(); return false; }
 		class FPreflight final : public IImportInitializationPreflight
 		{
 		public:
@@ -1030,7 +1042,10 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 		private: FString Target, AuthorizationId;
 		};
 		auto Initialization = MakeShared<FInitialization>(); Initialization->Factory = Factory;
-		const FImportInitializationPlanningRequest Planning(EImportSourceCarrier::Inline, Unified.ToSharedRef(), Target,
+		// One identity for this prepared native transaction. A constant identity
+		// aliases completed receipts from unrelated initialization requests.
+		Initialization->RequestId = TEXT("texture-graph-initialize-") + FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphens);
+		const FImportInitializationPlanningRequest Planning(EImportSourceCarrier::Inline, Target,
 			FUeAgentStateRevision(TEXT("texture_graph"), TEXT("missing"), 0), Model->GetSemanticFingerprint(), Model->GetSemanticFingerprint(),
 			{FImportChange(TEXT("create-root"), EImportChangeKind::Create, Target)},
 			{FInitializationNode(Target, EInitializationNodeRole::RootTarget, Factory.GetConcreteClass()->GetPathName(), TEXT("uai.init.texture_graph.root/1"))}, {}, {Target}, AuthorizationId);

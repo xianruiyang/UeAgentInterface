@@ -15,6 +15,15 @@ struct FMaterialLayersFunctions;
 
 namespace UeAgentMaterialAuthoring
 {
+	// An unset Value means the native parameter has no inherited/default declaration.
+	// A valid JSON null remains a real nullable native default, not a missing value.
+	struct FInstanceParameterDefault
+	{
+		TSharedPtr<FJsonValue> Value;
+		FString SourceIdentity;
+		FString Provenance;
+	};
+
 	// Native parameter intent, after the common workspace has resolved identity and values.
 	struct FInstanceParameterEdit
 	{
@@ -33,7 +42,8 @@ namespace UeAgentMaterialAuthoring
 
 	UEAGENTINTERFACE_API bool CaptureInstanceParameters(UMaterialInstanceConstant& Instance,
 		TArray<TSharedPtr<FJsonValue>>& OutParameters, UE::UAI::Contract::FDiagnostic& OutError,
-		TArray<TSharedPtr<FJsonValue>>* OutDefinitions = nullptr);
+		TArray<TSharedPtr<FJsonValue>>* OutDefinitions = nullptr,
+		TArray<FInstanceParameterDefault>* OutDefaults = nullptr);
 	UEAGENTINTERFACE_API bool PrepareInstanceParameters(UMaterialInstanceConstant& Instance,
 		const TArray<TSharedPtr<FJsonValue>>& Parameters,
 		TArray<FInstanceParameterEdit>& OutEdits, UE::UAI::Contract::FDiagnostic& OutError);

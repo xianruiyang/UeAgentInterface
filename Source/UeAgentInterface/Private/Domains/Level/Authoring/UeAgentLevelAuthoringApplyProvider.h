@@ -6,8 +6,10 @@
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 
+class AActor;
 class FJsonObject;
 class UWorld;
+class UPackage;
 
 namespace UeAgentAuthoringOperationApply
 {
@@ -28,7 +30,18 @@ namespace UeAgentLevelAuthoring
 		FString AuthoringProfileId;
 		TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager> PackageStager;
 		TFunction<bool(UeAgentAuthoringOperationApply::FOperationFailure&)> FinalReadback;
-		TFunction<bool(UeAgentAuthoringOperationApply::FOperationFailure&)> RestoreEditorContext;
+		// Only the native move result can replace an existing logical Actor binding.
+		TFunction<void(const FGuid&, const AActor&)> OnActorMoved;
+
+		// The Level caller's selected partition references share the native
+		// transaction lifetime. nullptr releases them before unload; a reloaded
+		// World reestablishes the same GUID closure for actual readback.
+		// Non-null package output reads the same native scope's package names;
+		// null output retains/releases references for readback as described above.
+		TFunction<void(UWorld*, TArray<UPackage*>*)> PartitionReadScope;
+		// Actual preflight coverage, not a cache/admission flag. Complete-domain
+		// callers retain their existing complete package collection.
+		bool bScopedPackageCapture = false;
 	};
 
 	struct UEAGENTINTERFACE_API FWorkspaceApplyResult

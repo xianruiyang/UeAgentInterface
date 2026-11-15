@@ -236,6 +236,7 @@ namespace UeAgentDeformerAuthoring
 			{{TEXT("asset_path"), Path}}, Asset, OutRequests, OutError)
 			|| !AddRequest(ExportTargetSemanticId, GraphIdentityModelId, TargetKind,
 				{{TEXT("asset_path"), Path}}, Asset, OutRequests, OutError)) return false;
+		OutRequests.Last().MarkExportTarget();
 		const TArray<FPcgAnimationGraphRouteProfile>* Profiles = nullptr;
 		if (!TryGetPcgAnimationGraphRouteProfiles(Profiles, OutError)) return false;
 		const FPcgAnimationGraphRouteProfile* Profile = Profiles->FindByPredicate(
@@ -375,7 +376,8 @@ namespace UeAgentDeformerAuthoring
 	}
 
 	bool ExportWorkspace(UOptimusDeformer& Asset, const FString& WorkspaceRoot,
-		const FString& ProfileId, UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
+		const FString& ProfileId, UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport)
 	{
   auto& OutError = OutResult.Diagnostic;
 		TArray<UeAgentAuthoringState::FReadRequest> Requests;
@@ -385,6 +387,6 @@ namespace UeAgentDeformerAuthoring
 		{
 			OutError = Capture.Diagnostic; return false;
 		}
-		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(CompositionKind, ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
+		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(CompositionKind, ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult, PreparedExport);
 	}
 }

@@ -9,11 +9,14 @@
 
 class UPCGGraph;
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UeAgentPCGAuthoring
 {
 	UEAGENTINTERFACE_API bool ExportAssetWorkspace(
 		UPCGGraph& Graph,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

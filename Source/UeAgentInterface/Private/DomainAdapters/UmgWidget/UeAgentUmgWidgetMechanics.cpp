@@ -13,6 +13,7 @@
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringRegistration.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringDescriptors.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintSemanticProjection.h"
 #include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintCandidateBindingNormalizer.h"
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringApplyProvider.h"
@@ -799,8 +800,9 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 				OutError.SetFailure(CaptureError);
 				return false;
 			}
+			SelectRootPropertyImportReadRequests(*Resolved.SemanticWorkspace, Requests);
 			UeAgentAuthoringState::FCaptureResult Capture;
-			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+			if (!CapturePropertyImportState(*Resolved.SemanticWorkspace, Requests, Capture))
 			{
 				OutError.SetFailure(Capture.Diagnostic);
 				return false;
@@ -810,7 +812,7 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 				MakeSemanticWorkspaceResourceTracker();
 			StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 			FAuthoringModelPtr Model;
-			if (!TryBuildCanonicalAuthoringCapture(
+			if (!TryBuildPropertyImportCurrentCapture(Resolved.SemanticWorkspace.Get(),
 					TEXT("ue.widget_blueprint.asset"),
 					TEXT("llm_authoring"),
 					Capture.Snapshot,
@@ -827,9 +829,7 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 			return TryCoordinateSemanticWorkspaceImport(
 				Resolved.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 				CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("umg_widget.semantic_workspace"), 1,
-					Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("umg_widget.semantic_workspace"), *Model),
 				Blueprint->GetPathName(),
 				Resources,
 				{
@@ -852,7 +852,7 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 							return false;
 						}
 						return UeAgentUmgAuthoring::BuildAssetExportSnapshotReadRequests(*Native, Requests, Error);
-					}},
+					}, {}, &UeAgentBlueprintAuthoring::ProjectObservedNodePinDefaults},
 				[TargetPackage, &Blueprint, &Requests, &Model](
 					const FString& RequestId,
 					const FPreparedAuthoringImport& Prepared,
@@ -860,11 +860,12 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 					FRootPropertyApplyOutcome& OutOutcome)
 				{
 					UeAgentUmgAuthoring::FAssetApplyRequest ApplyRequest;
+					ApplyRequest.ProviderExtension = MakeShared<FJsonObject>();
 					FWorkspaceError ProjectionError;
-					if (!TryProjectWidgetChanges(Prepared.GetWorkspace()->GetModel(), Model.ToSharedRef(),
+					if (!HasOnlyRootPropertyIntents(*Prepared.GetWorkspace()) && (!TryProjectWidgetChanges(Prepared.GetWorkspace()->GetModel(), Model.ToSharedRef(),
 						Requests, *Blueprint, Projection, ApplyRequest.ProviderExtension, ProjectionError, Prepared.GetWorkspace().Get())
 						|| !UE::UAI::DomainAdapters::Blueprint::Surfaces::TryNormalizeBlueprintCandidateBindings(
-							TargetPackage, ApplyRequest.ProviderExtension, ProjectionError))
+							TargetPackage, ApplyRequest.ProviderExtension, ProjectionError)))
 					{
 						OutOutcome.Diagnostic = ProjectionError.GetDiagnostic();
 						OutOutcome.Phase = TEXT("semantic_projection");
@@ -1052,7 +1053,8 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -1073,7 +1075,7 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 			if (!EnsureAuthoringRegistered(OutError)) return false;
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
 			FString ExportError;
-			if (!UeAgentUmgAuthoring::ExportAssetWorkspace(*Blueprint, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentUmgAuthoring::ExportAssetWorkspace(*Blueprint, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic);
 				return false;
@@ -1089,7 +1091,8 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -1115,7 +1118,7 @@ namespace UE::UAI::DomainAdapters::UmgWidget
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return TryExport(Target, Params, OutPayloadJson, OutError);
+			return TryExport(Target, Params, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

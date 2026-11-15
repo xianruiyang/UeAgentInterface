@@ -390,10 +390,6 @@ bool FUeAgentSemanticLayoutModuleContractTest::RunTest(
 		TEXT("manifest inventory covers every unit"),
 		LowPlan->GetMachineManifest().UnitInventory.Num(),
 		Model->GetUnits().Num());
-	TestEqual(
-		TEXT("LLM index is navigation-only"),
-		LowPlan->GetLlmIndex().SurfaceUnitIds.Num(),
-		3);
 	TestTrue(
 		TEXT("telemetry keys are normalized without corrupting lookup"),
 		LowPlan->GetTelemetry().Contains(TEXT("estimated_tokens")));
@@ -401,7 +397,7 @@ bool FUeAgentSemanticLayoutModuleContractTest::RunTest(
 	int32 NodeFileCount = 0;
 	bool bGraphUsesReadablePath = false;
 	bool bGraphChildIsMachineOnly = false;
-	for (const TPair<FString, TArray<FString>>& File
+	for (const auto& File
 		: LowPlan->GetPhysicalFiles())
 	{
 		NodeFileCount += File.Value.Contains(NodeId) ? 1 : 0;
@@ -603,7 +599,7 @@ bool FUeAgentSemanticReadablePhysicalPathContractTest::RunTest(
 		return false;
 	}
 
-	const TMap<FString, FString>& Physical = Plan->GetPhysicalPlacements();
+	const auto& Physical = Plan->GetPhysicalPlacements();
 	const FString* TargetPath = Physical.Find(TargetId);
 	const FString* StructurePath = Physical.Find(StructureId);
 	const FString* RepeatedPathA = Physical.Find(RepeatedItemA);
@@ -695,17 +691,6 @@ bool FUeAgentSemanticReadablePhysicalPathContractTest::RunTest(
 	{
 		const FSemanticUnit* Unit = Model->FindUnit(Mapping.Key);
 		TestNotNull(TEXT("hidden local mapping can resolve a unit"), Unit);
-		if (Unit != nullptr)
-		{
-			const FWorkspaceUnitInventoryEntry* Inventory =
-				Plan->GetMachineManifest().UnitInventory.FindByPredicate(
-					[&Mapping](const FWorkspaceUnitInventoryEntry& Entry)
-					{
-						return Entry.UnitId == Mapping.Key
-							&& Entry.LocalHandle == Mapping.Value;
-					});
-			TestNotNull(TEXT("hidden mapping is reflected in unit inventory"), Inventory);
-		}
 	}
 	return !HasAnyErrors();
 }

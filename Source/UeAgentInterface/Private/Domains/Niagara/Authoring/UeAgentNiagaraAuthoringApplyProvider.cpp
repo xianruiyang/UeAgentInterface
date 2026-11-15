@@ -4903,6 +4903,8 @@ public:
           TEXT("asset.available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
       return false;
     }
+    if (Operation == EOperation::Update)
+      return BuildReadRequest(Root, false, OutRequests, OutFailure);
     if (!BuildAssetSnapshotReadRequests(*Root, true, OutRequests, Error, PackagePath)) {
       SetFailure(OutFailure, Error);
       return false;

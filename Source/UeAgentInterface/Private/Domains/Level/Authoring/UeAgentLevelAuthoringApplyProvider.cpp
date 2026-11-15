@@ -5,6 +5,7 @@
 #include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/AssetDurable/UeAgentPersistedWorld.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
 
 #include "AI/NavigationSystemBase.h"
 #include "ComponentAssetBroker.h"
@@ -16,6 +17,7 @@
 #include "Components/RectLightComponent.h"
 #include "Components/SkyLightComponent.h"
 #include "Components/SpotLightComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/ContentDiscovery/PaletteSearch/UeAgentBrushBuilderActorFactory.h"
 #include "Dom/JsonObject.h"
@@ -33,7 +35,10 @@
 #include "Engine/Engine.h"
 #include "Engine/Brush.h"
 #include "Engine/Level.h"
+#include "Engine/Light.h"
 #include "Engine/PostProcessVolume.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Editor.h"
@@ -46,10 +51,14 @@
 #include "HAL/PlatformTime.h"
 #include "NavigationData.h"
 #include "NavigationSystem.h"
+#include "Materials/MaterialInterface.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
+#include "PhysicsEngine/BodyInstance.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/NoExportTypes.h"
 #include "UObject/StrongObjectPtr.h"
+#include "UObject/UnrealType.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
@@ -651,8 +660,10 @@ TSharedRef<FJsonObject> BuildCounterMetadata(const TCHAR *Field,
 
 class FLevelPersistentContext {
 public:
-  explicit FLevelPersistentContext(UWorld& InWorld)
-      : World(&InWorld), Path(InWorld.GetPathName()), PackageName(InWorld.GetPackage()->GetName()) {
+  explicit FLevelPersistentContext(UWorld& InWorld, TFunction<void(UWorld*, TArray<UPackage*>*)> InPartitionReadScope,
+      bool bInScopedPackageCapture)
+      : World(&InWorld), Path(InWorld.GetPathName()), PackageName(InWorld.GetPackage()->GetName()),
+        PartitionReadScope(MoveTemp(InPartitionReadScope)), bScopedPackageCapture(bInScopedPackageCapture) {
     for (TActorIterator<ANavMeshBoundsVolume> It(&InWorld); It; ++It) {
       NavigationBoundsBefore.Add(*It, It->GetComponentsBoundingBox(true));
     }
@@ -662,6 +673,9 @@ public:
   TSharedPtr<FLevelAuthoringScratchWorld> Scratch;
   TWeakObjectPtr<UWorld> World;
   FString Path, PackageName;
+  TFunction<void(UWorld*, TArray<UPackage*>*)> PartitionReadScope;
+  TFunction<void(const FGuid&, const AActor&)> OnActorMoved;
+  bool bScopedPackageCapture = false;
   TSet<TWeakObjectPtr<AActor>> SettledInputActors;
   TMap<TWeakObjectPtr<ANavMeshBoundsVolume>, FBox> NavigationBoundsBefore;
   TMap<FString, TWeakObjectPtr<UWorld>> TouchedLevelWorlds;
@@ -673,6 +687,7 @@ public:
     for (auto& Pair : MovedActorPaths) if (Pair.Value == OldPath) Pair.Value = Actor.GetPathName();
     MovedActorGuids.Add(BeforeGuid, AfterGuid);
     MovedActorPaths.Add(OldPath, Actor.GetPathName());
+    if (OnActorMoved) OnActorMoved(OldGuid, Actor);
   }
   AActor* FindActor(UWorld& InWorld, const TSharedPtr<const FJsonObject>& Target, UE::UAI::Contract::FDiagnostic& Error) const {
     auto Remapped = MakeShared<FJsonObject>();
@@ -686,10 +701,16 @@ public:
       TouchedLevelWorlds.Add(LevelWorld->GetPackage()->GetName(), LevelWorld);
   }
   bool BuildPackagePlans(TArray<FPackageDurablePlan>& Plans, FOperationFailure& Failure) const {
+    const int32 First = Plans.Num();
     if (!BuildPackageDurablePlan(Path, PackageName, World.Get(), EPackageDurableIntent::Save, Plans, Failure)) return false;
     for (const auto& Pair : TouchedLevelWorlds)
       if (Pair.Key != PackageName && Pair.Value.IsValid()
           && !BuildPackageDurablePlan(Pair.Value->GetPathName(), Pair.Key, Pair.Value.Get(), EPackageDurableIntent::Save, Plans, Failure)) return false;
+    if (bScopedPackageCapture && PartitionReadScope) for (int32 I = First; I < Plans.Num(); ++I)
+      Plans[I].CollectOwnedPackages = [Scope = PartitionReadScope](UPackage* Package, TArray<UPackage*>& Owned) {
+        if (UWorld* Current = Package ? UWorld::FindWorldInPackage(Package) : nullptr) Scope(Current, &Owned);
+        else UE::UAI::EditorResources::CollectOwnedPackages(Package, Owned);
+      };
     return true;
   }
   void PublishNavigationBounds(UNavigationSystemV1& Navigation) const {
@@ -723,12 +744,13 @@ public:
     return true;
   }
   bool Release(const void* State, FOperationFailure& Failure) {
-    DiscardLevelCaptureReuse();
+    ReleaseLevelCaptureForPersistentReload();
     Released.Add(State);
     if (Released.Num() != Participants.Num()) return true;
     // Every participant has released proposed/backup roots. The scratch world
     // can still retain native references (for example Brush -> original Model).
     if (Scratch.IsValid()) Scratch->ReleaseForPersistentReadback();
+    if (PartitionReadScope) PartitionReadScope(nullptr, nullptr);
     UWorld* Current = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
     if (!Current) {
       SetFailure(Failure, PresenceFailure(TEXT("level_persistent_active_world_changed"),
@@ -765,7 +787,9 @@ public:
       }
       SetFailure(Failure, MoveTemp(Error)); return false;
     }
+    if (PartitionReadScope) PartitionReadScope(World.Get(), nullptr);
     Released.Reset();
+    RebindLevelCaptureAfterPersistentReload(*World.Get());
     return true;
   }
   void ReleaseReadbackBindings() {
@@ -775,6 +799,8 @@ public:
     // have run. Prepared brush copies can still reference its original Model.
     // Release the same scratch owner before restoring a different Editor map.
     if (Scratch.IsValid()) Scratch->ReleaseForPersistentReadback();
+    if (PartitionReadScope) PartitionReadScope(nullptr, nullptr);
+    PartitionReadScope = {};
     World.Reset();
   }
 };
@@ -805,6 +831,14 @@ public:
       : IReflectionOperationLifecycleState::BuildDurablePackagePlans(Plans, Failure);
   }
   bool SupportsPersistentReadback() const override { return Persistent.IsValid(); }
+  void DiscardNoOpPreparation() override {
+    ClearPersistentReferences();
+    if (Persistent.IsValid()) {
+      Persistent->Participants.Remove(this);
+      Persistent->Released.Remove(this);
+      Persistent->ClearBindings.Remove(this);
+    }
+  }
   bool ReleaseForPersistentReadback(FOperationFailure& Failure) override {
     ClearPersistentReferences();
     if (!Persistent.IsValid()) {
@@ -875,13 +909,18 @@ public:
                        AWorldSettings* InProposed,
                        UeAgentAuthoringIdentity::FCanonicalIdentity InIdentity)
       : World(&InWorld), ScratchWorld(MoveTemp(InScratchWorld)),
-        Proposed(InProposed), Identity(MoveTemp(InIdentity)) {}
+        Proposed(InProposed), bHasSettingsEdit(InProposed != nullptr), Identity(MoveTemp(InIdentity)) {}
 
   virtual FString GetTargetKey() const override {
     return Identity.CanonicalKey;
   }
   virtual EOperation GetResolvedOperation() const override {
     return EOperation::Update;
+  }
+  virtual bool IsNoOp() const override {
+    // The transaction asks again after native buffers have been released for
+    // persistent readback. Intent cannot disappear with its preview UObject.
+    return !bHasSettingsEdit && !Topology.IsPresent();
   }
   virtual FReflectionRoot GetProposedRoot() const override {
     return FReflectionRoot::MakeObject(Proposed.IsValid() ? Proposed.Get()
@@ -968,6 +1007,7 @@ private:
   TWeakObjectPtr<UWorld> World;
   TSharedRef<FLevelAuthoringScratchWorld> ScratchWorld;
   TStrongObjectPtr<AWorldSettings> Proposed;
+  bool bHasSettingsEdit = false;
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   FWorldTopologyEdit Topology;
 };
@@ -1047,13 +1087,8 @@ public:
     OutFailure = {};
     if (!Existing.IsValid())
       return true;
-    if (Operation == EOperation::Remove) return true;
-    UE::UAI::Contract::FDiagnostic Error;
-    Backup.Reset(ScratchWorld->DuplicateActor(*Existing, Error));
-    if (!Backup.IsValid()) {
-      SetFailure(OutFailure, MoveTemp(Error));
-      return false;
-    }
+    if (Operation != EOperation::Update) return true;
+    OriginalTags.Emplace(Existing->Tags);
     OriginalAttachParent = Existing->GetAttachParentActor();
     OriginalAttachSocket = Existing->GetAttachParentSocketName();
     return true;
@@ -1295,8 +1330,7 @@ public:
       }
       return true;
     }
-    if (Operation == EOperation::Update && Existing.IsValid() &&
-        Backup.IsValid()) {
+    if (Operation == EOperation::Update && Existing.IsValid() && OriginalTags.IsSet()) {
       if (Existing->GetLevel()->GetPackage()->GetName() != OriginalLevelPackage) {
         ULevel* Original = FindAuthoringLevel(*World, OriginalLevelPackage);
         const FGuid Guid = Existing->GetActorGuid();
@@ -1309,7 +1343,7 @@ public:
         Existing.Reset(Moved[0]);
         if (Persistent.IsValid()) Persistent->RecordMove(Guid, OldPath, *Existing);
       }
-      Existing->Tags = Backup->Tags;
+      Existing->Tags = OriginalTags.GetValue();
       ApplyActorExtension(*Existing, BaseLabel, BaseFolder,
                           FTransformPatch{BaseTransform.GetLocation(),
                                           BaseTransform.Rotator(),
@@ -1377,7 +1411,7 @@ private:
 
   void ClearPersistentReferences() override {
     Deletion.Release();
-    World.Reset(); Existing.Reset(); Proposed.Reset(); Backup.Reset(); Actual = nullptr;
+    World.Reset(); Existing.Reset(); Proposed.Reset(); OriginalTags.Reset(); Actual = nullptr;
     OriginalAttachParent.Reset();
   }
   bool BindPersistentWorld(UWorld& Reloaded, bool bBefore, FOperationFailure& Failure) override {
@@ -1412,7 +1446,7 @@ private:
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   TStrongObjectPtr<AActor> Existing;
   TStrongObjectPtr<AActor> Proposed;
-  TStrongObjectPtr<AActor> Backup;
+  TOptional<TArray<FName>> OriginalTags;
   FActorDeletion Deletion;
   FString TargetLevelPackage, OriginalLevelPackage;
   AActor *Actual = nullptr;
@@ -1437,6 +1471,7 @@ public:
       UWorld &InWorld, TSharedRef<FLevelAuthoringScratchWorld> InScratchWorld,
       EOperation InRequestedOperation, EOperation InOperation,
       bool bInAdoptMatchingComponentFromSpawnedOwner,
+      bool bInDirectPropertyUpdate,
       UeAgentAuthoringIdentity::FCanonicalIdentity InIdentity,
       TSharedPtr<const FJsonObject> InOwnerTarget, UActorComponent *InExisting,
       UActorComponent *InProposed, FAttachmentPatch InAttachment,
@@ -1445,6 +1480,7 @@ public:
         RequestedOperation(InRequestedOperation), Operation(InOperation),
         bAdoptMatchingComponentFromSpawnedOwner(
             bInAdoptMatchingComponentFromSpawnedOwner),
+        bDirectPropertyUpdate(bInDirectPropertyUpdate),
         Identity(MoveTemp(InIdentity)), OwnerTarget(MoveTemp(InOwnerTarget)),
         Existing(InExisting), Proposed(InProposed),
         Attachment(MoveTemp(InAttachment)), Pcg(MoveTemp(InPcg)) {}
@@ -1463,6 +1499,13 @@ public:
   }
   virtual bool ShouldApplyPropertiesToActualRoot() const override {
     return true;
+  }
+
+  virtual bool UsesProposedPropertyPreview() const override {
+    return !bDirectPropertyUpdate;
+  }
+  virtual bool IsNoOp() const override {
+    return bDirectPropertyUpdate;
   }
 
   bool RequiresCheckpointRollback() const override {
@@ -1490,16 +1533,22 @@ public:
     OutFailure = {};
     if (!Existing.IsValid())
       return true;
-    UE::UAI::Contract::FDiagnostic Error;
-    Backup.Reset(ScratchWorld->DuplicateComponent(*Existing, Error));
-    if (!Backup.IsValid()) {
-      SetFailure(OutFailure, MoveTemp(Error));
-      return false;
+    if (Operation != EOperation::Update && Operation != EOperation::Remove) return true;
+    const double Started = FPlatformTime::Seconds();
+    const AActor* Owner = Existing->GetOwner();
+    // Only removal's reconstruction template and PCG's domain rollback read a
+    // component image. Ordinary reflected values already have OriginalValue.
+    if (Operation == EOperation::Remove || Pcg.IsValid()) {
+      UE::UAI::Contract::FDiagnostic Error;
+      Backup.Reset(ScratchWorld->DuplicateComponent(*Existing, Error));
+      if (!Backup.IsValid()) {
+        SetFailure(OutFailure, MoveTemp(Error));
+        return false;
+      }
     }
     OriginalName = Existing->GetFName();
     if (const USceneComponent *Scene = Cast<USceneComponent>(Existing.Get())) {
       bHadSceneState = true;
-      const AActor *Owner = Existing->GetOwner();
       bWasRootComponent = Owner && Owner->GetRootComponent() == Scene;
       OriginalParentName = Scene->GetAttachParent()
                                ? Scene->GetAttachParent()->GetName()
@@ -1509,6 +1558,9 @@ public:
                                : Scene->GetAttachSocketName().ToString();
       OriginalRelativeTransform = Scene->GetRelativeTransform();
     }
+    bRollbackCaptured = true;
+    UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=level_component_rollback_capture component=%s component_image=%s scene_state=%s total_s=%.6f"),
+        *Existing->GetName(), Backup.IsValid() ? TEXT("true") : TEXT("false"), bHadSceneState ? TEXT("true") : TEXT("false"), FPlatformTime::Seconds() - Started);
     return true;
   }
 
@@ -1768,8 +1820,7 @@ public:
       Actual = nullptr;
       return true;
     }
-    if (Operation == EOperation::Update && Existing.IsValid() &&
-        Backup.IsValid()) {
+    if (Operation == EOperation::Update && Existing.IsValid() && bRollbackCaptured) {
       Actual = Existing.Get();
       UE::UAI::Contract::FDiagnostic PcgError;
       if (Pcg.IsValid() && !UeAgentPcgComponentAuthoring::Apply(
@@ -1867,6 +1918,7 @@ private:
 
   void ClearPersistentReferences() override {
     World.Reset(); Existing.Reset(); Proposed.Reset(); Backup.Reset(); Actual = nullptr;
+    bRollbackCaptured = false;
   }
   bool BindPersistentWorld(UWorld& Reloaded, bool bBefore, FOperationFailure& Failure) override {
     World = &Reloaded;
@@ -1891,6 +1943,7 @@ private:
   EOperation RequestedOperation = EOperation::Update;
   EOperation Operation = EOperation::Update;
   bool bAdoptMatchingComponentFromSpawnedOwner = false;
+  bool bDirectPropertyUpdate = false;
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   TSharedPtr<const FJsonObject> OwnerTarget;
   TStrongObjectPtr<UActorComponent> Existing;
@@ -1898,6 +1951,7 @@ private:
   TStrongObjectPtr<UActorComponent> Backup;
   UActorComponent *Actual = nullptr;
   FName OriginalName;
+  bool bRollbackCaptured = false;
   bool bHadSceneState = false;
   bool bWasRootComponent = false;
   FString OriginalParentName;
@@ -2028,6 +2082,25 @@ private:
     return SharedScratchWorld.IsValid()
                ? SharedScratchWorld.ToSharedRef()
                : MakeShared<FLevelAuthoringScratchWorld>();
+  }
+
+  static bool CanPrepareScalarComponentUpdate(const UActorComponent* Component,
+      const TArray<TSharedPtr<FJsonValue>>& Descriptors) {
+    if (!Component) return false;
+    for (const auto& Value : Descriptors) {
+      FString Path;
+      if (!Value.IsValid() || Value->Type != EJson::Object
+          || !Value->AsObject()->TryGetStringField(TEXT("property_path"), Path)) return false;
+      const FProperty* Property = FindFProperty<FProperty>(Component->GetClass(), *Path);
+      // This execution mode has no template/owned-object construction. Keep
+      // nested paths, instanced/owned storage, text identities and aggregate
+      // values on their explicitly selected native preview lifecycle.
+      if (!Property || Property->HasAnyPropertyFlags(CPF_InstancedReference | CPF_ContainsInstancedReference)
+          || !(CastField<FBoolProperty>(Property) || CastField<FNumericProperty>(Property)
+              || CastField<FEnumProperty>(Property) || CastField<FNameProperty>(Property)
+              || CastField<FStrProperty>(Property))) return false;
+    }
+    return true;
   }
 
   UWorld *ResolveWorld(const FString &WorldPath) const {
@@ -2388,10 +2461,20 @@ private:
     }
 
     if (!ValidateSceneEditingProperties(Request, Template, true, OutFailure)) return false;
+    FAttachmentPatch Attachment;
+    if (!ParseAttachmentExtension(Request.Input->ProviderExtension, Attachment, Error)) {
+      SetFailure(OutFailure, MoveTemp(Error));
+      return false;
+    }
+    const auto Pcg = ReadObject(Request.Input->ProviderExtension, TEXT("pcg"));
+    const FString AssetOverride = ReadString(Request.Input->ProviderExtension, TEXT("asset_override"));
+    const bool bDirectPropertyUpdate = Operation == EOperation::Update
+        && !Attachment.bPresent && !Pcg.IsValid() && AssetOverride.IsEmpty()
+        && CanPrepareScalarComponentUpdate(Existing, Request.Input->Properties);
     const TSharedRef<FLevelAuthoringScratchWorld> ScratchWorld =
         GetScratchWorld();
     UActorComponent *Proposed = Existing;
-    if (Operation != EOperation::Remove) {
+    if (Operation != EOperation::Remove && !bDirectPropertyUpdate) {
       AActor *ScratchOwner =
           Owner ? ScratchWorld->DuplicateActor(*Owner, Error)
                 : ScratchWorld->FindPreparedActor(OwnerIdentity.CanonicalKey);
@@ -2421,7 +2504,6 @@ private:
       SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
-    const FString AssetOverride = ReadString(Request.Input->ProviderExtension, TEXT("asset_override"));
     if (Operation != EOperation::Remove && !AssetOverride.IsEmpty()) {
       UObject* Asset = LoadObject<UObject>(nullptr, *AssetOverride);
       if (!Asset || !FComponentAssetBrokerage::AssignAssetToComponent(Proposed, Asset)) {
@@ -2433,17 +2515,11 @@ private:
         return false;
       }
     }
-    FAttachmentPatch Attachment;
-    if (!ParseAttachmentExtension(Request.Input->ProviderExtension, Attachment,
-                                  Error)) {
-      SetFailure(OutFailure, MoveTemp(Error));
-      return false;
-    }
     OutState = MakeUnique<FComponentLifecycleState>(
         World, ScratchWorld, RequestedOperation, Operation,
-        bAdoptMatchingComponentFromSpawnedOwner, MoveTemp(Identity),
+        bAdoptMatchingComponentFromSpawnedOwner, bDirectPropertyUpdate, MoveTemp(Identity),
         OwnerTarget, Existing, Proposed,
-        MoveTemp(Attachment), ReadObject(Request.Input->ProviderExtension, TEXT("pcg")));
+        MoveTemp(Attachment), Pcg);
     return true;
   }
 
@@ -3119,6 +3195,7 @@ bool ApplyWorkspaceSource(
     const UeAgentAuthoringWorkspaceLoader::FSourceRequest &Source,
     const FWorkspaceApplyOptions &Options, FWorkspaceApplyResult &OutResult,
     const FString &RequestId) {
+  const double ApplySourceStarted = FPlatformTime::Seconds();
   OutResult = FWorkspaceApplyResult();
   OutResult.Status = TEXT("failed");
   UeAgentApplyWorkspaceContract::FContract WorkspaceContract;
@@ -3157,10 +3234,15 @@ bool ApplyWorkspaceSource(
   }
 
   UeAgentAuthoringOperationApply::FProviderRegistry ScopedProviders;
+  const double DependencyFinished = FPlatformTime::Seconds();
+  double NativeSettleSeconds = 0;
   UeAgentAuthoringOperationApply::ERegistrationResult ProviderRegistration;
   UE::UAI::Contract::FDiagnostic ProviderRegistrationError;
   TSharedPtr<FLevelPersistentContext> Persistent;
-  if (Options.bPersistentReadback) Persistent = MakeShared<FLevelPersistentContext>(World);
+  if (Options.bPersistentReadback) {
+    Persistent = MakeShared<FLevelPersistentContext>(World, Options.PartitionReadScope, Options.bScopedPackageCapture);
+    Persistent->OnActorMoved = Options.OnActorMoved;
+  }
   if (!ScopedProviders.RegisterProvider(MakeBoundApplyProvider(World, Persistent, Options.AuthoringProfileId == SceneEditingProfileId),
                                         ProviderRegistration,
                                         ProviderRegistrationError)) {
@@ -3198,7 +3280,9 @@ bool ApplyWorkspaceSource(
   }
   UeAgentAuthoringOperationApply::FBackendOptions BackendOptions;
   BackendOptions.bUseEditorTransaction = Options.bUseEditorTransaction;
-  BackendOptions.FinalizeNativeUpdate = [&World, Persistent](FOperationFailure& Failure) {
+  BackendOptions.FinalizeNativeUpdate = [&World, Persistent, &NativeSettleSeconds](FOperationFailure& Failure) {
+    const double Started = FPlatformTime::Seconds();
+    ON_SCOPE_EXIT { NativeSettleSeconds += FPlatformTime::Seconds() - Started; };
     Failure = {};
     // Actor/component and brush updates enqueue navigation work. This import
     // saves and reloads without returning to the Editor tick, so process that
@@ -3230,29 +3314,110 @@ bool ApplyWorkspaceSource(
         const TArray<FPublishedPackageReadback>& Packages,
         TArray<FOperationReadback>& Readbacks,
         TFunctionRef<bool(FOperationFailure&)> Verify, FOperationFailure& Failure) -> TOptional<bool> {
-      // This boundary is deliberately object/property based. Unknown native
-      // types, structural edits, struct roots, and multi-package closures keep
-      // the established unload/rebind implementation.
+      // This boundary is object/property based. The extended native-scene
+      // case below has a closed class/reference scope; unknown construction,
+      // structural edits, struct roots and multi-package closures still reload.
       if (World.IsPartitionedWorld() || Packages.Num() != 1 || Readbacks.IsEmpty()
           || Packages[0].Intent != EPackageDurableIntent::Save
           || Packages[0].PackageName != World.GetOutermost()->GetName()) return {};
+      bool bExtendedScene = false;
+      bool bHasPostProcessSettings = false;
+      bool bAnyUnknownState = false;
+      auto IsPropertyOrChild = [](const FString& Path, const TCHAR* Root) {
+        return Path == Root || Path.StartsWith(FString(Root) + TEXT("."))
+            || Path.StartsWith(FString(Root) + TEXT("["));
+      };
+      auto IsExternalAsset = [&World](const UObject* Object) {
+        return !Object || (Object->IsAsset() && Object->GetOutermost() != World.GetOutermost());
+      };
+      static const TSet<FString> ActorClasses = {TEXT("Actor"), TEXT("StaticMeshActor"),
+          TEXT("DirectionalLight"), TEXT("PointLight"), TEXT("SpotLight"), TEXT("RectLight"),
+          TEXT("SkyLight"), TEXT("SkyAtmosphere"), TEXT("PostProcessVolume"), TEXT("PlayerStart"),
+          TEXT("WorldSettings"), TEXT("Brush"), TEXT("DefaultPhysicsVolume")};
+      static const TSet<FString> ComponentClasses = {TEXT("SceneComponent"), TEXT("StaticMeshComponent"),
+          TEXT("DirectionalLightComponent"), TEXT("PointLightComponent"), TEXT("SpotLightComponent"),
+          TEXT("RectLightComponent"), TEXT("SkyLightComponent"), TEXT("SkyAtmosphereComponent"),
+          TEXT("BrushComponent"), TEXT("CapsuleComponent"), TEXT("ArrowComponent"), TEXT("BillboardComponent"),
+          TEXT("DrawLightRadiusComponent"), TEXT("DrawLightConeComponent"), TEXT("DrawSphereComponent")};
+      auto IsKnownNative = [](const UObject* Object, const TSet<FString>& Classes) {
+        if (!Object) return false;
+        const UClass* Class = Object->GetClass();
+        return Class->HasAnyClassFlags(CLASS_Native) && !Class->HasAnyClassFlags(CLASS_CompiledFromBlueprint)
+            && !Class->ClassGeneratedBy && Class->GetOutermost()->GetName() == TEXT("/Script/Engine")
+            && Classes.Contains(Class->GetName());
+      };
+      auto HasClosedLightOwner = [&](const UObject* Object) {
+        const auto* Component = Cast<USceneComponent>(Object);
+        const auto* Actor = Component ? Cast<ALight>(Component->GetOwner()) : nullptr;
+        if (!Actor || !IsKnownNative(Actor, ActorClasses) || Actor->GetRootComponent() != Component
+            || Component->GetAttachParent() || Actor->GetAttachParentActor()) return false;
+        for (const UActorComponent* Owned : Actor->GetComponents())
+          if (Owned && !Owned->HasAnyFlags(RF_Transient) && !IsKnownNative(Owned, ComponentClasses)) return false;
+        return true;
+      };
       for (const FOperationReadback& Readback : Readbacks) {
         if (Readback.Operation != EOperation::Update) return {};
         bool bHasProperty = false;
+        bool bHasNativeState = false;
+        bool bUnknownState = false;
         for (const auto& Request : Readback.Requests) {
           const UObject* Object = Request.RootObject;
           if (!Object || Object->GetWorld() != &World || Request.RootStruct || Request.RootData) return {};
-          if (Request.SemanticId != TEXT("core.property")) continue;
-          bHasProperty = true;
           const UClass* Class = Object->GetClass();
           const bool bLight = Class == UDirectionalLightComponent::StaticClass()
               || Class == UPointLightComponent::StaticClass() || Class == USpotLightComponent::StaticClass()
               || Class == URectLightComponent::StaticClass() || Class == USkyLightComponent::StaticClass();
+          if (Request.SemanticId == ActorStateSemanticId || Request.SemanticId == ComponentStateSemanticId) {
+            const bool bActor = Request.SemanticId == ActorStateSemanticId
+                && (Class == AStaticMeshActor::StaticClass() || Object->IsA<ALight>());
+            const bool bComponent = Request.SemanticId == ComponentStateSemanticId
+                && (Class == UStaticMeshComponent::StaticClass() || bLight);
+            if (!bActor && !bComponent) { bUnknownState = true; continue; }
+            // ReadState follows the mapped RootObject. No predicted/default
+            // business-value override may stand in for the persisted read.
+            for (const auto& Context : Request.Context)
+              if (Context.Key != TEXT("scene_editing") && Context.Key != TEXT("actor_level_override")
+                  && !Context.Key.EndsWith(TEXT("_omit"))) return {};
+            bHasNativeState = true;
+            // The ordinary Light property readback includes its real component
+            // state. That companion is not a StaticMesh/whole-scene operation.
+            // Keep unknown owners, attachments and pure state edits on the
+            // extended closure path; unrelated BP actors need not reload here.
+            bExtendedScene |= !(bComponent && bLight && HasClosedLightOwner(Object));
+            continue;
+          }
+          if (Request.SemanticId != TEXT("core.property")) {
+            if (Request.SemanticId != WorldStateSemanticId || Object != &World) bUnknownState = true;
+            continue;
+          }
+          bHasProperty = true;
           const bool bLightProperty = bLight && (Request.PropertyPath == TEXT("Intensity")
               || Request.PropertyPath == TEXT("AttenuationRadius"));
           const bool bPostProcessProperty = Class == APostProcessVolume::StaticClass()
               && (Request.PropertyPath == TEXT("Settings") || Request.PropertyPath.StartsWith(TEXT("Settings.")));
-          if (!bLightProperty && !bPostProcessProperty) return {};
+          bHasPostProcessSettings |= bPostProcessProperty;
+          if (bLightProperty || bPostProcessProperty) continue;
+          bool bNativeProperty = false;
+          if (const auto* Mesh = Class == UStaticMeshComponent::StaticClass()
+                  ? Cast<UStaticMeshComponent>(Object) : nullptr) {
+            for (const TCHAR* Root : {TEXT("BodyInstance"), TEXT("CustomPrimitiveData"), TEXT("OverrideMaterials"),
+                TEXT("StaticMesh"), TEXT("bUseDefaultCollision"), TEXT("bGenerateOverlapEvents"),
+                TEXT("bVisible"), TEXT("bHiddenInGame"), TEXT("CastShadow"), TEXT("Mobility"),
+                TEXT("RelativeLocation"), TEXT("RelativeRotation"), TEXT("RelativeScale3D")})
+              bNativeProperty |= IsPropertyOrChild(Request.PropertyPath, Root);
+            if (!IsExternalAsset(Mesh->GetStaticMesh())) return {};
+            for (const UMaterialInterface* Material : Mesh->GetMaterials())
+              if (!IsExternalAsset(Material)) return {};
+            const FBodyInstance* Body = Mesh->GetBodyInstance(NAME_None, false);
+            if (Body && !IsExternalAsset(Body->GetSimplePhysicalMaterial())) return {};
+          } else if (bLight) {
+            for (const TCHAR* Root : {TEXT("Mobility"), TEXT("IntensityUnits"), TEXT("LightColor"),
+                TEXT("CastShadows"), TEXT("bUseInverseSquaredFalloff"), TEXT("bAtmosphereSunLight"),
+                TEXT("bRealTimeCapture")})
+              bNativeProperty |= IsPropertyOrChild(Request.PropertyPath, Root);
+          }
+          if (!bNativeProperty) return {};
+          bExtendedScene = true;
         }
         // Semantic Level bundles include the world topology context even
         // when only a component/actor property changed. Its actual topology
@@ -3261,15 +3426,34 @@ bool ApplyWorkspaceSource(
             && Readback.Requests[0].RootObject == &World
             && Readback.Requests[0].SemanticId == WorldStateSemanticId
             && World.GetStreamingLevels().IsEmpty();
-        if (!bHasProperty && !bWorldTopology) return {};
+        if (!bHasProperty && !bWorldTopology && !bHasNativeState) return {};
+        if (!bHasProperty && bHasNativeState) bExtendedScene = true;
+        bAnyUnknownState |= bUnknownState;
+        if (bUnknownState && bExtendedScene) return {};
+      }
+      if (bExtendedScene) {
+        // Keep the existing Light/Settings path unchanged. Mixed settings may
+        // contain blendable/owned references and need their original closure.
+        if (bAnyUnknownState || bHasPostProcessSettings || World.GetLevels().Num() != 1
+            || !World.GetStreamingLevels().IsEmpty()) return {};
+        for (const AActor* Actor : World.PersistentLevel->Actors) {
+          if (!Actor || Actor->HasAnyFlags(RF_Transient)) continue;
+          if (!IsKnownNative(Actor, ActorClasses)) return {};
+          for (const UActorComponent* Component : Actor->GetComponents())
+            if (Component && !Component->HasAnyFlags(RF_Transient) && !IsKnownNative(Component, ComponentClasses)) return {};
+        }
+        for (const auto& Readback : Readbacks) for (const auto& Request : Readback.Requests)
+          if (Request.SemanticId == WorldStateSemanticId && Request.Context.Contains(TEXT("world_topology_override"))) return {};
       }
       const double Started = FPlatformTime::Seconds();
+      double MappingSeconds = 0, VerifySeconds = 0;
       TArray<UE::UAI::AssetDurable::FPersistedWorldPackage> Headers;
       Headers.Add({Packages[0].PackageName, Packages[0].FinalPath, false});
       const bool bObserved = UE::UAI::AssetDurable::TryObservePersistedWorld(Headers,
-          [&Readbacks, &Verify, &World](UWorld& SnapshotWorld,
+          [&Readbacks, &Verify, &World, &MappingSeconds, &VerifySeconds](UWorld& SnapshotWorld,
               const UE::UAI::AssetDurable::FPersistedWorldReferenceMap& References,
               FDiagnostic& Error) {
+            const double MappingStarted = FPlatformTime::Seconds();
             ON_SCOPE_EXIT {
               // No raw snapshot object/struct pointer may survive its loader.
               for (auto& Readback : Readbacks) for (auto& Request : Readback.Requests) {
@@ -3304,6 +3488,13 @@ bool ApplyWorkspaceSource(
                       TEXT("mapped_level"), false, true, Original->GetPathName());
                   return false;
                 }
+                if (Request.SemanticId == ActorStateSemanticId) {
+                  // Component-to-world is a derived cache, not persisted map
+                  // data. Recompute it from the loaded relative hierarchy;
+                  // do not run construction or substitute intended transforms.
+                  if (USceneComponent* Root = const_cast<AActor*>(Actor)->GetRootComponent())
+                    Root->UpdateComponentToWorld();
+                }
                 Request.Context.Add(TEXT("actor_level_override"), World.GetOutermost()->GetName());
               }
               if (Request.SemanticId == TEXT("core.property")) {
@@ -3327,33 +3518,39 @@ bool ApplyWorkspaceSource(
               }
             }
             FOperationFailure VerifyFailure;
-            if (Verify(VerifyFailure)) return true;
+            MappingSeconds += FPlatformTime::Seconds() - MappingStarted;
+            const double VerifyStarted = FPlatformTime::Seconds();
+            const bool bVerified = Verify(VerifyFailure);
+            VerifySeconds += FPlatformTime::Seconds() - VerifyStarted;
+            if (bVerified) return true;
             Error = MoveTemp(VerifyFailure.Diagnostic);
             return false;
           }, Failure.Diagnostic);
-      UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=isolated_persisted_readback target=%s operations=%d total_s=%.6f success=%s"),
+      UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=isolated_persisted_readback target=%s operations=%d total_s=%.6f success=%s mapping_s=%.6f verify_s=%.6f"),
           *World.GetPathName(), Readbacks.Num(), FPlatformTime::Seconds() - Started,
-          bObserved ? TEXT("true") : TEXT("false"));
+          bObserved ? TEXT("true") : TEXT("false"), MappingSeconds, VerifySeconds);
       if (bObserved) ActivateLevelCaptureReuse(World);
       return bObserved;
     };
-    BackendOptions.FinalReadback = [&Options, Persistent](FOperationFailure& Failure) {
-      if (Options.FinalReadback && !Options.FinalReadback(Failure)) return false;
-      if (Options.RestoreEditorContext) {
-        Persistent->ReleaseReadbackBindings();
-        return Options.RestoreEditorContext(Failure);
-      }
-      return true;
-    };
+    BackendOptions.FinalReadback = Options.FinalReadback;
   }
   BackendOptions.TransactionDescription =
       NSLOCTEXT("UeAgentInterface", "LevelAuthoringWorkspaceApply",
                 "Apply Level authoring workspace");
   UeAgentAuthoringOperationApply::FApplyWorkspaceResult ApplyResult;
+  const double ExecutionStarted = FPlatformTime::Seconds();
   const bool bApplied = UeAgentAuthoringOperationApply::ApplyWorkspace(
       WorkspaceContract, LoadResult.Workspace, Graph,
       UeAgentApplyInputContract::FRegistry::Get(), ScopedProviders,
       ExecutionOptions, BackendOptions, ApplyResult);
+  const double ExecutionFinished = FPlatformTime::Seconds();
+  // ApplyWorkspace owns the last native commit/rollback and consumer seal.
+  // Its backend has now been destroyed. Only detached results may cross the
+  // caller's subsequent Editor-context restoration/package unload.
+  if (Persistent.IsValid()) Persistent->ReleaseReadbackBindings();
+  UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=level_workspace_apply dependencies_s=%.6f provider_setup_s=%.6f execution_s=%.6f native_settle_nested_s=%.6f success=%s"),
+      DependencyFinished - ApplySourceStarted, ExecutionStarted - DependencyFinished,
+      ExecutionFinished - ExecutionStarted, NativeSettleSeconds, bApplied ? TEXT("true") : TEXT("false"));
   OutResult.UnitsChecked = ApplyResult.Preflight.UnitsChecked;
   OutResult.MutationsApplied = ApplyResult.Execution.MutationsApplied;
   OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;

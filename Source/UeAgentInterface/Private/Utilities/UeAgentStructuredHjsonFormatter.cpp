@@ -1,14 +1,18 @@
 #include "Utilities/UeAgentStructuredHjsonFormatter.h"
+#include "Utilities/UeAgentNativeNumberFormat.h"
 
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonPointerText.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 
 #include "Containers/StringConv.h"
+#include "Containers/ContainerAllocationPolicies.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
 #include <charconv>
 #include <cmath>
+#include <cstring>
 #include <string>
 
 namespace
@@ -51,8 +55,9 @@ namespace
 		Text += ExponentDigits.empty() ? "0" : ExponentDigits;
 	}
 
-	static bool TryFormatFiniteDouble(
-		const double Value,
+	template<typename T>
+	static bool TryFormatFiniteNative(
+		const T Value,
 		const bool bPreserveFloatKind,
 		FString& OutText)
 	{
@@ -171,10 +176,16 @@ namespace
 		bool& bOutNonFinite)
 	{
 		bOutNonFinite = false;
-		const FString Lower = Token.ToLower();
-		if (Lower == TEXT("nan") || Lower == TEXT("infinity") || Lower == TEXT("+infinity")
-			|| Lower == TEXT("-infinity") || Lower == TEXT("inf") || Lower == TEXT("+inf")
-			|| Lower == TEXT("-inf"))
+		const int32 Head = Token.Len() && (Token[0] == TEXT('+') || Token[0] == TEXT('-')) ? 1 : 0;
+		if (Token.Len() > Head && (Token[Head] == TEXT('n') || Token[Head] == TEXT('N')
+			|| Token[Head] == TEXT('i') || Token[Head] == TEXT('I'))
+			&& (Token.Equals(TEXT("nan"), ESearchCase::IgnoreCase)
+				|| Token.Equals(TEXT("infinity"), ESearchCase::IgnoreCase)
+				|| Token.Equals(TEXT("+infinity"), ESearchCase::IgnoreCase)
+				|| Token.Equals(TEXT("-infinity"), ESearchCase::IgnoreCase)
+				|| Token.Equals(TEXT("inf"), ESearchCase::IgnoreCase)
+				|| Token.Equals(TEXT("+inf"), ESearchCase::IgnoreCase)
+				|| Token.Equals(TEXT("-inf"), ESearchCase::IgnoreCase)))
 		{
 			bOutNonFinite = true;
 			return false;
@@ -200,7 +211,7 @@ namespace
 		return FString::ChrN(FMath::Max(0, Level * 2), TEXT(' '));
 	}
 
-	static int64 EscapedQuotedStringLength(const FString& Value)
+	static int64 EscapedQuotedStringLength(const FString& Value, int64 StopAt = MAX_int64)
 	{
 		int64 Length = 2;
 		for (const TCHAR Ch : Value)
@@ -220,6 +231,7 @@ namespace
 				Length += Ch < 0x20 ? 6 : 1;
 				break;
 			}
+			if (Length >= StopAt) return StopAt;
 		}
 		return Length;
 	}
@@ -245,37 +257,35 @@ namespace
 			+ EscapedJsonPointerSegmentLength(Segment);
 	}
 
-	static FString AppendJsonPointer(const FString& Parent, const FString& Segment)
+	static FString AppendJsonPointer(const FString& Parent, const FString& Segment, int64 KnownLength = -1)
 	{
-		const int64 ExpectedLength =
-			AppendedJsonPointerLength(Parent, Segment);
-		FString Result;
-		if (ExpectedLength > 0 && ExpectedLength <= MAX_int32)
-		{
-			Result.Reserve(static_cast<int32>(ExpectedLength));
-		}
-		if (Parent != TEXT("/"))
-		{
-			Result += Parent;
-		}
-		Result.AppendChar(TEXT('/'));
-		for (const TCHAR Ch : Segment)
-		{
-			if (Ch == TEXT('~'))
-			{
-				Result += TEXT("~0");
-			}
-			else if (Ch == TEXT('/'))
-			{
-				Result += TEXT("~1");
-			}
-			else
-			{
-				Result.AppendChar(Ch);
-			}
-		}
-		return Result;
+		return UE::UAI::HjsonWorkspace::PointerText::Child(Parent, Segment,
+			UE::UAI::HjsonWorkspace::PointerText::ENulMode::Omit, KnownLength);
 	}
+
+	// This is the existing field order, carrying the actual borrowed member rather
+	// than searching its source object again for every analysis/render task.
+	struct FOrderedObjectKey
+	{
+		const FString* Name;
+		union {
+			const FUeAgentStructuredHjsonObjectFieldView* Field = nullptr;
+			const FUeAgentStructuredHjsonObjectView::FEntries::ElementType* Entry;
+		};
+		FOrderedObjectKey(const FString* InName, const FUeAgentStructuredHjsonObjectFieldView* InField = nullptr)
+			: Name(InName), Field(InField) {}
+		operator const FString*() const { return Name; }
+		const FString& operator*() const { return *Name; }
+		const FString* operator->() const { return Name; }
+	};
+
+	using FOrderedObjectKeys = TArray<FOrderedObjectKey, TInlineAllocator<16>>;
+	struct FJsonKeyRefs : DefaultKeyFuncs<const FString*>
+	{
+		// Keep TSet<FString>'s original comparison/hash, borrowing only storage.
+		static bool Matches(const FString* A, const FString* B) { return *A == *B; }
+		static uint32 GetKeyHash(const FString* Key) { return GetTypeHash(*Key); }
+	};
 
 	// A borrowed view keeps both supported inputs on the same writer and accounting path.
 	// It never materializes a second tree (FJsonObject cannot represent exact-case keys).
@@ -283,13 +293,26 @@ namespace
 	{
 	public:
 		using FCanonical = UE::UAI::StateSemantic::FUeAgentCanonicalValue;
+		using FCanonicalSubtrees = TMap<const FJsonValue*, const FCanonical*>;
+		using FBorrowedObject = FUeAgentStructuredHjsonObjectView;
+		using FBorrowedField = FUeAgentStructuredHjsonObjectFieldView;
+		using FBorrowedValues = FBorrowedField::FValues;
+		enum class EBorrowed : uint8 { None, Object, Entries, Values, Text, Strings };
 		FWriterNodeView() = default;
 		FWriterNodeView(const TSharedPtr<FJsonValue>& Value) : FWriterNodeView(Value.Get()) {}
 		FWriterNodeView(const TSharedRef<FJsonValue>& Value) : FWriterNodeView(&Value.Get()) {}
 		FWriterNodeView(const TSharedPtr<FJsonObject>& Object) : FWriterNodeView(Object.Get()) {}
 		FWriterNodeView(const TSharedRef<FJsonObject>& Object) : FWriterNodeView(&Object.Get()) {}
-		FWriterNodeView(const FJsonValue* Value) : Json(Value), Type(Value ? Value->Type : EJson::None) {}
-		FWriterNodeView(const FJsonObject* Object) : JsonObject(Object), Type(Object ? EJson::Object : EJson::None) {}
+		FWriterNodeView(const FJsonValue* Value, const FCanonicalSubtrees* InSubtrees = nullptr)
+			: Json(Value), Subtrees(InSubtrees), Type(Value ? Value->Type : EJson::None)
+		{
+			if (Value && Subtrees) {
+				if (const FCanonical* const* Subtree = Subtrees->Find(Value); Subtree && *Subtree)
+					*this = FWriterNodeView(**Subtree);
+			}
+		}
+		FWriterNodeView(const FJsonObject* Object, const FCanonicalSubtrees* InSubtrees = nullptr)
+			: JsonObject(Object), Subtrees(InSubtrees), Type(Object ? EJson::Object : EJson::None) {}
 		FWriterNodeView(const FCanonical& Value) : Canonical(&Value)
 		{
 			using UE::UAI::StateSemantic::EUeAgentValueKind;
@@ -305,25 +328,67 @@ namespace
 			default: break;
 			}
 		}
+		FWriterNodeView(const FBorrowedObject& Object)
+			: Borrowed(Object.Entries ? static_cast<const void*>(Object.Entries) : &Object),
+			  BorrowedKind(Object.Entries ? EBorrowed::Entries : EBorrowed::Object), Type(EJson::Object) {}
+		FWriterNodeView(const FBorrowedField& Field)
+		{
+			if (Field.Canonical) { *this = FWriterNodeView(*Field.Canonical); return; }
+			if (Field.Object) { *this = FWriterNodeView(*Field.Object); return; }
+			if (Field.Text) { Borrowed = Field.Text; BorrowedKind = EBorrowed::Text; Type = EJson::String; }
+			else if (Field.Strings) { Borrowed = Field.Strings; BorrowedKind = EBorrowed::Strings; Type = EJson::Array; }
+			else if (Field.Values) { Borrowed = Field.Values; BorrowedKind = EBorrowed::Values; Type = EJson::Object; }
+		}
+		static FWriterNodeView String(const FString& Text)
+		{
+			FWriterNodeView View; View.Borrowed = &Text; View.BorrowedKind = EBorrowed::Text; View.Type = EJson::String; return View;
+		}
+		bool IsBorrowed() const { return BorrowedKind != EBorrowed::None; }
+		const FBorrowedObject& BorrowedObject() const { return *static_cast<const FBorrowedObject*>(Borrowed); }
+		const FBorrowedObject::FEntries& BorrowedEntries() const { return *static_cast<const FBorrowedObject::FEntries*>(Borrowed); }
+		const FBorrowedValues& BorrowedValues() const { return *static_cast<const FBorrowedValues*>(Borrowed); }
+		const TArray<FString>& BorrowedStrings() const { return *static_cast<const TArray<FString>*>(Borrowed); }
 		const FWriterNodeView* operator->() const { return this; }
-		bool IsValid() const { return Json || JsonObject || Canonical; }
+		bool IsValid() const { return IsBorrowed() || Json || JsonObject || Canonical; }
 		bool IsUnsupported() const { return Canonical && Type == EJson::None; }
-		const void* Get() const { return Canonical ? static_cast<const void*>(Canonical) : JsonObject ? static_cast<const void*>(JsonObject) : Json; }
-		FWriterNodeView AsObject() const { return Canonical || JsonObject ? *this : FWriterNodeView(Json->AsObject()); }
-		FString AsString() const { return Canonical ? Canonical->GetText() : Json->AsString(); }
+		const void* Get() const { return IsBorrowed() ? Borrowed : Canonical ? static_cast<const void*>(Canonical) : JsonObject ? static_cast<const void*>(JsonObject) : Json; }
+		FWriterNodeView AsObject() const { return IsBorrowed() || Canonical || JsonObject ? *this : FWriterNodeView(Json->AsObject().Get(), Subtrees); }
+		const FString& AsString(FString& JsonStorage) const
+		{
+			if (BorrowedKind == EBorrowed::Text) return *static_cast<const FString*>(Borrowed);
+			if (Canonical) return Canonical->GetText();
+			JsonStorage = Json->AsString(); return JsonStorage;
+		}
 		bool AsBool() const { return Canonical ? Canonical->GetBoolean() : Json->AsBool(); }
 		double AsNumber() const { return Json ? Json->AsNumber() : 0.0; }
 		bool PreferStringRepresentation() const { return Canonical || (Json && Json->PreferStringRepresentation()); }
 		bool TryGetString(FString& Out) const { if (Canonical) { Out = Canonical->GetLexeme(); return Type == EJson::Number; } return Json && Json->TryGetString(Out); }
-		SIZE_T GetMemoryFootprint() const { return Canonical ? sizeof(FCanonical) + Canonical->GetText().GetAllocatedSize() + Canonical->GetLexeme().GetAllocatedSize() : Json->GetMemoryFootprint(); }
-		int32 NumFields() const { return Canonical ? Canonical->GetObjectItems().Num() : JsonObject->Values.Num(); }
-		void GetKeys(TArray<FString>& Out) const
+		SIZE_T GetMemoryFootprint() const { return BorrowedKind == EBorrowed::Text ? sizeof(FString) + static_cast<const FString*>(Borrowed)->GetAllocatedSize() : Canonical ? sizeof(FCanonical) + Canonical->GetText().GetAllocatedSize() + Canonical->GetLexeme().GetAllocatedSize() : Json->GetMemoryFootprint(); }
+		int32 NumFields() const { return BorrowedKind == EBorrowed::Object ? BorrowedObject().Fields.Num() : BorrowedKind == EBorrowed::Entries ? BorrowedEntries().Num() : BorrowedKind == EBorrowed::Values ? BorrowedValues().Num() : Canonical ? Canonical->GetObjectItems().Num() : JsonObject->Values.Num(); }
+		void GetKeys(FOrderedObjectKeys& Out) const
 		{
-			if (Canonical) { for (const auto& Field : Canonical->GetObjectItems()) { Out.Add(Field.Key); } }
-			else { JsonObject->Values.GetKeys(Out); }
+			if (BorrowedKind == EBorrowed::Object) { for (const auto& Field : BorrowedObject().Fields) Out.Emplace(Field.Key, &Field); }
+			else if (BorrowedKind == EBorrowed::Entries) { for (const auto& Field : BorrowedEntries()) { Out.Emplace(&Field.Key); Out.Last().Entry = &Field; } }
+			else if (BorrowedKind == EBorrowed::Values) { for (const auto& Field : BorrowedValues()) Out.Add(&Field.Key); }
+			else if (Canonical) { for (const auto& Field : Canonical->GetObjectItems()) { Out.Add(&Field.Key); } }
+			else { for (const auto& Field : JsonObject->Values) { Out.Add(&Field.Key); } }
 		}
 		FWriterNodeView FindField(const FString& Key) const
 		{
+			if (BorrowedKind == EBorrowed::Object) {
+				for (const auto& Field : BorrowedObject().Fields)
+					if (Field.Key->Equals(Key, ESearchCase::CaseSensitive)) return FWriterNodeView(Field);
+				return {};
+			}
+			if (BorrowedKind == EBorrowed::Entries) {
+				for (const auto& Field : BorrowedEntries())
+					if (Field.Key.Equals(Key, ESearchCase::CaseSensitive)) return FWriterNodeView(Field.Value.Get());
+				return {};
+			}
+			if (BorrowedKind == EBorrowed::Values) {
+				const auto* Field = BorrowedValues().Find(Key);
+				return Field ? FWriterNodeView(Field->Get()) : FWriterNodeView();
+			}
 			if (Canonical)
 			{
 				const auto& Fields = Canonical->GetObjectItems();
@@ -337,7 +402,15 @@ namespace
 				return Begin < Fields.Num() && Fields[Begin].Key.Equals(Key, ESearchCase::CaseSensitive)
 					? FWriterNodeView(Fields[Begin].Value.Get()) : FWriterNodeView();
 			}
-			return JsonObject->Values.FindRef(Key);
+			return FWriterNodeView(JsonObject->Values.FindRef(Key).Get(), Subtrees);
+		}
+		FWriterNodeView FindField(const FOrderedObjectKey& Key) const
+		{
+			// The original borrowed-member consumer already carries its actual
+			// member. Sorting/reordering keeps that same pair until the join.
+			// General canonical input retains its original key-lookup semantics.
+			if (BorrowedKind == EBorrowed::Entries) return FWriterNodeView(Key.Entry->Value.Get());
+			return Key.Field ? FWriterNodeView(*Key.Field) : FindField(*Key.Name);
 		}
 		bool HasField(const FString& Key) const { return FindField(Key).IsValid(); }
 		struct FFields;
@@ -347,6 +420,10 @@ namespace
 		const FJsonValue* Json = nullptr;
 		const FJsonObject* JsonObject = nullptr;
 		const FCanonical* Canonical = nullptr;
+		// JSON subtree lookup and a synchronous borrowed input are disjoint.
+		// Reuse the pointer slot instead of enlarging every analysis/write task.
+		union { const FCanonicalSubtrees* Subtrees = nullptr; const void* Borrowed; };
+		EBorrowed BorrowedKind = EBorrowed::None;
 		EJson Type = EJson::None;
 	};
 
@@ -359,16 +436,23 @@ namespace
 			FWriterNodeView Object;
 			int32 Index;
 			TOptional<TMap<FString, TSharedPtr<FJsonValue>>::TConstIterator> JsonIterator;
+			TOptional<FBorrowedValues::TConstIterator> ValuesIterator;
 			FIterator(FWriterNodeView InObject, int32 InIndex) : Object(InObject), Index(InIndex)
 			{
-				if (!Object.Canonical && Index < Object.NumFields()) { JsonIterator.Emplace(Object.JsonObject->Values.CreateConstIterator()); }
+				if (Index < Object.NumFields()) {
+					if (Object.BorrowedKind == EBorrowed::Values) ValuesIterator.Emplace(Object.BorrowedValues().CreateConstIterator());
+					else if (!Object.IsBorrowed() && !Object.Canonical) JsonIterator.Emplace(Object.JsonObject->Values.CreateConstIterator());
+				}
 			}
 			bool operator!=(const FIterator& Other) const { return Index != Other.Index; }
-			void operator++() { ++Index; if (JsonIterator.IsSet()) { ++JsonIterator.GetValue(); } }
+			void operator++() { ++Index; if (JsonIterator.IsSet()) { ++JsonIterator.GetValue(); } if (ValuesIterator.IsSet()) ++ValuesIterator.GetValue(); }
 			FField operator*() const
 			{
+				if (Object.BorrowedKind == EBorrowed::Object) { const auto& Field = Object.BorrowedObject().Fields[Index]; return {*Field.Key, FWriterNodeView(Field)}; }
+				if (Object.BorrowedKind == EBorrowed::Entries) { const auto& Field = Object.BorrowedEntries()[Index]; return {Field.Key, FWriterNodeView(Field.Value.Get())}; }
+				if (Object.BorrowedKind == EBorrowed::Values) { const auto& Field = *ValuesIterator.GetValue(); return {Field.Key, FWriterNodeView(Field.Value.Get())}; }
 				if (Object.Canonical) { const auto& Field = Object.Canonical->GetObjectItems()[Index]; return {Field.Key, FWriterNodeView(Field.Value.Get())}; }
-				const auto& Field = *JsonIterator.GetValue(); return {Field.Key, FWriterNodeView(Field.Value)};
+				const auto& Field = *JsonIterator.GetValue(); return {Field.Key, FWriterNodeView(Field.Value.Get(), Object.Subtrees)};
 			}
 		};
 		FIterator begin() const { return {Object, 0}; }
@@ -377,8 +461,8 @@ namespace
 	struct FWriterNodeView::FArray
 	{
 		FWriterNodeView Value;
-		int32 Num() const { return Value.Canonical ? Value.Canonical->GetArrayItems().Num() : Value.Json->AsArray().Num(); }
-		FWriterNodeView operator[](int32 Index) const { return Value.Canonical ? FWriterNodeView(Value.Canonical->GetArrayItems()[Index].Get()) : FWriterNodeView(Value.Json->AsArray()[Index]); }
+		int32 Num() const { return Value.BorrowedKind == EBorrowed::Strings ? Value.BorrowedStrings().Num() : Value.Canonical ? Value.Canonical->GetArrayItems().Num() : Value.Json->AsArray().Num(); }
+		FWriterNodeView operator[](int32 Index) const { return Value.BorrowedKind == EBorrowed::Strings ? FWriterNodeView::String(Value.BorrowedStrings()[Index]) : Value.Canonical ? FWriterNodeView(Value.Canonical->GetArrayItems()[Index].Get()) : FWriterNodeView(Value.Json->AsArray()[Index].Get(), Value.Subtrees); }
 		struct FIterator
 		{
 			const FArray* Array;
@@ -407,7 +491,7 @@ namespace
 	static constexpr int32 InlineContainerCharacterLimit = 120;
 	static constexpr int32 InlineContainerDepthLimit = 2;
 
-	static bool HasExactKeySet(const TArray<FString>& Keys, const TArray<FString>& ExpectedKeys)
+	static bool HasExactKeySet(TConstArrayView<FOrderedObjectKey> Keys, const TArray<FString>& ExpectedKeys)
 	{
 		if (Keys.Num() != ExpectedKeys.Num())
 		{
@@ -416,7 +500,7 @@ namespace
 
 		for (const FString& ExpectedKey : ExpectedKeys)
 		{
-			if (!Keys.ContainsByPredicate([&](const FString& Key) { return Key.Equals(ExpectedKey, ESearchCase::CaseSensitive); }))
+			if (!Keys.ContainsByPredicate([&](const FString* Key) { return Key->Equals(ExpectedKey, ESearchCase::CaseSensitive); }))
 			{
 				return false;
 			}
@@ -424,31 +508,35 @@ namespace
 		return true;
 	}
 
-	static bool TryGetTupleKeyOrder(const TArray<FString>& Keys, TArray<FString>& OutKeys)
+	static bool TryGetTupleKeyOrder(TConstArrayView<FOrderedObjectKey> Keys, FOrderedObjectKeys& OutKeys)
 	{
 		static const TArray<FString> Pos2DKeys = { TEXT("x"), TEXT("y") };
 		static const TArray<FString> Pos3DKeys = { TEXT("x"), TEXT("y"), TEXT("z") };
 		static const TArray<FString> RotationKeys = { TEXT("pitch"), TEXT("yaw"), TEXT("roll") };
 		static const TArray<FString> ColorKeys = { TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a") };
+		const auto Assign = [&](const TArray<FString>& Order) {
+			for (const FString& Expected : Order)
+				OutKeys.Add(*Keys.FindByPredicate([&](const FString* Key) { return Key->Equals(Expected, ESearchCase::CaseSensitive); }));
+		};
 
 		if (HasExactKeySet(Keys, Pos2DKeys))
 		{
-			OutKeys = Pos2DKeys;
+			Assign(Pos2DKeys);
 			return true;
 		}
 		if (HasExactKeySet(Keys, Pos3DKeys))
 		{
-			OutKeys = Pos3DKeys;
+			Assign(Pos3DKeys);
 			return true;
 		}
 		if (HasExactKeySet(Keys, RotationKeys))
 		{
-			OutKeys = RotationKeys;
+			Assign(RotationKeys);
 			return true;
 		}
 		if (HasExactKeySet(Keys, ColorKeys))
 		{
-			OutKeys = ColorKeys;
+			Assign(ColorKeys);
 			return true;
 		}
 		return false;
@@ -456,12 +544,16 @@ namespace
 
 	struct FCanonicalFragmentProof
 	{
-		TSharedPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalValue> Value;
+		// The caller owns the immutable node. A fragment must not keep a whole
+		// canonical subtree alive merely to prove pointer identity next time.
+		TWeakPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalValue> Value;
 		FString Text;
 		int32 Level = 0;
+		FString FieldName;
 		int32 InlineCount = 0;
 		int32 InlineLength = 0;
 		int32 InlineDepth = 0;
+		bool bNonInline = false;
 		FUeAgentStructuredResourceUsage AnalysisCharges;
 		FUeAgentStructuredResourceUsage RenderCharges;
 	};
@@ -470,32 +562,64 @@ namespace
 		FUeAgentStructuredHjsonWriteOptions::FStableLeafProjection Projection = nullptr;
 		TMap<FString, TArray<FString>> KeyOrder;
 		TMap<FString, TSharedPtr<const FCanonicalFragmentProof>> Fragments;
+		int64 TextChars = 0;
 	};
-	static thread_local TSharedPtr<const FCanonicalFragmentCache> PreviousCanonicalFragments;
+	struct FCanonicalFragmentRegistry
+	{
+		TMap<FString, TSharedPtr<const FCanonicalFragmentCache>> Documents;
+		int32 FragmentCount = 0;
+		int64 TextChars = 0;
+	};
+	static thread_local FCanonicalFragmentRegistry PreviousCanonicalFragments;
+
+	// A digest visitor has no resource-usage consumer. Normal writers retain the
+	// original tracker, including limits/checkpoints and fragment replay charges.
+	struct FWriterResourceUsage
+	{
+		FUeAgentStructuredResourceTracker* Tracker = nullptr;
+		template<typename... A> bool ChargeInputBytes(A&&... Args) const { return !Tracker || Tracker->ChargeInputBytes(Forward<A>(Args)...); }
+		template<typename... A> bool ChargeNodes(A&&... Args) const { return !Tracker || Tracker->ChargeNodes(Forward<A>(Args)...); }
+		template<typename... A> bool ChargeItems(A&&... Args) const { return !Tracker || Tracker->ChargeItems(Forward<A>(Args)...); }
+		template<typename... A> bool ChargeWorkUnits(A&&... Args) const { return !Tracker || Tracker->ChargeWorkUnits(Forward<A>(Args)...); }
+		template<typename... A> bool ChargeOutputChars(A&&... Args) const { return !Tracker || Tracker->ChargeOutputChars(Forward<A>(Args)...); }
+		template<typename... A> bool ChargeEstimatedMemoryBytes(A&&... Args) const { return !Tracker || Tracker->ChargeEstimatedMemoryBytes(Forward<A>(Args)...); }
+		template<typename... A> bool Checkpoint(A&&... Args) const { return !Tracker || Tracker->Checkpoint(Forward<A>(Args)...); }
+		FUeAgentStructuredResourceUsage GetUsage() const { return Tracker ? Tracker->GetUsage() : FUeAgentStructuredResourceUsage{}; }
+	};
 
 	class FHjsonWriter
 	{
+		struct FContainerAnalysis
+		{
+			int32 Count = 0, Length = 0, Depth = 0;
+			bool bHasCount = false, bHasDimensions = false, bHasKeys = false, bNonInline = false;
+		};
+		struct FObjectAnalysis : FContainerAnalysis
+		{
+			FOrderedObjectKeys Keys;
+		};
 	public:
 		explicit FHjsonWriter(
 			const FUeAgentStructuredHjsonWriteOptions* InOptions = nullptr,
-			FUeAgentStructuredResourceTracker* InResourceTracker = nullptr)
+			FUeAgentStructuredResourceTracker* InResourceTracker = nullptr,
+			bool bTrackResourceUsage = true)
 			: Options(InOptions)
 			, OwnedResourceTracker(
-				InResourceTracker
+				InResourceTracker || !bTrackResourceUsage
 					? nullptr
 					: MakeUnique<FUeAgentStructuredResourceTracker>())
-			, ResourceTracker(
-				InResourceTracker
-					? *InResourceTracker
-					: *OwnedResourceTracker)
+			, ResourceTracker{InResourceTracker ? InResourceTracker : OwnedResourceTracker.Get()}
 		{
 		}
 
 		bool TryWriteRootObject(
-			const FWriterNodeView& Object,
+			FWriterNodeView Object,
 			FString& OutText,
 			UE::UAI::Contract::FDiagnostic& OutError) const
 		{
+			if (Options && !Options->CanonicalSubtrees.IsEmpty() && !Object.Canonical && !Object.IsBorrowed())
+				Object = Object.JsonObject ? FWriterNodeView(Object.JsonObject, &Options->CanonicalSubtrees)
+					: FWriterNodeView(Object.Json, &Options->CanonicalSubtrees);
 			Error.Reset();
 			if (Object.Type != EJson::Object)
 			{
@@ -534,7 +658,7 @@ namespace
 				OutError.Reset();
 				return true;
 			}
-			TArray<FWriteTask> Tasks;
+			FWriteStack Tasks;
 			Tasks.Add(FWriteTask::ObjectBody(Object, 0, TEXT("/")));
 			if (!RenderChecked(Tasks, OutText))
 			{
@@ -557,10 +681,13 @@ namespace
 		}
 
 		bool TryWriteValue(
-			const FWriterNodeView& Value,
+			FWriterNodeView Value,
 			FString& OutText,
 			UE::UAI::Contract::FDiagnostic& OutError) const
 		{
+			if (Options && !Options->CanonicalSubtrees.IsEmpty() && !Value.Canonical && !Value.IsBorrowed())
+				Value = Value.JsonObject ? FWriterNodeView(Value.JsonObject, &Options->CanonicalSubtrees)
+					: FWriterNodeView(Value.Json, &Options->CanonicalSubtrees);
 			Error.Reset();
 			BeginFragmentReuse(Value, false);
 			if (!AnalyzeRootValue(Value))
@@ -569,7 +696,7 @@ namespace
 				OutError = Error;
 				return false;
 			}
-			TArray<FWriteTask> Tasks;
+			FWriteStack Tasks;
 			Tasks.Add(FWriteTask::ValueTask(Value, 0, FString(), TEXT("/")));
 			if (!RenderChecked(Tasks, OutText))
 			{
@@ -589,6 +716,24 @@ namespace
 			}
 			CommitFragments();
 			return true;
+		}
+
+		bool TryVisitValueText(FWriterNodeView Value, TFunctionRef<void(FStringView)> Consumer,
+			UE::UAI::Contract::FDiagnostic& OutError) const
+		{
+			if (Options && !Options->CanonicalSubtrees.IsEmpty() && !Value.Canonical && !Value.IsBorrowed())
+				Value = Value.JsonObject ? FWriterNodeView(Value.JsonObject, &Options->CanonicalSubtrees)
+					: FWriterNodeView(Value.Json, &Options->CanonicalSubtrees);
+			Error.Reset();
+			// Digest consumers do not retain fragment text. They use the same
+			// analysis/tasks/render and diagnostics, without a fragment archive.
+			if (!AnalyzeRootValue(Value)) { OutError = Error; return false; }
+			FWriteStack Tasks;
+			Tasks.Add(FWriteTask::ValueTask(Value, 0, FString(), TEXT("/")));
+			FString Unused;
+			const bool bWritten = RenderChecked(Tasks, Unused, &Consumer);
+			OutError = Error;
+			return bWritten;
 		}
 
 	private:
@@ -629,8 +774,24 @@ namespace
 		void BeginFragmentReuse(const FWriterNodeView& Root, bool bRootObject) const
 		{
 			if (!Root.Canonical || Root.Type != EJson::Object || (Options && Options->CanonicalLeafProjection)) return;
-			CandidateLevel = bRootObject ? 1 : 2;
-			for (const auto& Field : Root.Canonical->GetObjectItems())
+			const auto& RootFields = Root.Canonical->GetObjectItems();
+			bool bObjectFields = RootFields.Num() >= 32 && RootFields.Num() > InlineObjectFieldLimit;
+			for (const auto& Field : RootFields)
+				if (Field.Value->GetKind() != UE::UAI::StateSemantic::EUeAgentValueKind::Object) bObjectFields = false;
+			CandidateLevel = bObjectFields ? (bRootObject ? 0 : 1) : (bRootObject ? 1 : 2);
+			if (bObjectFields)
+			{
+				// The field count alone proves this parent cannot become inline.
+				// Baseline envelopes are direct object fields rather than array rows.
+				for (const auto& Field : RootFields)
+				{
+					if (FragmentCandidates.Num() >= 200000) break;
+					const FString Pointer = AppendJsonPointer(TEXT("/"), Field.Key);
+					FragmentCandidates.Add(Pointer, Field.Value);
+					FragmentFieldNames.Add(Pointer, Field.Key);
+				}
+			}
+			else for (const auto& Field : RootFields)
 			{
 				if (Field.Value->GetKind() != UE::UAI::StateSemantic::EUeAgentValueKind::Array) continue;
 				const auto& Items = Field.Value->GetArrayItems();
@@ -649,9 +810,11 @@ namespace
 			NextFragments = MakeShared<FCanonicalFragmentCache>();
 			NextFragments->Projection = Options ? Options->StableCanonicalLeafProjection : nullptr;
 			if (Options) NextFragments->KeyOrder = Options->PreferredKeyOrderByJsonPointer;
-			if (PreviousCanonicalFragments && PreviousCanonicalFragments->Projection == NextFragments->Projection
-				&& PreviousCanonicalFragments->KeyOrder.OrderIndependentCompareEqual(NextFragments->KeyOrder))
-				PriorFragments = PreviousCanonicalFragments;
+			FragmentContext = Options ? Options->CanonicalFragmentContext : FString();
+			const auto* Previous = PreviousCanonicalFragments.Documents.Find(FragmentContext);
+			if (Previous && (*Previous)->Projection == NextFragments->Projection
+				&& (*Previous)->KeyOrder.OrderIndependentCompareEqual(NextFragments->KeyOrder))
+				PriorFragments = *Previous;
 		}
 
 		void KeepFragment(const FString& Pointer, const TSharedPtr<const FCanonicalFragmentProof>& Proof) const
@@ -668,15 +831,33 @@ namespace
 			if (!NextFragments) return;
 			UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=hjson_fragment_format candidates=%d reused=%d retained=%d"),
 				FragmentCandidates.Num(), ReusedFragmentCount, NextFragments->Fragments.Num());
-			PreviousCanonicalFragments = MoveTemp(NextFragments);
+			NextFragments->TextChars = CachedFragmentChars;
+			if (const auto* Previous = PreviousCanonicalFragments.Documents.Find(FragmentContext))
+			{
+				PreviousCanonicalFragments.FragmentCount -= (*Previous)->Fragments.Num();
+				PreviousCanonicalFragments.TextChars -= (*Previous)->TextChars;
+				PreviousCanonicalFragments.Documents.Remove(FragmentContext);
+			}
+			// Keep the total previous proof set bounded. Do not evict a sequential
+			// shard on every new shard: that would make every next export miss.
+			if (PreviousCanonicalFragments.Documents.Num() < 512
+				&& PreviousCanonicalFragments.FragmentCount + NextFragments->Fragments.Num() <= 200000
+				&& PreviousCanonicalFragments.TextChars + CachedFragmentChars <= 256LL * 1024 * 1024)
+			{
+				PreviousCanonicalFragments.FragmentCount += NextFragments->Fragments.Num();
+				PreviousCanonicalFragments.TextChars += CachedFragmentChars;
+				PreviousCanonicalFragments.Documents.Add(FragmentContext, MoveTemp(NextFragments));
+			}
 		}
 
 		enum class EWriteTaskType : uint8
 		{
 			Text,
+			LiteralText,
 			Value,
 			ObjectBody,
 			FragmentExit,
+			SpanExit,
 		};
 
 		struct FWriteTask
@@ -690,6 +871,7 @@ namespace
 			FString JsonPointer;
 			bool bInlineContext = false;
 			bool bTextResourcesPrecharged = false;
+			int32 SpanStart = 0;
 
 			static FWriteTask TextTask(
 				FString InText,
@@ -703,6 +885,23 @@ namespace
 				Task.bTextResourcesPrecharged =
 					bInTextResourcesPrecharged;
 				return Task;
+			}
+			// Only module-lifetime literals use this constructor. Text tasks do
+			// not otherwise consume Value/Level, so keep the view in those slots
+			// rather than enlarging every task or allocating a literal FString.
+			static FWriteTask LiteralTask(FStringView InText, FString InJsonPointer)
+			{
+				FWriteTask Task;
+				Task.Type = EWriteTaskType::LiteralText;
+				Task.Value.Borrowed = InText.GetData();
+				Task.Level = InText.Len();
+				Task.JsonPointer = MoveTemp(InJsonPointer);
+				return Task;
+			}
+			FStringView GetText() const
+			{
+				return Type == EWriteTaskType::LiteralText
+					? FStringView(static_cast<const TCHAR*>(Value.Borrowed), Level) : FStringView(Text);
 			}
 
 			static FWriteTask ValueTask(
@@ -789,10 +988,13 @@ namespace
 			}
 		};
 
+		using FWriteStack = TArray<FWriteTask, TInlineAllocator<64>>;
+		using FAnalysisStack = TArray<FAnalysisTask, TInlineAllocator<32>>;
+
 		bool AnalyzeRootObject(const FWriterNodeView& Object) const
 		{
 			ResetAnalysis();
-			TArray<FAnalysisTask> Stack;
+			FAnalysisStack Stack;
 			Stack.Add(FAnalysisTask::ObjectTask(
 				EAnalysisTaskType::ObjectEnter,
 				Object,
@@ -803,19 +1005,16 @@ namespace
 		bool AnalyzeRootValue(const FWriterNodeView& Value) const
 		{
 			ResetAnalysis();
-			TArray<FAnalysisTask> Stack;
+			FAnalysisStack Stack;
 			Stack.Add(FAnalysisTask::ValueEnter(Value, TEXT("/")));
 			return AnalyzeTasks(Stack);
 		}
 
 		void ResetAnalysis() const
 		{
-			ObjectInlineCountCache.Reset();
-			ArrayInlineCountCache.Reset();
-			ObjectInlineLengthCache.Reset();
-			ArrayInlineLengthCache.Reset();
-			ObjectInlineDepthCache.Reset();
-			ArrayInlineDepthCache.Reset();
+			ObjectAnalysis.Reset();
+			ArrayAnalysis.Reset();
+			FormattedNumbers.Reset();
 			VisitingObjects.Reset();
 			VisitingArrays.Reset();
 		}
@@ -827,8 +1026,8 @@ namespace
 			const bool bChargeResources,
 			FString& OutPointer) const
 		{
-			const int64 PointerChars =
-				AppendedJsonPointerLength(Parent, Segment);
+			const int64 PointerChars = ResourceTracker.Tracker
+				? AppendedJsonPointerLength(Parent, Segment) : 0;
 			const int64 CopyCount =
 				FMath::Max<int64>(1, EstimatedCopies);
 			if (bChargeResources
@@ -844,7 +1043,7 @@ namespace
 				OutPointer.Reset();
 				return false;
 			}
-			OutPointer = AppendJsonPointer(Parent, Segment);
+			OutPointer = AppendJsonPointer(Parent, Segment, ResourceTracker.Tracker ? PointerChars : -1);
 			return true;
 		}
 
@@ -885,7 +1084,7 @@ namespace
 		}
 
 		bool TryMakeStringValueTask(
-			FString& StringValue,
+			const FString& StringValue,
 			const FString& JsonPointer,
 			const bool bInlineContext,
 			const bool bPreflight,
@@ -893,17 +1092,14 @@ namespace
 		{
 			const bool bBare =
 				!bInlineContext && FUeAgentStructuredHjsonFormatter::IsBareString(StringValue);
-			const int64 CanonicalChars = bBare
-				? StringValue.Len()
-				: EscapedQuotedStringLength(StringValue);
+			FString CanonicalText = bBare
+				? StringValue
+				: FUeAgentStructuredHjsonFormatter::EscapeQuotedString(StringValue);
+			const int64 CanonicalChars = CanonicalText.Len();
 			if (bPreflight && !ChargeCanonicalTextResources(CanonicalChars, JsonPointer))
 			{
 				return false;
 			}
-			FString CanonicalText = bBare
-				? MoveTemp(StringValue)
-				: FUeAgentStructuredHjsonFormatter::EscapeQuotedString(
-					StringValue);
 			OutTask = FWriteTask::TextTask(
 				MoveTemp(CanonicalText),
 				JsonPointer,
@@ -911,7 +1107,7 @@ namespace
 			return true;
 		}
 
-		bool AnalyzeTasks(TArray<FAnalysisTask>& Stack) const
+		bool AnalyzeTasks(FAnalysisStack& Stack) const
 		{
 			while (Stack.Num() > 0 && Error.IsEmpty())
 			{
@@ -919,15 +1115,14 @@ namespace
 				if (Task.Type == EAnalysisTaskType::FragmentExit)
 				{
 					auto* Pending = PendingFragments.Find(Task.JsonPointer);
-					const auto* Count = ObjectInlineCountCache.Find(Task.Value.Get());
-					const auto* Length = ObjectInlineLengthCache.Find(Task.Value.Get());
-					const auto* Depth = ObjectInlineDepthCache.Find(Task.Value.Get());
-					if (Pending && Count && Length && Depth
+					const auto* Summary = ObjectAnalysis.Find(Task.Value.Get());
+					if (Pending && Summary && (Summary->bNonInline || (Summary->bHasCount && Summary->bHasDimensions))
 						&& UsageDelta(Pending->AnalysisBefore, ResourceTracker.GetUsage(), Pending->Proof->AnalysisCharges))
 					{
-						Pending->Proof->InlineCount = *Count;
-						Pending->Proof->InlineLength = *Length;
-						Pending->Proof->InlineDepth = *Depth;
+						Pending->Proof->InlineCount = Summary->Count;
+						Pending->Proof->InlineLength = Summary->Length;
+						Pending->Proof->InlineDepth = Summary->Depth;
+						Pending->Proof->bNonInline = Summary->bNonInline;
 					}
 					else PendingFragments.Remove(Task.JsonPointer);
 					continue;
@@ -938,12 +1133,16 @@ namespace
 						Candidate && Candidate->Get() == Task.Value.Canonical)
 					{
 						const auto* Prior = PriorFragments ? PriorFragments->Fragments.Find(Task.JsonPointer) : nullptr;
-						if (Prior && (*Prior)->Value.Get() == Task.Value.Canonical && (*Prior)->Level == CandidateLevel)
+						if (Prior && (*Prior)->Value.Pin().Get() == Task.Value.Canonical && (*Prior)->Level == CandidateLevel
+							&& (*Prior)->FieldName == FragmentFieldNames.FindRef(Task.JsonPointer))
 						{
 							if (!ReplayUsage((*Prior)->AnalysisCharges, Task.JsonPointer)) return false;
-							ObjectInlineCountCache.Add(Task.Value.Get(), (*Prior)->InlineCount);
-							ObjectInlineLengthCache.Add(Task.Value.Get(), (*Prior)->InlineLength);
-							ObjectInlineDepthCache.Add(Task.Value.Get(), (*Prior)->InlineDepth);
+							auto& Summary = ObjectAnalysis.FindOrAdd(Task.Value.Get());
+							Summary.Count = (*Prior)->InlineCount;
+							Summary.Length = (*Prior)->InlineLength;
+							Summary.Depth = (*Prior)->InlineDepth;
+							Summary.bNonInline = (*Prior)->bNonInline;
+							Summary.bHasCount = true; Summary.bHasDimensions = !Summary.bNonInline;
 							AnalyzedFragments.Add(Task.JsonPointer, *Prior);
 							continue;
 						}
@@ -951,6 +1150,7 @@ namespace
 						Pending.Proof = MakeShared<FCanonicalFragmentProof>();
 						Pending.Proof->Value = *Candidate;
 						Pending.Proof->Level = CandidateLevel;
+						Pending.Proof->FieldName = FragmentFieldNames.FindRef(Task.JsonPointer);
 						Pending.AnalysisBefore = ResourceTracker.GetUsage();
 						PendingFragments.Add(Task.JsonPointer, MoveTemp(Pending));
 						FAnalysisTask Exit = Task;
@@ -1000,7 +1200,7 @@ namespace
 		}
 
 		bool AnalyzeValue(
-			TArray<FAnalysisTask>& Stack,
+			FAnalysisStack& Stack,
 			const FWriterNodeView& Input,
 			const FString& JsonPointer) const
 		{
@@ -1056,6 +1256,7 @@ namespace
 				return true;
 			}
 
+			if (!ResourceTracker.Tracker) return true; // Storage usage has no digest consumer.
 			int64 DynamicChars = 0;
 			bool bValueMemoryPrecharged = false;
 			if (Value.IsValid() && Value->Type == EJson::String)
@@ -1074,7 +1275,8 @@ namespace
 					return false;
 				}
 				bValueMemoryPrecharged = true;
-				const FString StringValue = Value->AsString();
+				FString JsonStorage;
+				const FString& StringValue = Value->AsString(JsonStorage);
 				DynamicChars = StringValue.Len();
 			}
 			else if (Value.IsValid()
@@ -1119,7 +1321,7 @@ namespace
 		}
 
 		bool AnalyzeObjectEnter(
-			TArray<FAnalysisTask>& Stack,
+			FAnalysisStack& Stack,
 			const FWriterNodeView& Object,
 			const FString& JsonPointer) const
 		{
@@ -1143,9 +1345,19 @@ namespace
 				return false;
 			}
 			int64 KeyChars = 0;
+			TSet<const FString*, FJsonKeyRefs, TInlineSetAllocator<16>> JsonKeys;
+			if (ResourceTracker.Tracker || (Options && Options->bRequireJsonCompatibleObjectKeys))
 			for (const auto& Field : Object->Fields())
 			{
-				KeyChars += Field.Key.Len();
+				if (Options && Options->bRequireJsonCompatibleObjectKeys) {
+					bool bDuplicate = false; JsonKeys.Add(&Field.Key, &bDuplicate);
+					if (bDuplicate) {
+						SetWriteError(TEXT("canonical_json_object_key_collision"), AppendJsonPointer(JsonPointer, Field.Key),
+							TEXT("The projected JSON object contains a duplicate member key."));
+						return false;
+					}
+				}
+				if (ResourceTracker.Tracker) KeyChars += Field.Key.Len();
 			}
 			const int64 ItemCount = Object->NumFields();
 			const int64 EstimatedBytes =
@@ -1171,7 +1383,7 @@ namespace
 			{
 				return false;
 			}
-			for (const auto& Field : Object->Fields())
+			if (ResourceTracker.Tracker) for (const auto& Field : Object->Fields())
 			{
 				const int64 CanonicalKeyChars =
 					FUeAgentStructuredHjsonFormatter::IsBareKey(Field.Key)
@@ -1191,12 +1403,52 @@ namespace
 				Object,
 				JsonPointer));
 
-			TArray<FString> Keys;
+			// This exact object analysis owns its only key order. No local
+			// array is copied into a second table before analysis/rendering.
+			auto& Summary = ObjectAnalysis.FindOrAdd(Identity);
+			auto& Keys = Summary.Keys;
+			Keys.Reset();
 			Object->GetKeys(Keys);
-			Keys.Sort([](const FString& A, const FString& B) { return A.Compare(B, ESearchCase::CaseSensitive) < 0; });
+			bool bSorted = Object.Canonical != nullptr;
+			if (Object.BorrowedKind == FWriterNodeView::EBorrowed::Object
+				|| Object.BorrowedKind == FWriterNodeView::EBorrowed::Entries) {
+				bSorted = true;
+				for (int32 Index = 1; Index < Keys.Num(); ++Index)
+					if (Keys[Index - 1]->Compare(*Keys[Index], ESearchCase::CaseSensitive) > 0) { bSorted = false; break; }
+			}
+			if (!bSorted) Keys.Sort([](const FOrderedObjectKey& A, const FOrderedObjectKey& B) { return A->Compare(*B, ESearchCase::CaseSensitive) < 0; });
+			if (Object.BorrowedKind == FWriterNodeView::EBorrowed::Object
+				&& !(Options && Options->bRequireJsonCompatibleObjectKeys)) {
+				// The existing non-JSON mode permits duplicate names and reads the
+				// first source member for every occurrence. Keep that exact result.
+				for (int32 Begin = 0; Begin < Keys.Num();) {
+					int32 End = Begin + 1;
+					const auto* First = Keys[Begin].Field;
+					while (End < Keys.Num() && Keys[End]->Equals(*Keys[Begin], ESearchCase::CaseSensitive)) {
+						if (Keys[End].Field < First) First = Keys[End].Field;
+						++End;
+					}
+					for (int32 Index = Begin; Index < End; ++Index) Keys[Index].Field = First;
+					Begin = End;
+				}
+			}
+			if (Object.BorrowedKind == FWriterNodeView::EBorrowed::Entries
+				&& !(Options && Options->bRequireJsonCompatibleObjectKeys)) {
+				for (int32 Begin = 0; Begin < Keys.Num();) {
+					int32 End = Begin + 1;
+					const auto* First = Keys[Begin].Entry;
+					while (End < Keys.Num() && Keys[End]->Equals(*Keys[Begin], ESearchCase::CaseSensitive)) {
+						if (Keys[End].Entry < First) First = Keys[End].Entry;
+						++End;
+					}
+					for (int32 Index = Begin; Index < End; ++Index) Keys[Index].Entry = First;
+					Begin = End;
+				}
+			}
+			Summary.bHasKeys = true;
 			for (int32 Index = Keys.Num() - 1; Index >= 0; --Index)
 			{
-				const FString& Key = Keys[Index];
+				const FString& Key = *Keys[Index];
 				FString ValuePointer;
 				if (!TryAppendTrackedJsonPointer(
 						JsonPointer,
@@ -1208,7 +1460,7 @@ namespace
 					return false;
 				}
 				Stack.Add(FAnalysisTask::ValueEnter(
-					Object->FindField(Key),
+					Object->FindField(Keys[Index]),
 					MoveTemp(ValuePointer)));
 			}
 			return true;
@@ -1222,10 +1474,14 @@ namespace
 			{
 				return;
 			}
-			if (!ObjectInlineCountCache.Contains(Object.Get()))
+			auto& Summary = ObjectAnalysis.FindOrAdd(Object.Get());
+			if (Summary.bNonInline) { VisitingObjects.Remove(Object.Get()); return; }
+			if (!Summary.bHasCount)
 			{
-				int32 Count = Object->NumFields() == 0 ? 1 : 0;
-				for (const auto& Field : Object->Fields())
+				// Every valid field contributes at least one to the old saturated
+				// count. Its existing format limit can decide without child lookup.
+				int32 Count = Object->NumFields() > InlineObjectFieldLimit ? InlineObjectFieldLimit + 1 : Object->NumFields() == 0 ? 1 : 0;
+				if (Count <= InlineObjectFieldLimit) for (const auto& Field : Object->Fields())
 				{
 					Count = FMath::Min(
 						InlineObjectFieldLimit + 1,
@@ -1235,9 +1491,12 @@ namespace
 						break;
 					}
 				}
-				ObjectInlineCountCache.Add(Object.Get(), Count);
+				Summary.Count = Count; Summary.bHasCount = true;
 			}
-			if (!ObjectInlineLengthCache.Contains(Object.Get()))
+			if (Summary.Count > InlineObjectFieldLimit) {
+				Summary.bNonInline = true; VisitingObjects.Remove(Object.Get()); return;
+				}
+			if (!Summary.bHasDimensions)
 			{
 				int32 Length = Object->NumFields() == 0 ? 2 : 4;
 				int32 Depth = 1;
@@ -1247,7 +1506,7 @@ namespace
 						InlineContainerCharacterLimit + 1,
 						FUeAgentStructuredHjsonFormatter::IsBareKey(Field.Key)
 						? Field.Key.Len()
-						: EscapedQuotedStringLength(Field.Key)));
+						: EscapedQuotedStringLength(Field.Key, InlineContainerCharacterLimit + 1)));
 					Length = static_cast<int32>(FMath::Min<int64>(
 						InlineContainerCharacterLimit + 1,
 						static_cast<int64>(Length) + KeyLength + 2
@@ -1255,6 +1514,9 @@ namespace
 					Depth = FMath::Max(
 						Depth,
 						1 + InlineDepthForValue(Field.Value, JsonPointer));
+					if (Length > InlineContainerCharacterLimit || Depth > InlineContainerDepthLimit) {
+						Summary.bNonInline = true; break;
+						}
 				}
 				if (Object->NumFields() > 1)
 				{
@@ -1263,14 +1525,15 @@ namespace
 						static_cast<int64>(Length)
 							+ 2LL * (Object->NumFields() - 1)));
 				}
-				ObjectInlineLengthCache.Add(Object.Get(), Length);
-				ObjectInlineDepthCache.Add(Object.Get(), Depth);
+				Summary.Length = Length; Summary.Depth = Depth;
+				Summary.bNonInline |= Length > InlineContainerCharacterLimit || Depth > InlineContainerDepthLimit;
+				Summary.bHasDimensions = !Summary.bNonInline;
 			}
 			VisitingObjects.Remove(Object.Get());
 		}
 
 		bool AnalyzeArrayEnter(
-			TArray<FAnalysisTask>& Stack,
+			FAnalysisStack& Stack,
 			const FWriterNodeView& ArrayValue,
 			const FString& JsonPointer) const
 		{
@@ -1345,7 +1608,15 @@ namespace
 			{
 				return;
 			}
-			if (!ArrayInlineCountCache.Contains(ArrayValue.Get()))
+			auto& Summary = ArrayAnalysis.FindOrAdd(ArrayValue.Get());
+			if (Summary.bNonInline) { VisitingArrays.Remove(ArrayValue.Get()); return; }
+			// '[' + N nonempty values + 2*(N-1) separators + ']' is at least
+			// 3*N characters. This selects the existing multiline format; it is
+			// not an input quota and all children were still analyzed above.
+			if (ArrayValue->AsArray().Num() > InlineContainerCharacterLimit / 3) {
+				Summary.bNonInline = true; VisitingArrays.Remove(ArrayValue.Get()); return;
+				}
+			if (!Summary.bHasCount)
 			{
 				bool bContainsObject = false;
 				for (const FWriterNodeView& Value : ArrayValue->AsArray())
@@ -1361,9 +1632,8 @@ namespace
 					}
 					if (Value->Type == EJson::Array)
 					{
-						const int32* ChildCount =
-							ArrayInlineCountCache.Find(Value.Get());
-						if (!ChildCount)
+						const auto* Child = ArrayAnalysis.Find(Value.Get());
+						if (!Child || (!Child->bHasCount && !Child->bNonInline))
 						{
 							SetWriteError(
 								TEXT("hjson_internal_error"),
@@ -1371,18 +1641,20 @@ namespace
 								TEXT("missing inline array summary"));
 							return;
 						}
-						if (*ChildCount > InlineObjectFieldLimit)
+						if (Child->bNonInline || Child->Count > InlineObjectFieldLimit)
 						{
 							bContainsObject = true;
 							break;
 						}
 					}
 				}
-				ArrayInlineCountCache.Add(
-					ArrayValue.Get(),
-					bContainsObject ? InlineObjectFieldLimit + 1 : 1);
+				Summary.Count = bContainsObject ? InlineObjectFieldLimit + 1 : 1;
+				Summary.bHasCount = true;
 			}
-			if (!ArrayInlineLengthCache.Contains(ArrayValue.Get()))
+			if (Summary.Count > InlineObjectFieldLimit) {
+				Summary.bNonInline = true; VisitingArrays.Remove(ArrayValue.Get()); return;
+				}
+			if (!Summary.bHasDimensions)
 			{
 				const auto Values = ArrayValue->AsArray();
 				int32 Length = Values.Num() == 0 ? 2 : 2;
@@ -1395,6 +1667,9 @@ namespace
 					Depth = FMath::Max(
 						Depth,
 						1 + InlineDepthForValue(Value, JsonPointer));
+					if (Length > InlineContainerCharacterLimit || Depth > InlineContainerDepthLimit) {
+						Summary.bNonInline = true; break;
+						}
 				}
 				if (Values.Num() > 1)
 				{
@@ -1402,10 +1677,27 @@ namespace
 						InlineContainerCharacterLimit + 1,
 						static_cast<int64>(Length) + 2LL * (Values.Num() - 1)));
 				}
-				ArrayInlineLengthCache.Add(ArrayValue.Get(), Length);
-				ArrayInlineDepthCache.Add(ArrayValue.Get(), Depth);
+				Summary.Length = Length; Summary.Depth = Depth;
+				Summary.bNonInline |= Length > InlineContainerCharacterLimit || Depth > InlineContainerDepthLimit;
+				Summary.bHasDimensions = !Summary.bNonInline;
 			}
 			VisitingArrays.Remove(ArrayValue.Get());
+		}
+
+		bool FormatNumber(const FWriterNodeView& Value, FString& Out, bool& bNonFinite) const
+		{
+			if (const FString* Text = FormattedNumbers.Find(Value.Get())) { Out = *Text; return true; }
+			bNonFinite = false;
+			if (Value->PreferStringRepresentation()) {
+				if (Value.Canonical) {
+					if (!TryCanonicalizeNumberToken(Value.Canonical->GetLexeme(), Out, bNonFinite)) return false;
+				} else {
+					FString Token;
+					if (!Value->TryGetString(Token) || !TryCanonicalizeNumberToken(Token, Out, bNonFinite)) return false;
+				}
+			} else if (!TryFormatFiniteNative(Value->AsNumber(), false, Out)) { bNonFinite = true; return false; }
+			FormattedNumbers.Add(Value.Get(), Out);
+			return true;
 		}
 
 		int32 InlineLengthForValue(
@@ -1421,25 +1713,17 @@ namespace
 			{
 			case EJson::String:
 			{
-				const FString Text = Value->AsString();
+				FString JsonStorage;
+				const FString& Text = Value->AsString(JsonStorage);
 				return static_cast<int32>(FMath::Min<int64>(
 					InlineContainerCharacterLimit + 1,
-					EscapedQuotedStringLength(Text)));
+					EscapedQuotedStringLength(Text, InlineContainerCharacterLimit + 1)));
 			}
 			case EJson::Number:
 			{
 				FString NumberText;
-				if (Value->PreferStringRepresentation())
-				{
-					FString Token;
-					bool bNonFinite = false;
-					if (!Value->TryGetString(Token)
-						|| !TryCanonicalizeNumberToken(Token, NumberText, bNonFinite))
-					{
-						return InlineContainerCharacterLimit + 1;
-					}
-				}
-				else if (!TryFormatFiniteDouble(Value->AsNumber(), false, NumberText))
+				bool bNonFinite = false;
+				if (!FormatNumber(Value, NumberText, bNonFinite))
 				{
 					return InlineContainerCharacterLimit + 1;
 				}
@@ -1448,9 +1732,9 @@ namespace
 			case EJson::Boolean:
 				return Value->AsBool() ? 4 : 5;
 			case EJson::Array:
-				if (const int32* Length = ArrayInlineLengthCache.Find(Value.Get()))
+				if (const auto* Summary = ArrayAnalysis.Find(Value.Get()); Summary && (Summary->bHasDimensions || Summary->bNonInline))
 				{
-					return *Length;
+					return Summary->bNonInline ? InlineContainerCharacterLimit + 1 : Summary->Length;
 				}
 				break;
 			case EJson::Object:
@@ -1460,9 +1744,9 @@ namespace
 				{
 					return 4;
 				}
-				if (const int32* Length = ObjectInlineLengthCache.Find(Object.Get()))
+				if (const auto* Summary = ObjectAnalysis.Find(Object.Get()); Summary && (Summary->bHasDimensions || Summary->bNonInline))
 				{
-					return *Length;
+					return Summary->bNonInline ? InlineContainerCharacterLimit + 1 : Summary->Length;
 				}
 				break;
 			}
@@ -1487,9 +1771,9 @@ namespace
 			}
 			if (Value->Type == EJson::Array)
 			{
-				if (const int32* Depth = ArrayInlineDepthCache.Find(Value.Get()))
+				if (const auto* Summary = ArrayAnalysis.Find(Value.Get()); Summary && (Summary->bHasDimensions || Summary->bNonInline))
 				{
-					return *Depth;
+					return Summary->bNonInline ? InlineContainerDepthLimit + 1 : Summary->Depth;
 				}
 			}
 			else if (Value->Type == EJson::Object)
@@ -1499,9 +1783,9 @@ namespace
 				{
 					return 0;
 				}
-				if (const int32* Depth = ObjectInlineDepthCache.Find(Object.Get()))
+				if (const auto* Summary = ObjectAnalysis.Find(Object.Get()); Summary && (Summary->bHasDimensions || Summary->bNonInline))
 				{
-					return *Depth;
+					return Summary->bNonInline ? InlineContainerDepthLimit + 1 : Summary->Depth;
 				}
 			}
 			SetWriteError(
@@ -1522,9 +1806,9 @@ namespace
 			}
 			if (Value->Type == EJson::Array)
 			{
-				if (const int32* Count = ArrayInlineCountCache.Find(Value.Get()))
+				if (const auto* Summary = ArrayAnalysis.Find(Value.Get()); Summary && (Summary->bHasCount || Summary->bNonInline))
 				{
-					return *Count;
+					return Summary->bNonInline ? InlineObjectFieldLimit + 1 : Summary->Count;
 				}
 			}
 			else if (Value->Type == EJson::Object)
@@ -1534,9 +1818,9 @@ namespace
 				{
 					return 1;
 				}
-				if (const int32* Count = ObjectInlineCountCache.Find(Object.Get()))
+				if (const auto* Summary = ObjectAnalysis.Find(Object.Get()); Summary && (Summary->bHasCount || Summary->bNonInline))
 				{
-					return *Count;
+					return Summary->bNonInline ? InlineObjectFieldLimit + 1 : Summary->Count;
 				}
 			}
 			SetWriteError(
@@ -1546,17 +1830,39 @@ namespace
 			return InlineObjectFieldLimit + 1;
 		}
 
-		bool RenderChecked(TArray<FWriteTask>& Stack, FString& Out) const
+		bool RenderChecked(FWriteStack& Stack, FString& Out,
+			TFunctionRef<void(FStringView)>* Consumer = nullptr) const
 		{
 			// AnalyzeRootValue has already validated the complete tree. Keep every
 			// render check and resource charge, then consume each charged text token
 			// directly instead of discarding it and formatting the tree a second time.
 			// Callers clear the private partial result on any failure.
 			Out.Reset();
+			int32 OutputCharacters = 0;
+			const auto Emit = [&](FStringView Text) {
+				if (Consumer) (*Consumer)(Text); else Out.AppendChars(Text.GetData(), Text.Len());
+				OutputCharacters += Text.Len();
+			};
 			int32 TasksUntilCheckpoint = 1024;
+			const FString SpanPrefix = Options && Options->WrittenValueCharacterSpans
+				? (Options->WrittenValueArrayField.IsEmpty() ? TEXT("/")
+					: AppendJsonPointer(TEXT("/"), Options->WrittenValueArrayField) + TEXT("/")) : FString();
 			while (Stack.Num() > 0 && Error.IsEmpty())
 			{
 				FWriteTask Task = Stack.Pop(EAllowShrinking::No);
+				if (Task.Type == EWriteTaskType::SpanExit) {
+					Options->WrittenValueCharacterSpans->Add(Task.JsonPointer, FIntPoint(Task.SpanStart, OutputCharacters));
+					continue;
+				}
+				if (Task.Type == EWriteTaskType::Value && Task.Value.Type == EJson::Object
+					&& Options && Options->WrittenValueCharacterSpans) {
+					if (Task.JsonPointer.StartsWith(SpanPrefix, ESearchCase::CaseSensitive)
+						&& Task.JsonPointer.Len() > SpanPrefix.Len()
+						&& Task.JsonPointer.Find(TEXT("/"), ESearchCase::CaseSensitive, ESearchDir::FromStart, SpanPrefix.Len()) == INDEX_NONE) {
+						FWriteTask Exit = Task; Exit.Type = EWriteTaskType::SpanExit; Exit.SpanStart = OutputCharacters;
+						Stack.Add(MoveTemp(Exit));
+					}
+				}
 				if (Task.Type == EWriteTaskType::FragmentExit)
 				{
 					if (auto* Pending = PendingFragments.Find(Task.JsonPointer))
@@ -1574,26 +1880,24 @@ namespace
 				{
 					if (const auto* Prior = AnalyzedFragments.Find(Task.JsonPointer))
 					{
-						if ((*Prior)->Value.Get() == Task.Value.Canonical && (*Prior)->Level == Task.Level
-							&& Task.FieldName.IsEmpty() && !Task.bInlineContext)
+						if ((*Prior)->Value.Pin().Get() == Task.Value.Canonical && (*Prior)->Level == Task.Level
+							&& (*Prior)->FieldName == Task.FieldName && !Task.bInlineContext)
 						{
 							if (!ReplayUsage((*Prior)->RenderCharges, Task.JsonPointer)) return false;
-							Out += (*Prior)->Text;
+							Emit((*Prior)->Text);
 							KeepFragment(Task.JsonPointer, *Prior);
 							++ReusedFragmentCount;
 							continue;
 						}
-						// A future writer layout change may invalidate the predicted
-						// context. Rebuild that subtree's summaries before normal render.
-						FragmentCandidates.Remove(Task.JsonPointer);
-						AnalyzedFragments.Remove(Task.JsonPointer);
-						TArray<FAnalysisTask> Analysis;
-						Analysis.Add(FAnalysisTask::ValueEnter(Task.Value, Task.JsonPointer));
-						if (!AnalyzeTasks(Analysis)) return false;
+						// This request selected a proved fragment/context. Missing that
+						// handoff is not permission to rerun a different production path.
+						SetWriteError(TEXT("hjson_fragment_context_unavailable"), Task.JsonPointer,
+							TEXT("The selected formatter fragment no longer matches its actual field/level/inline context. The formatter producer must supply the matching fragment before rendering; no automatic subtree reanalysis was selected."));
+						return false;
 					}
 					if (auto* Pending = PendingFragments.Find(Task.JsonPointer))
 					{
-						if (Pending->Proof->Level == Task.Level && Task.FieldName.IsEmpty() && !Task.bInlineContext)
+						if (Pending->Proof->Level == Task.Level && Pending->Proof->FieldName == Task.FieldName && !Task.bInlineContext)
 						{
 							Pending->RenderBefore = ResourceTracker.GetUsage();
 							Pending->OutputStart = Out.Len();
@@ -1609,11 +1913,11 @@ namespace
 					TasksUntilCheckpoint = 1024;
 					if (!ResourceTracker.Checkpoint(Task.JsonPointer, Error)) break;
 				}
-				if (Task.Type == EWriteTaskType::Text)
+				if (Task.Type == EWriteTaskType::Text || Task.Type == EWriteTaskType::LiteralText)
 				{
 					if (!Task.bTextResourcesPrecharged
 						&& !ChargeCanonicalTextResources(
-							Task.Text.Len(),
+							Task.GetText().Len(),
 							Task.JsonPointer))
 					{
 						break;
@@ -1629,7 +1933,8 @@ namespace
 				switch (Task.Type)
 				{
 				case EWriteTaskType::Text:
-					Out += Task.Text;
+				case EWriteTaskType::LiteralText:
+					Emit(Task.GetText());
 					break;
 				case EWriteTaskType::ObjectBody:
 					PushObjectBody(
@@ -1650,6 +1955,7 @@ namespace
 						true);
 					break;
 				case EWriteTaskType::FragmentExit:
+				case EWriteTaskType::SpanExit:
 					break; // Consumed before dispatch.
 				}
 			}
@@ -1658,7 +1964,7 @@ namespace
 		}
 
 		void PushValue(
-			TArray<FWriteTask>& Stack,
+			FWriteStack& Stack,
 			const FWriterNodeView& Input,
 			const int32 Level,
 			const FString& FieldName,
@@ -1669,14 +1975,15 @@ namespace
 			const FWriterNodeView Value = ProjectedLeaf(Input);
 			if (!Value.IsValid() || Value->Type == EJson::None || Value->Type == EJson::Null)
 			{
-				Stack.Add(FWriteTask::TextTask(TEXT("null"), JsonPointer));
+				Stack.Add(FWriteTask::LiteralTask(TEXT("null"), JsonPointer));
 				return;
 			}
 			switch (Value->Type)
 			{
 			case EJson::String:
 			{
-				FString StringValue = Value->AsString();
+				FString JsonStorage;
+				const FString& StringValue = Value->AsString(JsonStorage);
 				FWriteTask StringTask;
 				if (!TryMakeStringValueTask(
 						StringValue,
@@ -1693,26 +2000,13 @@ namespace
 			case EJson::Number:
 			{
 				FString NumberText;
-				if (Value->PreferStringRepresentation())
-				{
-					FString Token;
-					bool bNonFinite = false;
-					if (!Value->TryGetString(Token)
-						|| !TryCanonicalizeNumberToken(Token, NumberText, bNonFinite))
-					{
-						SetWriteError(
-							bNonFinite ? TEXT("hjson_non_finite_number") : TEXT("hjson_invalid_number"),
-							JsonPointer,
-							bNonFinite ? TEXT("non-finite authoring number") : TEXT("invalid authoring number"));
-						return;
-					}
-				}
-				else if (!TryFormatFiniteDouble(Value->AsNumber(), false, NumberText))
+				bool bNonFinite = false;
+				if (!FormatNumber(Value, NumberText, bNonFinite))
 				{
 					SetWriteError(
-						TEXT("hjson_non_finite_number"),
+						bNonFinite ? TEXT("hjson_non_finite_number") : TEXT("hjson_invalid_number"),
 						JsonPointer,
-						TEXT("non-finite authoring number"));
+						bNonFinite ? TEXT("non-finite authoring number") : TEXT("invalid authoring number"));
 					return;
 				}
 				Stack.Add(FWriteTask::TextTask(
@@ -1721,7 +2015,7 @@ namespace
 				return;
 			}
 			case EJson::Boolean:
-				Stack.Add(FWriteTask::TextTask(
+				Stack.Add(FWriteTask::LiteralTask(
 					Value->AsBool() ? TEXT("true") : TEXT("false"),
 					JsonPointer));
 				return;
@@ -1743,67 +2037,76 @@ namespace
 					bPreflight);
 				return;
 			default:
-				Stack.Add(FWriteTask::TextTask(TEXT("null"), JsonPointer));
+				Stack.Add(FWriteTask::LiteralTask(TEXT("null"), JsonPointer));
 				return;
 			}
 		}
 
-		void OrderedKeys(
+		TConstArrayView<FOrderedObjectKey> OrderedKeys(
 			const FWriterNodeView& Object,
 			const FString& JsonPointer,
-			TArray<FString>& OutKeys) const
+			FOrderedObjectKeys& Reordered) const
 		{
-			OutKeys.Reset();
+			Reordered.Reset();
 			if (!Object.IsValid())
 			{
-				return;
+				return {};
 			}
-			Object->GetKeys(OutKeys);
-			TArray<FString> TupleKeys;
-			if (TryGetTupleKeyOrder(OutKeys, TupleKeys))
+			const auto* Summary = ObjectAnalysis.Find(Object.Get());
+			if (!Summary || !Summary->bHasKeys) {
+				SetWriteError(TEXT("hjson_object_analysis_unavailable"), JsonPointer,
+					TEXT("Object rendering requires the completed field-order handoff from this write call."));
+				return {};
+			}
+			const TConstArrayView<FOrderedObjectKey> Keys(Summary->Keys);
+			if (TryGetTupleKeyOrder(Keys, Reordered))
 			{
-				OutKeys = MoveTemp(TupleKeys);
-				return;
+				return Reordered;
 			}
-			TArray<FString> Remaining = MoveTemp(OutKeys);
-			Remaining.Sort([](const FString& A, const FString& B) { return A.Compare(B, ESearchCase::CaseSensitive) < 0; });
-			OutKeys.Reset();
 			if (Options)
 			{
 				if (const TArray<FString>* Preferred = Options->PreferredKeyOrderByJsonPointer.Find(JsonPointer))
 				{
 					for (const FString& Key : *Preferred)
 					{
-						if (Remaining.ContainsByPredicate([&](const FString& Existing) { return Existing.Equals(Key, ESearchCase::CaseSensitive); }))
+						const auto* ExistingKey = Keys.FindByPredicate([&](const FOrderedObjectKey& Existing) { return Existing->Equals(Key, ESearchCase::CaseSensitive); });
+						if (ExistingKey && !Reordered.ContainsByPredicate([&](const FOrderedObjectKey& Existing) { return Existing->Equals(Key, ESearchCase::CaseSensitive); }))
 						{
-							OutKeys.Add(Key);
-							Remaining.RemoveAll([&](const FString& Existing) { return Existing.Equals(Key, ESearchCase::CaseSensitive); });
+							Reordered.Add(*ExistingKey);
 						}
 					}
+					if (!Reordered.IsEmpty()) {
+						const int32 PreferredCount = Reordered.Num();
+						for (const FOrderedObjectKey& Key : Keys)
+							if (!MakeArrayView(Reordered).Left(PreferredCount).ContainsByPredicate(
+								[&](const FString* Existing) { return Existing->Equals(*Key, ESearchCase::CaseSensitive); })) Reordered.Add(Key);
+						return Reordered;
+						}
 				}
 			}
-			OutKeys.Append(Remaining);
+			return Keys;
 		}
 
 		void PushObjectBody(
-			TArray<FWriteTask>& Stack,
+			FWriteStack& Stack,
 			const FWriterNodeView& Object,
 			const int32 Level,
 			const FString& JsonPointer,
 			const bool bPreflight) const
 		{
-			TArray<FString> Keys;
-			OrderedKeys(Object, JsonPointer, Keys);
-			TArray<FWriteTask> Forward;
+			FOrderedObjectKeys Reordered;
+			const auto Keys = OrderedKeys(Object, JsonPointer, Reordered);
+			const int32 FirstTask = Stack.Num();
+			FWriteStack& Forward = Stack;
 			for (int32 Index = 0; Index < Keys.Num(); ++Index)
 			{
 				if (Index > 0)
 				{
-					Forward.Add(FWriteTask::TextTask(
+					Forward.Add(FWriteTask::LiteralTask(
 						TEXT("\n"),
 						JsonPointer));
 				}
-				const FString& Key = Keys[Index];
+				const FString& Key = *Keys[Index];
 				FString ValuePointer;
 				if (!TryAppendTrackedJsonPointer(
 						JsonPointer,
@@ -1827,20 +2130,20 @@ namespace
 					return;
 				}
 				Forward.Add(MoveTemp(KeyTask));
-				Forward.Add(FWriteTask::TextTask(
+				Forward.Add(FWriteTask::LiteralTask(
 					TEXT(": "),
 					ValuePointer));
 				Forward.Add(FWriteTask::ValueTask(
-					Object->FindField(Key),
+					Object->FindField(Keys[Index]),
 					Level,
 					Key,
 					ValuePointer));
 			}
-			PushForwardTasks(Stack, Forward);
+			ReverseAddedTasks(Stack, FirstTask);
 		}
 
 		void PushObject(
-			TArray<FWriteTask>& Stack,
+			FWriteStack& Stack,
 			const FWriterNodeView& Object,
 			const int32 Level,
 			const FString& FieldName,
@@ -1850,26 +2153,27 @@ namespace
 			(void)FieldName;
 			if (!Object.IsValid() || Object->NumFields() == 0)
 			{
-				Stack.Add(FWriteTask::TextTask(TEXT("{}"), JsonPointer));
+				Stack.Add(FWriteTask::LiteralTask(TEXT("{}"), JsonPointer));
 				return;
 			}
-			TArray<FWriteTask> Forward;
+			const int32 FirstTask = Stack.Num();
+			FWriteStack& Forward = Stack;
 			if (CanInlineObject(Object, JsonPointer))
 			{
-				TArray<FString> Keys;
-				OrderedKeys(Object, JsonPointer, Keys);
-				Forward.Add(FWriteTask::TextTask(
+				FOrderedObjectKeys Reordered;
+				const auto Keys = OrderedKeys(Object, JsonPointer, Reordered);
+				Forward.Add(FWriteTask::LiteralTask(
 					TEXT("{ "),
 					JsonPointer));
 				for (int32 Index = 0; Index < Keys.Num(); ++Index)
 				{
 					if (Index > 0)
 					{
-						Forward.Add(FWriteTask::TextTask(
+						Forward.Add(FWriteTask::LiteralTask(
 							TEXT(", "),
 							JsonPointer));
 					}
-					const FString& Key = Keys[Index];
+					const FString& Key = *Keys[Index];
 					FString ValuePointer;
 					if (!TryAppendTrackedJsonPointer(
 							JsonPointer,
@@ -1890,23 +2194,23 @@ namespace
 						return;
 					}
 					Forward.Add(MoveTemp(KeyTask));
-					Forward.Add(FWriteTask::TextTask(
+					Forward.Add(FWriteTask::LiteralTask(
 						TEXT(": "),
 						ValuePointer));
 					Forward.Add(FWriteTask::ValueTask(
-						Object->FindField(Key),
+						Object->FindField(Keys[Index]),
 						0,
 						Key,
 						ValuePointer,
 						true));
 				}
-				Forward.Add(FWriteTask::TextTask(
+				Forward.Add(FWriteTask::LiteralTask(
 					TEXT(" }"),
 					JsonPointer));
 			}
 			else
 			{
-				Forward.Add(FWriteTask::TextTask(
+				Forward.Add(FWriteTask::LiteralTask(
 					TEXT("{\n"),
 					JsonPointer));
 				Forward.Add(FWriteTask::ObjectBody(Object, Level + 1, JsonPointer));
@@ -1914,11 +2218,11 @@ namespace
 					TEXT("\n") + Padding(Level) + TEXT("}"),
 					JsonPointer));
 			}
-			PushForwardTasks(Stack, Forward);
+			ReverseAddedTasks(Stack, FirstTask);
 		}
 
 		void PushArray(
-			TArray<FWriteTask>& Stack,
+			FWriteStack& Stack,
 			const FWriterNodeView& ArrayValue,
 			const int32 Level,
 			const FString& JsonPointer,
@@ -1928,11 +2232,12 @@ namespace
 				ArrayValue->AsArray();
 			if (Values.Num() == 0)
 			{
-				Stack.Add(FWriteTask::TextTask(TEXT("[]"), JsonPointer));
+				Stack.Add(FWriteTask::LiteralTask(TEXT("[]"), JsonPointer));
 				return;
 			}
-			TArray<FWriteTask> Forward;
-			Forward.Add(FWriteTask::TextTask(TEXT("["), JsonPointer));
+			const int32 FirstTask = Stack.Num();
+			FWriteStack& Forward = Stack;
+			Forward.Add(FWriteTask::LiteralTask(TEXT("["), JsonPointer));
 			const bool bInline = CanInlineArray(ArrayValue, JsonPointer);
 			for (int32 Index = 0; Index < Values.Num(); ++Index)
 			{
@@ -1951,7 +2256,7 @@ namespace
 				{
 					if (Index > 0)
 					{
-						Forward.Add(FWriteTask::TextTask(
+						Forward.Add(FWriteTask::LiteralTask(
 							TEXT(", "),
 							JsonPointer));
 					}
@@ -1969,18 +2274,18 @@ namespace
 					ValuePointer,
 					bInline));
 			}
-			Forward.Add(FWriteTask::TextTask(
-				bInline ? TEXT("]") : TEXT("\n") + Padding(Level) + TEXT("]"),
-				JsonPointer));
-			PushForwardTasks(Stack, Forward);
+			if (bInline) Forward.Add(FWriteTask::LiteralTask(TEXT("]"), JsonPointer));
+			else Forward.Add(FWriteTask::TextTask(TEXT("\n") + Padding(Level) + TEXT("]"), JsonPointer));
+			ReverseAddedTasks(Stack, FirstTask);
 		}
 
-		static void PushForwardTasks(TArray<FWriteTask>& Stack, TArray<FWriteTask>& Forward)
+		static void ReverseAddedTasks(FWriteStack& Stack, int32 First)
 		{
-			for (int32 Index = Forward.Num() - 1; Index >= 0; --Index)
-			{
-				Stack.Add(MoveTemp(Forward[Index]));
-			}
+			// Build/check in the original diagnostic order, directly in the actual
+			// work stack. Reverse only this append; no temporary Forward allocation
+			// or second traversal that moves every task into another container.
+			for (int32 Last = Stack.Num() - 1; First < Last; ++First, --Last)
+				Swap(Stack[First], Stack[Last]);
 		}
 
 		bool CanInlineObject(
@@ -1991,15 +2296,12 @@ namespace
 			{
 				return true;
 			}
-			if (const int32* Count =
-					ObjectInlineCountCache.Find(Object.Get()))
+			if (const auto* Summary = ObjectAnalysis.Find(Object.Get()); Summary && (Summary->bHasCount || Summary->bNonInline))
 			{
-				const int32* Length = ObjectInlineLengthCache.Find(Object.Get());
-				const int32* Depth = ObjectInlineDepthCache.Find(Object.Get());
-				return Length && Depth
-					&& *Count <= InlineObjectFieldLimit
-					&& *Length <= InlineContainerCharacterLimit
-					&& *Depth <= InlineContainerDepthLimit;
+				return !Summary->bNonInline && Summary->bHasDimensions
+					&& Summary->Count <= InlineObjectFieldLimit
+					&& Summary->Length <= InlineContainerCharacterLimit
+					&& Summary->Depth <= InlineContainerDepthLimit;
 			}
 			SetWriteError(
 				TEXT("hjson_internal_error"),
@@ -2012,15 +2314,12 @@ namespace
 			const FWriterNodeView& ArrayValue,
 			const FString& JsonPointer) const
 		{
-			if (const int32* Count =
-					ArrayInlineCountCache.Find(ArrayValue.Get()))
+			if (const auto* Summary = ArrayAnalysis.Find(ArrayValue.Get()); Summary && (Summary->bHasCount || Summary->bNonInline))
 			{
-				const int32* Length = ArrayInlineLengthCache.Find(ArrayValue.Get());
-				const int32* Depth = ArrayInlineDepthCache.Find(ArrayValue.Get());
-				return Length && Depth
-					&& *Count <= InlineObjectFieldLimit
-					&& *Length <= InlineContainerCharacterLimit
-					&& *Depth <= InlineContainerDepthLimit;
+				return !Summary->bNonInline && Summary->bHasDimensions
+					&& Summary->Count <= InlineObjectFieldLimit
+					&& Summary->Length <= InlineContainerCharacterLimit
+					&& Summary->Depth <= InlineContainerDepthLimit;
 			}
 			SetWriteError(
 				TEXT("hjson_internal_error"),
@@ -2045,18 +2344,20 @@ namespace
 
 		const FUeAgentStructuredHjsonWriteOptions* Options = nullptr;
 		TUniquePtr<FUeAgentStructuredResourceTracker> OwnedResourceTracker;
-		FUeAgentStructuredResourceTracker& ResourceTracker;
-		mutable TMap<const void*, int32> ObjectInlineCountCache;
-		mutable TMap<const void*, int32> ArrayInlineCountCache;
-		mutable TMap<const void*, int32> ObjectInlineLengthCache;
-		mutable TMap<const void*, int32> ArrayInlineLengthCache;
-		mutable TMap<const void*, int32> ObjectInlineDepthCache;
-		mutable TMap<const void*, int32> ArrayInlineDepthCache;
-		mutable TSet<const void*> VisitingObjects;
-		mutable TSet<const void*> VisitingArrays;
+		FWriterResourceUsage ResourceTracker;
+		// Borrow original immutable member names through this writer only. The
+		// input/leaf projection owns their storage; growing this writer's lookup
+		// map cannot move those input member names. Inputs remain immutable.
+		mutable TMap<const void*, FObjectAnalysis, TInlineSetAllocator<4>> ObjectAnalysis;
+		mutable TMap<const void*, FContainerAnalysis, TInlineSetAllocator<4>> ArrayAnalysis;
+		mutable TMap<const void*, FString, TInlineSetAllocator<4>> FormattedNumbers;
+		mutable TSet<const void*, DefaultKeyFuncs<const void*>, TInlineSetAllocator<4>> VisitingObjects;
+		mutable TSet<const void*, DefaultKeyFuncs<const void*>, TInlineSetAllocator<4>> VisitingArrays;
 		mutable UE::UAI::Contract::FDiagnostic Error;
 		mutable TMap<const FWriterNodeView::FCanonical*, TSharedPtr<FJsonValue>> LeafProjections;
 		mutable TMap<FString, TSharedPtr<const FWriterNodeView::FCanonical>> FragmentCandidates;
+		mutable TMap<FString, FString> FragmentFieldNames;
+		mutable FString FragmentContext;
 		mutable TSharedPtr<const FCanonicalFragmentCache> PriorFragments;
 		mutable TSharedPtr<FCanonicalFragmentCache> NextFragments;
 		mutable TMap<FString, FPendingFragment> PendingFragments;
@@ -2073,6 +2374,67 @@ namespace
 const TCHAR* FUeAgentStructuredHjsonFormatter::DialectId()
 {
 	return TEXT("uai-hjson-authoring/1");
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryVisitValueText(const TSharedRef<FJsonValue>& Value,
+	const FUeAgentStructuredHjsonWriteOptions& Options, TFunctionRef<void(FStringView)> Consumer,
+	UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return FHjsonWriter(&Options, nullptr, false).TryVisitValueText(FWriterNodeView(&Value.Get()), Consumer, OutError);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryVisitValueText(const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value,
+	const FUeAgentStructuredHjsonWriteOptions& Options, TFunctionRef<void(FStringView)> Consumer,
+	UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return FHjsonWriter(&Options, nullptr, false).TryVisitValueText(FWriterNodeView(Value), Consumer, OutError);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryVisitValueText(const FUeAgentStructuredHjsonObjectView& Object,
+	const FUeAgentStructuredHjsonWriteOptions& Options, TFunctionRef<void(FStringView)> Consumer,
+	UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return FHjsonWriter(&Options, nullptr, false).TryVisitValueText(FWriterNodeView(Object), Consumer, OutError);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryWriteValue(const FUeAgentStructuredHjsonObjectView& Object,
+	const FUeAgentStructuredHjsonWriteOptions& Options, FString& OutText,
+	UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return FHjsonWriter(&Options).TryWriteValue(FWriterNodeView(Object), OutText, OutError);
+}
+
+bool UeAgentNumericFormatting::TryFormatNative(float Value, bool PreserveDecimalKind, FString& OutText)
+{
+	return TryFormatFiniteNative(Value, PreserveDecimalKind, OutText);
+}
+
+bool UeAgentNumericFormatting::TryFormatNative(double Value, bool PreserveDecimalKind, FString& OutText)
+{
+	return TryFormatFiniteNative(Value, PreserveDecimalKind, OutText);
+}
+
+namespace
+{
+	template<typename T>
+	TSharedPtr<FJsonValue> MakeNativeFloatingValue(T Value)
+	{
+		const T Number = Value == T(0) ? T(0) : Value;
+		FString Text;
+		if (!UeAgentNumericFormatting::TryFormatNative(Number, true, Text))
+			return MakeShared<FJsonValueNumber>(static_cast<double>(Number));
+		return MakeShared<FJsonValueNumberString>(MoveTemp(Text));
+	}
+}
+
+TSharedPtr<FJsonValue> UeAgentNumericFormatting::MakeNativeValue(float Value)
+{
+	return MakeNativeFloatingValue(Value);
+}
+
+TSharedPtr<FJsonValue> UeAgentNumericFormatting::MakeNativeValue(double Value)
+{
+	return MakeNativeFloatingValue(Value);
 }
 
 FString FUeAgentStructuredHjsonFormatter::WriteObject(const TSharedRef<FJsonObject>& Object)
@@ -2139,6 +2501,85 @@ bool FUeAgentStructuredHjsonFormatter::TryWriteObject(
 		Object,
 		OutText,
 		OutError);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryWriteObjectFragments(
+	TConstArrayView<FUeAgentStructuredHjsonObjectFragment> Fragments, const FString& ArrayField,
+	TArray<uint8>& OutUtf8, UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return TryWriteObjectFragments(Fragments, ArrayField, OutUtf8, OutError, nullptr);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryWriteObjectFragments(
+	TConstArrayView<FUeAgentStructuredHjsonObjectFragment> Fragments, const FString& ArrayField,
+	TArray<uint8>& OutUtf8, UE::UAI::Contract::FDiagnostic& OutError, TArray<FIntPoint>* OutFragmentByteSpans)
+{
+	OutUtf8.Reset(); OutError.Reset();
+	if (OutFragmentByteSpans) { OutFragmentByteSpans->Reset(); OutFragmentByteSpans->SetNum(Fragments.Num()); }
+	const bool bArray = !ArrayField.IsEmpty();
+	TArray<int32> Order; Order.Reserve(Fragments.Num());
+	int64 Bytes = 32;
+	for (int32 I = 0; I < Fragments.Num(); ++I) {
+		const auto& Part = Fragments[I];
+		if (Part.Utf8.Num() < 3 || Part.Utf8[0] != '{' || Part.Utf8.Last() != '}'
+			|| Part.Depth < 0 || Part.Depth > 2 || (!bArray && Part.Key.IsEmpty())
+			|| !std::memchr(Part.Utf8.GetData(), '\n', Part.Utf8.Num())) {
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_fragment_shape_invalid"),
+				TEXT("A reusable fragment must be a complete multiline object at its recorded block depth."), TEXT("hjson_write"));
+			return false;
+		}
+		Order.Add(I); Bytes += int64(Part.Utf8.Num()) * 3 + int64(Part.Key.Len()) * 6 + 16;
+	}
+	if (!bArray) Order.Sort([&](int32 A, int32 B) { return Fragments[A].Key.Compare(Fragments[B].Key, ESearchCase::CaseSensitive) < 0; });
+	for (int32 I = 1; !bArray && I < Order.Num(); ++I)
+		if (Fragments[Order[I - 1]].Key.Equals(Fragments[Order[I]].Key, ESearchCase::CaseSensitive)) {
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_fragment_key_duplicate"),
+				TEXT("A reusable object member key must be unique."), TEXT("hjson_write")); return false;
+		}
+	FUeAgentStructuredResourceTracker Resources;
+	if (Bytes > MAX_int32) {
+		OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_fragment_output_too_large"),
+			TEXT("The fragment output cannot fit the writer's byte container."), TEXT("hjson_write")); return false;
+	}
+	if (!Resources.ChargeEstimatedMemoryBytes(Bytes, TEXT("/"), OutError)
+		|| !Resources.ChargeItems(Fragments.Num(), TEXT("/"), OutError)) return false;
+	auto AppendText = [&](const FString& Text) { const FTCHARToUTF8 Utf8(*Text); OutUtf8.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length()); };
+	auto KeyText = [](const FString& Key) { return IsBareKey(Key) ? Key : EscapeQuotedString(Key); };
+	AppendText(TEXT("{\n"));
+	if (bArray) AppendText(TEXT("  ") + KeyText(ArrayField) + TEXT(": [\n"));
+	const int32 Depth = bArray ? 2 : 1;
+	for (int32 Index : Order) {
+		const auto& Part = Fragments[Index];
+		if (!Resources.ChargeInputBytes(Part.Utf8.Num(), TEXT("/"), OutError)
+			|| !Resources.ChargeWorkUnits(Part.Utf8.Num(), TEXT("/"), OutError)) { OutUtf8.Reset(); return false; }
+		AppendText(FString::ChrN(Depth * 2, TEXT(' ')));
+		if (!bArray) AppendText(KeyText(Part.Key) + TEXT(": "));
+		const int32 SpanStart = OutUtf8.Num();
+		if (Part.Depth == Depth) OutUtf8.Append(Part.Utf8.GetData(), Part.Utf8.Num());
+		else {
+			// Fresh standalone values have depth zero. Existing accepted spans
+			// already have the correct block depth and take the direct-copy path.
+			int32 Start = 0;
+			for (int32 Pos = 0; Pos < Part.Utf8.Num(); ++Pos) if (Part.Utf8[Pos] == '\n') {
+				OutUtf8.Append(Part.Utf8.GetData() + Start, Pos - Start + 1);
+				Start = Pos + 1;
+				for (int32 N = 0; N < Part.Depth * 2; ++N) {
+					if (Start >= Part.Utf8.Num() || Part.Utf8[Start] != ' ') {
+						OutUtf8.Reset(); OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_fragment_indent_invalid"),
+							TEXT("A reusable fragment does not have its recorded block indentation."), TEXT("hjson_write")); return false;
+					}
+					++Start;
+				}
+				AppendText(FString::ChrN(Depth * 2, TEXT(' '))); Pos = Start - 1;
+			}
+			OutUtf8.Append(Part.Utf8.GetData() + Start, Part.Utf8.Num() - Start);
+		}
+		if (OutFragmentByteSpans) (*OutFragmentByteSpans)[Index] = FIntPoint(SpanStart, OutUtf8.Num());
+		AppendText(TEXT("\n"));
+	}
+	if (bArray) AppendText(TEXT("  ]\n"));
+	AppendText(TEXT("}\n"));
+	return Resources.Checkpoint(TEXT("/"), OutError);
 }
 
 bool FUeAgentStructuredHjsonFormatter::TryWriteValue(
@@ -2264,14 +2705,20 @@ bool FUeAgentStructuredHjsonFormatter::IsBareString(const FString& Value)
 FString FUeAgentStructuredHjsonFormatter::EscapeQuotedString(const FString& Value)
 {
 	FString Out;
-	const int64 ExpectedLength = EscapedQuotedStringLength(Value);
-	if (ExpectedLength > 0 && ExpectedLength <= MAX_int32)
+	const int64 PlainLength = int64(Value.Len()) + 2;
+	if (PlainLength <= MAX_int32)
 	{
-		Out.Reserve(static_cast<int32>(ExpectedLength));
+		Out.Reserve(static_cast<int32>(PlainLength));
 	}
 	Out.AppendChar(TEXT('"'));
-	for (const TCHAR Ch : Value)
+	// Ordinary text needs one scan and one append per unescaped run, rather
+	// than a length pre-scan followed by one FString mutation per character.
+	int32 RunStart = 0;
+	for (int32 Index = 0; Index < Value.Len(); ++Index)
 	{
+		const TCHAR Ch = Value[Index];
+		if (Ch >= 0x20 && Ch != TEXT('"') && Ch != TEXT('\\')) continue;
+		Out.AppendChars(*Value + RunStart, Index - RunStart);
 		switch (Ch)
 		{
 		case TEXT('"'):
@@ -2296,17 +2743,17 @@ FString FUeAgentStructuredHjsonFormatter::EscapeQuotedString(const FString& Valu
 			Out += TEXT("\\t");
 			break;
 		default:
-			if (Ch < 0x20)
 			{
-				Out += FString::Printf(TEXT("\\u%04x"), static_cast<uint32>(Ch));
-			}
-			else
-			{
-				Out.AppendChar(Ch);
+				static constexpr TCHAR Hex[] = TEXT("0123456789abcdef");
+				const TCHAR Escape[] {TEXT('\\'), TEXT('u'), TEXT('0'), TEXT('0'),
+					Hex[static_cast<uint32>(Ch) >> 4], Hex[static_cast<uint32>(Ch) & 0xf]};
+				Out.AppendChars(Escape, UE_ARRAY_COUNT(Escape));
 			}
 			break;
 		}
+		RunStart = Index + 1;
 	}
+	Out.AppendChars(*Value + RunStart, Value.Len() - RunStart);
 	Out.AppendChar(TEXT('"'));
 	return Out;
 }

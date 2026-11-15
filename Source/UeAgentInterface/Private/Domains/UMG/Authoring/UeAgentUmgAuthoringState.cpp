@@ -13,6 +13,7 @@
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
 #include "Components/Widget.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringDescriptors.h"
@@ -76,6 +77,43 @@ namespace UeAgentUmgAuthoring
 			Request.RootOwnerPath = Selectors.FindRef(TEXT("asset_path"));
 			Request.Context = Context;
 			OutRequests.Add(MoveTemp(Request));
+			return true;
+		}
+
+		bool AppendExportRootReadRequests(const UWidgetBlueprint& Asset, const FString& AssetPath,
+			TArray<UeAgentAuthoringState::FReadRequest>& Requests, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			const TMap<FString, FString> Selectors = {{TEXT("asset_path"), AssetPath}};
+			if (!AddReadRequest(ExportTargetSemanticId, AssetIdentityModelId, TEXT("umg_asset"),
+					Selectors, &Asset, {}, Requests, Error)) return false;
+			Requests.Last().MarkExportTarget();
+			return AddReadRequest(ParentClassSemanticId, AssetIdentityModelId, TEXT("umg_asset"),
+				Selectors, &Asset, {}, Requests, Error);
+		}
+
+		bool CapturePublicRoot(const UWidgetBlueprint& Asset, const UeAgentAuthoringState::FReadRequest& Request,
+			UeAgentAuthoringState::FStateValue& Value, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			const FString AssetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+			if (Asset.GetOutermost()->GetName() != AssetPath)
+			{
+				Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_observed_target_mismatch"),
+					TEXT("The observed widget Blueprint does not match the prepared asset."), TEXT("state_capture"));
+				Error.TargetPath = AssetPath;
+				return false;
+			}
+			TArray<UeAgentAuthoringState::FReadRequest> Inputs;
+			if (!AppendExportRootReadRequests(Asset, AssetPath, Inputs, Error)) return false;
+			UeAgentAuthoringState::FCaptureResult Capture;
+			if (!UeAgentAuthoringState::CaptureSnapshot(Inputs, Capture)) { Error = Capture.Diagnostic; return false; }
+			auto Resources = UE::UAI::HjsonWorkspace::MakeSemanticWorkspaceResourceTracker();
+			UE::UAI::HjsonWorkspace::FWorkspaceError ProjectionError;
+			if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(TEXT("ue.widget_blueprint.asset"),
+				TEXT("llm_authoring"), Capture.Snapshot, Resources, Value.AuthoringProjection, ProjectionError))
+			{
+				Error = ProjectionError.GetDiagnostic();
+				return false;
+			}
 			return true;
 		}
 
@@ -321,6 +359,12 @@ OutError.ExpectedValue = MakeShared<FJsonValueString>(!Blueprint ? UWidgetBluepr
 						*Blueprint, Request.TargetIdentity.GetSelector(TEXT("asset_path")), OutError)
 					: MakeShared<FJsonObject>();
 				if (!State) return UeAgentAuthoringState::EReadOutcome::Failed;
+				if (Request.SemanticId == AssetSemanticId)
+				{
+					OutValue.bAuthoringVisible = false;
+					if (Request.bCaptureAuthoringProjection && !CapturePublicRoot(*Blueprint, Request, OutValue, OutError))
+						return UeAgentAuthoringState::EReadOutcome::Failed;
+				}
 				if (Request.SemanticId == ExportTargetSemanticId)
 				{
 					State->SetStringField(
@@ -715,13 +759,7 @@ OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_snapshot_identity_i
 		OutRequests.Reset();
 		OutError.Reset();
 		const FString AssetPath = Asset.GetOutermost()->GetName();
-		const TMap<FString, FString> AssetSelectors = { { TEXT("asset_path"), AssetPath } };
-		if (!AddReadRequest(
-			ExportTargetSemanticId, AssetIdentityModelId, TEXT("umg_asset"),
-			AssetSelectors, &Asset, {}, OutRequests, OutError)
-			|| !AddReadRequest(
-				ParentClassSemanticId, AssetIdentityModelId, TEXT("umg_asset"),
-				AssetSelectors, &Asset, {}, OutRequests, OutError))
+		if (!AppendExportRootReadRequests(Asset, AssetPath, OutRequests, OutError))
 		{
 			return false;
 		}

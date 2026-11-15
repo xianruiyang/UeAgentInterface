@@ -288,6 +288,12 @@ namespace UE::UAI::CommandContract
 						false,
 						false,
 					},
+					{
+						TEXT("export_mode"),
+						EUeAgentCommandWireType::String,
+						false,
+						false,
+					},
 				},
 				1,
 				1,

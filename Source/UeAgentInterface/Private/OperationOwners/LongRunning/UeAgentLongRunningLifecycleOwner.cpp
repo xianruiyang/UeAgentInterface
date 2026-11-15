@@ -123,16 +123,53 @@ namespace UE::UAI::OperationOwners::LongRunning
 			return true;
 		}
 
+		// A concurrent control read borrows the existing port under the host
+		// lifetime lock. Never copy its default-mode shared reference on the
+		// network thread, or create a runtime/World there.
+		thread_local Contract::IUeAgentOperationApplicationPort* BorrowedReadPort = nullptr;
+		class FProcessReadScope final : public Contract::IUeAgentOperationReadScope
+		{
+		public:
+			explicit FProcessReadScope(const Contract::FUeAgentOperationRequest& Request)
+				: Host(ProductionHost()), Previous(BorrowedReadPort)
+			{
+				bLocked = Host.Mutex.TryLock();
+				if (!bLocked || !Host.Runtime) return;
+				auto& Port = Host.Runtime->GetOperationPort().Get();
+				Inner = Port.TryBeginConcurrentRead(Request);
+				if (Inner) BorrowedReadPort = &Port;
+			}
+			~FProcessReadScope() override
+			{
+				Inner.Reset();
+				BorrowedReadPort = Previous;
+				if (bLocked) Host.Mutex.Unlock();
+			}
+			bool IsAvailable() const { return Inner.IsValid(); }
+		private:
+			FProductionHost& Host;
+			Contract::IUeAgentOperationApplicationPort* Previous;
+			TUniquePtr<Contract::IUeAgentOperationReadScope> Inner;
+			bool bLocked = false;
+		};
 		class FProcessOperationPort final
 			: public Contract::IUeAgentOperationApplicationPort
 		{
 		public:
+			TUniquePtr<Contract::IUeAgentOperationReadScope> TryBeginConcurrentRead(
+				const Contract::FUeAgentOperationRequest& Request) override
+			{
+				auto Scope = MakeUnique<FProcessReadScope>(Request);
+				if (!Scope->IsAvailable()) return {};
+				return Scope;
+			}
 			virtual Contract::FUeAgentOperationResult Submit(
 				const Contract::FUeAgentOperationRequest& Request,
 				const Contract::FUeAgentCallerContext& CallerContext,
 				const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation)
 				override
 			{
+				if (BorrowedReadPort) return BorrowedReadPort->Submit(Request, CallerContext, Cancellation);
 				TSharedPtr<Contract::IUeAgentOperationApplicationPort> RuntimePort;
 				UE::UAI::Contract::FDiagnostic Error;
 				{

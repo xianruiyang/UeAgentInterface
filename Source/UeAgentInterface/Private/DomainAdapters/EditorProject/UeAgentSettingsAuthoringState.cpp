@@ -108,6 +108,7 @@ bool BuildSettingsReadRequests(const UObject& Object,
     if (!RegisterState(Error)) return false;
     UeAgentAuthoringState::FReadRequest Request;
     Request.SemanticId = TargetSemantic;
+    Request.MarkExportTarget();
     Request.RootOwnerPath = Object.GetPathName();
     if (!UeAgentAuthoringIdentity::BuildCanonicalIdentity(IdentityModel, Kind,
         {{TEXT("asset_path"), Request.RootOwnerPath}}, Request.TargetIdentity, Error)) return false;

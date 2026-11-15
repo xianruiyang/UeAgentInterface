@@ -81,6 +81,11 @@ Set/Map type changes clear unsupported replication settings. This does not
 rewrite arbitrary unloaded cross-asset consumers. Export again to obtain the
 settled native graph and updated references.
 
+A native menu action that creates a Custom Event supplies its initial declaration.
+Create the node with its menu selector, then edit the exported event to change
+its name or signature. Supplying `event_name` or `signature` on that menu creation
+row produces a source-located error before the asset is changed.
+
 Rename an existing Custom Event in an ordinary Blueprint by editing its exported
 `event_name`. Keep the node key; its captured NodeGuid selects the original node.
 The definition node remains the sole signature owner, and an omitted signature

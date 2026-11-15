@@ -95,6 +95,15 @@ namespace UE::UAI::StateSemantic
 	/** Numeric ordering/integrality in the same exact decimal domain, without a native integer width. */
 	UEAGENTINTERFACE_API bool IsIntegralNumberLexeme(const FString& Lexeme);
 	UEAGENTINTERFACE_API bool TryCompareNumberLexemes(const FString& Left, const FString& Right, int32& OutComparison);
+	/** Schema-owned numeric property bounds only. Other metadata and invalid
+	 * numeric text remain exact; this never interprets an ordinary string value. */
+	UEAGENTINTERFACE_API FString NormalizePropertyConstraintValue(const FString& Key, const FString& Value);
+	UEAGENTINTERFACE_API void NormalizePropertyConstraints(TMap<FString, FString>& Constraints);
+	/** Canonical property declaration, including only declared nested definition
+	 * edges. Raw HJSON/file evidence is not passed through this projection. */
+	UEAGENTINTERFACE_API bool TryNormalizePropertyDefinition(
+		const FUeAgentCanonicalValueRef& Value, FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalValuePtr& OutValue, FUeAgentStateSemanticError& OutError);
 
 	class UEAGENTINTERFACE_API FUeAgentTemporalPoint final
 	{
@@ -273,6 +282,11 @@ namespace UE::UAI::StateSemantic
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FUeAgentStateSemanticError& OutError);
+		/** Original member diagnostics/charges for a synchronous borrowed object.
+		 * This does not seal, own, sort or retain the supplied fields. */
+		static bool TryValidateObjectMembers(
+			const TArray<TPair<FString, FUeAgentCanonicalValueRef>>& Items,
+			FUeAgentResourceTracker& Resources, FUeAgentStateSemanticError& OutError);
 		static bool TryTemporal(
 			const FUeAgentTemporalPoint& Value,
 			FUeAgentResourceTracker& Resources,
@@ -290,6 +304,8 @@ namespace UE::UAI::StateSemantic
 		const FString& GetLexeme() const;
 		const TArray<FUeAgentCanonicalValueRef>& GetArrayItems() const;
 		const TArray<TPair<FString, FUeAgentCanonicalValueRef>>& GetObjectItems() const;
+		/** Inspect value strings only; object keys and number lexemes are not values. */
+		bool ContainsStringMatching(TFunctionRef<bool(const FString&)> Matches) const;
 		const TSharedPtr<const FUeAgentTemporalPoint>& GetTemporal() const;
 		const FUeAgentSpatialValuePtr& GetSpatial() const;
 
@@ -338,14 +354,14 @@ namespace UE::UAI::StateSemantic
 		// Rebind only the generation of an immutable, validated identity. The
 		// new generation uses the same normalization and diagnostic contract.
 		FUeAgentCanonicalIdentity WithGeneration(FString InGeneration) const;
+		// Match all native identity fields, then reuse only a captured binding's
+		// generation. Observation revision/value remain separate evidence.
+		TOptional<FUeAgentCanonicalIdentity> WithCapturedBinding(const FString& CapturedKey) const;
 
 	private:
-		FString SemanticId;
-		FString TargetKind;
-		FString OwnerId;
-		FString Selector;
-		TMap<FString, FString> Selectors;
-		FString ObjectRole;
+		struct FFields;
+		// Generation-independent normalized identity data is immutable.
+		TSharedPtr<const FFields> Fields;
 		FString Generation;
 		FString CanonicalKey;
 		bool bValid = false;
@@ -510,15 +526,21 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		FUeAgentStateEntry WithObservedRevision(
 			FUeAgentStateRevision Revision) const;
+		// Keep immutable value/type/details while validating a new identity,
+		// default source and observation revision through the same constructor.
+		FUeAgentStateEntry WithIdentityAndDefault(
+			FUeAgentCanonicalIdentity InIdentity, FUeAgentDefaultValue InDefault,
+			FUeAgentStateRevision InObservedRevision) const;
 
 	private:
+		struct FPayload;
+		FUeAgentStateEntry(FUeAgentCanonicalIdentity InIdentity,
+			TSharedRef<const FPayload> InPayload, FUeAgentDefaultValue InDefault,
+			FUeAgentStateRevision InObservedRevision, EUeAgentAuthoredPresence InAuthoredPresence,
+			EUeAgentOverrideState InOverrideState);
 		FUeAgentCanonicalIdentity Identity;
-		FUeAgentCanonicalType Type;
-		FUeAgentCanonicalValueRef Value;
+		TSharedRef<const FPayload> Payload;
 		FUeAgentDefaultValue Default;
-		FUeAgentStateDetails Details;
-		// Optional immutable type/candidates/value_definition from the authoring descriptor owner.
-		FUeAgentCanonicalValuePtr AuthoringDescriptor;
 		FUeAgentStateRevision ObservedRevision;
 		EUeAgentAuthoredPresence AuthoredPresence =
 			EUeAgentAuthoredPresence::Absent;
@@ -541,6 +563,13 @@ namespace UE::UAI::StateSemantic
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
 			FUeAgentStateSemanticError& OutError);
+		// Transfer an already owned entry buffer through the same validation path.
+		static bool TryCreate(
+			const FString& SnapshotId, EUeAgentStatePlane StatePlane,
+			const FUeAgentStateRevision& Revision, const FUeAgentTemporalPoint& CapturedAt,
+			const FUeAgentStateProvenance& Provenance, TArray<FUeAgentStateEntry>&& Entries,
+			FUeAgentResourceTracker& Resources, FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+			FUeAgentStateSemanticError& OutError);
 		static bool TryCreateExpected(
 			const FString& SnapshotId,
 			EUeAgentStatePlane StatePlane,
@@ -558,6 +587,20 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentTemporalPoint& GetCapturedAt() const;
 		const FUeAgentStateProvenance& GetProvenance() const;
 		const TArray<FUeAgentStateEntry>& GetEntries() const;
+		int32 NumEntries() const { return EntryCount; }
+		FUeAgentStateEntry ReadEntry(int32 Index) const;
+		TArray<int32> FindSemanticEntryIndices(const FString& SemanticId) const;
+		TArray<FString> GetSemanticIds() const;
+		// Candidate indices only; callers still compare complete current identities.
+		TArray<int32> FindTargetEntryIndices(const FString& SemanticId, const FString& TargetKey,
+			const FString& AlternateSelector, int32& OutSemanticCount) const;
+		// Reuse validated capture contents with a current snapshot binding. An
+		// unsupported default/identity shape returns false with an empty error.
+		static bool TryCreateCaptureOverlay(const FUeAgentCanonicalSnapshot& Previous,
+			const FString& SnapshotId, const FUeAgentStateRevision& Revision,
+			const FUeAgentTemporalPoint& CapturedAt, const FUeAgentStateProvenance& Provenance,
+			const TMap<int32, FUeAgentStateEntry>& Replacements, FUeAgentResourceTracker& Resources,
+			FUeAgentCanonicalSnapshotPtr& OutSnapshot, FUeAgentStateSemanticError& OutError);
 
 	private:
 		static bool TryCreateWithRequiredProvenance(
@@ -571,7 +614,8 @@ namespace UE::UAI::StateSemantic
 			const TArray<FUeAgentStateEntry>& Entries,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
-			FUeAgentStateSemanticError& OutError);
+			FUeAgentStateSemanticError& OutError,
+			TArray<FUeAgentStateEntry>* OwnedEntries = nullptr);
 
 		FUeAgentCanonicalSnapshot(
 			FString InSnapshotId,
@@ -586,7 +630,18 @@ namespace UE::UAI::StateSemantic
 		FUeAgentStateRevision Revision;
 		FUeAgentTemporalPoint CapturedAt;
 		FUeAgentStateProvenance Provenance;
-		TArray<FUeAgentStateEntry> Entries;
+		struct FCaptureEntryBlock;
+		struct FIdentityIndex;
+		mutable TSharedPtr<const FIdentityIndex> IdentityIndex;
+		TArray<TSharedRef<const FCaptureEntryBlock>> CopyCaptureBlocks() const;
+		const FUeAgentStateEntry& RawEntry(int32 Index) const;
+		FUeAgentStateEntry BindEntry(const FUeAgentStateEntry& Entry) const;
+		mutable FCriticalSection EntryMutex;
+		mutable TArray<FUeAgentStateEntry> Entries;
+		mutable TArray<TSharedRef<const FCaptureEntryBlock>> CaptureBlocks;
+		int32 EntryCount = 0;
+		bool bCaptureRebindable = false;
+		mutable bool bEntriesMaterialized = true;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentSemanticDifference final
@@ -646,6 +701,9 @@ namespace UE::UAI::StateSemantic
 	UEAGENTINTERFACE_API bool TryParseUInt64Number(const FString& Text, uint64& OutValue);
 	/** Complete canonical decimal/exponent syntax to a finite native double; no prefix parsing. */
 	UEAGENTINTERFACE_API bool TryParseFiniteDecimal(const FString& Text, double& OutValue);
+
+	/** Retire only this thread's bounded weak value candidates; live values are unchanged. */
+	UEAGENTINTERFACE_API void ResetCanonicalValueReuse();
 
 	UEAGENTINTERFACE_API FUeAgentSemanticComparison CompareValues(
 		const FUeAgentCanonicalValueRef& Left,

@@ -7,6 +7,7 @@
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringGraphLinks.h"
+#include <algorithm>
 
 #include "BlueprintActionDatabase.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -14,6 +15,7 @@
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringOps.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintNativeNormalization.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintGraphSignature.h"
 #include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
 #include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
@@ -759,6 +761,120 @@ namespace UeAgentBlueprintAuthoring
 			return Payload;
 		}
 
+		struct FComponentPlacement
+		{
+			FGuid Guid;
+			FName Parent;
+			FString ClassPath;
+			bool operator==(const FComponentPlacement& Other) const
+			{
+				return Guid == Other.Guid && Parent == Other.Parent && ClassPath == Other.ClassPath;
+			}
+		};
+
+		using FComponentPlacements = TMap<FName, FComponentPlacement>;
+
+		FComponentPlacements GetLocalComponentPlacements(UBlueprint& Blueprint, USimpleConstructionScript& SCS)
+		{
+			FComponentPlacements Result;
+			for (USCS_Node* Node : SCS.GetAllNodes())
+				if (Node && Node->ComponentTemplate && Node->ComponentClass)
+					Result.Add(Node->GetVariableName(), {Node->VariableGuid, Node->ParentComponentOrVariableName,
+						UeAgentBlueprintAssetLifecycle::GetAuthoringTypeObjectPath(&Blueprint, *Node->ComponentClass)});
+			for (USCS_Node* Parent : SCS.GetAllNodes())
+				if (Parent)
+					for (USCS_Node* Child : Parent->GetChildNodes())
+						if (Child)
+							if (auto* Placement = Result.Find(Child->GetVariableName()))
+								Placement->Parent = Parent->GetVariableName();
+			return Result;
+		}
+
+		struct FComponentObservation
+		{
+			FComponentPlacements Before, After;
+			TSet<FGuid> Graphs;
+
+			void Select(const FComponentPlacements& Initial, const FComponentPlacements& Final, const TSet<FName>& Edited)
+			{
+				TSet<FName> Affected = Edited;
+				for (const auto& Item : Initial)
+					if (const auto* Other = Final.Find(Item.Key); !Other || !(*Other == Item.Value)) Affected.Add(Item.Key);
+				for (const auto& Item : Final)
+					if (!Initial.Contains(Item.Key)) Affected.Add(Item.Key);
+				for (FName Name : Affected)
+				{
+					Before.Add(Name, Initial.FindRef(Name));
+					After.Add(Name, Final.FindRef(Name));
+				}
+			}
+		};
+
+		struct FObservedMember
+		{
+			FName Before, After;
+			bool bDelegate = false;
+		};
+
+		struct FMemberObservation
+		{
+			TMap<FGuid, FObservedMember> Members;
+			TSet<FGuid> ReferencingGraphs;
+			bool bBoundDefaults = true;
+
+			void IncludeReferences(UBlueprint& Blueprint, const FBPVariableDescription& Member, bool bDelegate)
+			{
+				TArray<UEdGraph*> Graphs;
+				GatherExportGraphs(Blueprint, Graphs);
+				for (const UEdGraph* Graph : Graphs)
+					for (const UEdGraphNode* Node : Graph->Nodes)
+						if (const auto* K2 = Cast<UK2Node>(Node)) {
+							const auto* Delegate = bDelegate ? Cast<UK2Node_BaseMCDelegate>(Node) : nullptr;
+							bool bOwnDelegate = false;
+							if (Delegate && Delegate->GetPropertyName() == Member.VarName) {
+								// The native spawner records an explicit owner class even on a local call.
+								// Resolve a copy so checking membership does not fix up the node's cache.
+								FMemberReference Reference = Delegate->DelegateReference;
+								const auto* Property = Reference.ResolveMember<FMulticastDelegateProperty>(Blueprint.SkeletonGeneratedClass);
+								const auto* Owner = Property ? UBlueprint::GetBlueprintFromClass(Property->GetOwnerClass()) : nullptr;
+								bOwnDelegate = Owner && Property->GetFName() == Member.VarName
+									&& UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Owner)
+										== UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint);
+							}
+							if (K2->ReferencesVariable(Member.VarName, nullptr)
+								|| (bDelegate && K2->ReferencesFunction(Member.VarName, nullptr)) || bOwnDelegate) {
+								ReferencingGraphs.Add(Graph->GraphGuid);
+								break;
+							}
+						}
+			}
+		};
+
+		struct FObservedGraph {
+			FName Before;
+			FName After;
+			bool bAssetRoot = false;
+		};
+
+		using FObservedGraphs = TMap<FGuid, FObservedGraph>;
+
+		void AppendReferencedGraphGuids(const TSet<FGuid>& Graphs, TMap<FString, FString>& Context)
+		{
+			if (Graphs.IsEmpty()) return;
+			TArray<FString> Guids;
+			if (const FString* Existing = Context.Find(ObservedGraphGuidsContext))
+				Existing->ParseIntoArray(Guids, TEXT(","), false);
+			for (const FGuid& Guid : Graphs) Guids.AddUnique(Guid.ToString(EGuidFormats::DigitsWithHyphensLower));
+			Guids.Sort();
+			Context.Add(ObservedGraphGuidsContext, FString::Join(Guids, TEXT(",")));
+		}
+
+		void ObserveExistingGraph(FObservedGraphs& Scope, const UBlueprint& Blueprint, const UEdGraph& Graph)
+		{
+			if (!Scope.Contains(Graph.GraphGuid))
+				Scope.Add(Graph.GraphGuid, {Graph.GetFName(), Graph.GetFName(), Graph.GetOuter() == &Blueprint});
+		}
+
 		// The domain only retains native owner identities. Decoding, recursive
 		// values and diagnostics remain in the common property-intent owner.
 		struct FPropertyIntents
@@ -773,7 +889,14 @@ namespace UeAgentBlueprintAuthoring
 				UeAgentAuthoringObjectApply::FPropertyIntent Intent;
 			};
 			TArray<FEntry> Entries;
+			// Present only during preparation of a pure CDO edit. A field with another
+			// owner ends this observation scope for the entire operation.
+			TOptional<TMap<FGuid, FName>> PreparingDefaultVariables;
+			TOptional<FComponentObservation> Components;
+			TOptional<FMemberObservation> ObservedMembers;
 			TArray<UeAgentAuthoringGraphLinks::FIntent> Connections;
+			TOptional<FObservedGraphs> ObservedGraphs;
+			TOptional<TMap<FString, TPair<bool, bool>>> InterfacePresence;
 
 			bool Add(UBlueprint& Blueprint, UObject& Object,
 				const UeAgentAuthoringObjectApply::FPropertyIntent& Intent, FDiagnostic& Error)
@@ -921,6 +1044,23 @@ namespace UeAgentBlueprintAuthoring
 				return false;
 			}
 			OutApplied += ApplyResult.PropertiesSeen;
+			if (Intents && Intents->PreparingDefaultVariables.IsSet()) {
+				for (const auto& Descriptor : Descriptors) {
+					FString Path;
+					const auto Field = Descriptor->AsObject();
+					const bool bCdo = Blueprint && Blueprint->GeneratedClass && Blueprint->GeneratedClass->GetDefaultObject(false) == &Object;
+					const FProperty* Property = bCdo && Field && Field->TryGetStringField(TEXT("property_path"), Path)
+						? FindFProperty<FProperty>(Object.GetClass(), FName(*Path)) : nullptr;
+					const int32 Index = Property && Property->GetOwnerClass() == Blueprint->GeneratedClass
+						? FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, Property->GetFName()) : INDEX_NONE;
+					if (Index == INDEX_NONE || !Blueprint->NewVariables[Index].VarGuid.IsValid()
+						|| Blueprint->NewVariables[Index].VarType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate) {
+						Intents->PreparingDefaultVariables.Reset();
+						break;
+					}
+					Intents->PreparingDefaultVariables->Add(Blueprint->NewVariables[Index].VarGuid, Property->GetFName());
+				}
+			}
 			if (Blueprint && Intents)
 				for (const auto& Intent : ApplyResult.PropertyIntents)
 					if (!Intents->Add(*Blueprint, Object, Intent, OutError))
@@ -1111,7 +1251,7 @@ namespace UeAgentBlueprintAuthoring
 			FMutationCounters& OutCounters,
 			bool& bOutNeedsCompile,
 			TArray<TSharedPtr<FJsonValue>>& OutDefaultProperties,
-			FDiagnostic& OutError)
+			FDiagnostic& OutError, FMemberObservation* Observation)
 		{
 			for (const FStableMapEntry& Entry : Entries)
 			{
@@ -1159,6 +1299,10 @@ namespace UeAgentBlueprintAuthoring
 						continue;
 					}
 					const FName ExistingName = Existing->VarName;
+					if (Observation) {
+						Observation->IncludeReferences(Blueprint, *Existing, bDelegate);
+						Observation->Members.Add(Existing->VarGuid, {ExistingName, NAME_None, bDelegate});
+					}
 					FBlueprintEditorUtils::RemoveMemberVariable(&Blueprint, ExistingName);
 					if (bDelegate) FBlueprintEditorUtils::ConformDelegateSignatureGraphs(&Blueprint);
 					bDelegate ? ++OutCounters.DelegatesRemoved : ++OutCounters.VariablesRemoved;
@@ -1210,6 +1354,15 @@ namespace UeAgentBlueprintAuthoring
 					bHasType = true;
 				}
 
+				const FName BeforeName = Existing ? Existing->VarName : NAME_None;
+				bool bEditable = false;
+				const bool bTopologyChange = Existing && (Existing->VarName.ToString() != Name
+					|| (!bDelegate && bHasType && !PinTypesEqual(Existing->VarType, DesiredType))
+					|| (bDelegate && Spec->HasField(TEXT("signature"))));
+				const bool bObserve = Observation && (!Existing || bTopologyChange || Spec->HasField(TEXT("default_property"))
+					|| (TryGetBool(Spec, TEXT("instance_editable"), bEditable)
+						&& bEditable != ((Existing->PropertyFlags & CPF_DisableEditOnInstance) == 0)));
+				if (Observation && bTopologyChange) Observation->IncludeReferences(Blueprint, *Existing, bDelegate);
 				if (!Existing)
 				{
 					if (!bHasType)
@@ -1344,6 +1497,13 @@ namespace UeAgentBlueprintAuthoring
 					}
 				}
 
+				if (bObserve) {
+					Observation->Members.Add(Existing->VarGuid, {BeforeName, Existing->VarName, bDelegate});
+					if (const auto Default = GetObject(Spec, TEXT("default_property"))) {
+						FString Path;
+						Observation->bBoundDefaults &= Default->TryGetStringField(TEXT("property_path"), Path) && FName(*Path) == Existing->VarName;
+					}
+				}
 				if (!bDelegate)
 				{
 					bool bInstanceEditable = false;
@@ -1371,7 +1531,7 @@ namespace UeAgentBlueprintAuthoring
 			FMutationCounters& OutCounters,
 			bool& bOutNeedsCompile,
 			TArray<TSharedPtr<FJsonValue>>& OutDefaultProperties,
-			FDiagnostic& OutError)
+			FDiagnostic& OutError, FMemberObservation* Observation)
 		{
 			if (!Members.IsValid()) return true;
 			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Members->Values)
@@ -1397,7 +1557,7 @@ namespace UeAgentBlueprintAuthoring
 					OutCounters,
 					bOutNeedsCompile,
 					OutDefaultProperties,
-					OutError))
+					OutError, Observation))
 			{
 				return false;
 			}
@@ -1411,7 +1571,7 @@ namespace UeAgentBlueprintAuthoring
 				OutCounters,
 				bOutNeedsCompile,
 				OutDefaultProperties,
-				OutError);
+				OutError, Observation);
 		}
 
 		bool ApplyInterfaces(
@@ -1419,7 +1579,7 @@ namespace UeAgentBlueprintAuthoring
 			const TArray<FStableMapEntry>& Entries,
 			FMutationCounters& OutCounters,
 			bool& bOutNeedsCompile,
-			FDiagnostic& OutError)
+			FDiagnostic& OutError, FPropertyIntents& Intents)
 		{
 			for (const FStableMapEntry& Entry : Entries)
 			{
@@ -1485,6 +1645,24 @@ namespace UeAgentBlueprintAuthoring
 				if (!ParseOperation(Spec, EOperation::Upsert, Operation, OutError))
 				{
 					return false;
+				}
+				if (Intents.InterfacePresence.IsSet()) {
+					Intents.InterfacePresence->Add(InterfaceClass->GetPathName(),
+						TPair<bool, bool>(Existing != nullptr, Operation != EOperation::Remove));
+					if (Existing && Operation == EOperation::Remove) {
+						TArray<UEdGraph*> Graphs;
+						GatherExportGraphs(Blueprint, Graphs);
+						for (const UEdGraph* Graph : Graphs) {
+							if (Graph->Nodes.ContainsByPredicate([InterfaceClass](const UEdGraphNode* Node) {
+								const auto* Event = Cast<UK2Node_Event>(Node);
+								if (Event && Event->EventReference.GetMemberParentClass(Event->GetBlueprintClassFromNode()) == InterfaceClass)
+									return true;
+								const auto* Call = Cast<UK2Node_CallFunction>(Node);
+								return Call && Call->FunctionReference.GetMemberParentClass(Call->GetBlueprintClassFromNode()) == InterfaceClass;
+							}))
+								ObserveExistingGraph(Intents.ObservedGraphs.GetValue(), Blueprint, *Graph);
+						}
+					}
 				}
 				if (Operation == EOperation::Remove)
 				{
@@ -1796,6 +1974,9 @@ namespace UeAgentBlueprintAuthoring
 
 			TArray<FStableMapEntry> OrderedEntries;
 			if (!OrderComponentEntries(Blueprint, Entries, OrderedEntries, OutError)) return false;
+			FComponentPlacements Initial;
+			TSet<FName> Edited;
+			if (Intents && Intents->Components.IsSet()) Initial = GetLocalComponentPlacements(Blueprint, *SCS);
 			TMap<FName, USCS_Node*> OriginalNodesByName;
 			for (USCS_Node* Node : SCS->GetAllNodes())
 				if (Node) OriginalNodesByName.Add(Node->GetVariableName(), Node);
@@ -1858,6 +2039,24 @@ namespace UeAgentBlueprintAuthoring
 				USCS_Node* Existing = ResolveComponentNode(Blueprint, *SCS, Spec, *Entry.Value, OutError);
 				if (!OutError.IsEmpty()) return false;
 
+				if (Intents && Intents->Components.IsSet() && Existing)
+				{
+					Edited.Add(Existing->GetVariableName());
+					if (Operation == EOperation::Remove || Operation == EOperation::Replace
+						|| (!Name.IsEmpty() && Existing->GetVariableName() != FName(*Name)))
+					{
+						TArray<UK2Node_Variable*> Variables;
+						FBlueprintEditorUtils::GetAllNodesOfClass(&Blueprint, Variables);
+						for (const UK2Node_Variable* Node : Variables)
+							if (Node && Node->GetGraph() && Node->GetVarName() == Existing->GetVariableName()
+								&& Node->VariableReference.GetMemberParentClass(Blueprint.GeneratedClass) == Blueprint.GeneratedClass)
+								Intents->Components->Graphs.Add(Node->GetGraph()->GraphGuid);
+						TArray<UK2Node_ComponentBoundEvent*> Events;
+						FKismetEditorUtilities::FindAllBoundEventsForComponent(&Blueprint, Existing->GetVariableName(), Events);
+						for (const auto* Node : Events)
+							if (Node && Node->GetGraph()) Intents->Components->Graphs.Add(Node->GetGraph()->GraphGuid);
+					}
+				}
 				if (Operation == EOperation::Remove)
 				{
 					if (!Existing)
@@ -1930,6 +2129,7 @@ namespace UeAgentBlueprintAuthoring
 						[ResolvedInherited](const auto& Component) { return Component.Component == ResolvedInherited; });
 					if (Inherited)
 					{
+						if (Intents) Intents->Components.Reset();
 						if (Spec->HasField(TEXT("parent")) && FName(*ParentName) != FName(*Inherited->ParentName))
 						{
 							FailureField = TEXT("parent");
@@ -2186,6 +2386,8 @@ namespace UeAgentBlueprintAuthoring
 					return false;
 				}
 			}
+			if (Intents && Intents->Components.IsSet())
+				Intents->Components->Select(Initial, GetLocalComponentPlacements(Blueprint, *SCS), Edited);
 			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(&Blueprint);
 			return true;
 		}
@@ -3585,6 +3787,13 @@ namespace UeAgentBlueprintAuthoring
 			}
 			if (Kind == TEXT("native_action"))
 			{
+				for (const TCHAR* Field : {TEXT("event_name"), TEXT("signature")}) {
+					if (!Spec->HasField(Field)) continue;
+					OutError = MutationDocumentFailure(Input, TEXT("blueprint_action_event_declaration_unsupported"),
+						TEXT("Native menu creation uses the action's event declaration. Edit the created event to change its name or signature."),
+						Field, Spec->TryGetField(Field), MakeShared<FJsonValueString>(TEXT("omit during menu creation")));
+					return nullptr;
+				}
 				const TSharedPtr<const FJsonObject> Candidate =
 					GetObject(Spec, TEXT("candidate"));
 				FString Name;
@@ -5185,6 +5394,43 @@ namespace UeAgentBlueprintAuthoring
 			Body,
 		};
 
+		// Bind callers on the intact scratch graph before K2 changes the function name or reconstructs pins.
+		void ObserveGraphCallers(UBlueprint& Blueprint, FName FunctionName, const FGuid& Id,
+			const UEdGraph* MacroGraph, FObservedGraphs& Observed)
+		{
+			const FString Target = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint);
+			TArray<UEdGraph*> Graphs;
+			GatherExportGraphs(Blueprint, Graphs);
+			for (const UEdGraph* Graph : Graphs) {
+				for (const UEdGraphNode* Node : Graph->Nodes) {
+					bool bReferences = false;
+					if (MacroGraph) {
+						const auto* Instance = Cast<UK2Node_MacroInstance>(Node);
+						const UEdGraph* Macro = Instance ? Instance->GetMacroGraph() : nullptr;
+						const auto* Owner = Macro ? Macro->GetTypedOuter<UBlueprint>() : nullptr;
+						bReferences = Macro == MacroGraph || (Macro && Macro->GraphGuid == Id && Owner
+							&& UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Owner) == Target);
+					} else {
+						const auto* Call = Cast<UK2Node_CallFunction>(Node);
+						const UFunction* Function = nullptr;
+						if (Call && Call->FunctionReference.GetMemberName() == FunctionName) {
+							FMemberReference Ref = Call->FunctionReference;
+							Function = Ref.ResolveMember<UFunction>(Blueprint.SkeletonGeneratedClass);
+						} else if (const auto* Binding = Cast<UK2Node_CreateDelegate>(Node)) {
+							Function = ResolveDelegateFunction(Blueprint, Binding);
+						}
+						const auto* Owner = Function ? UBlueprint::GetBlueprintFromClass(Function->GetOwnerClass()) : nullptr;
+						bReferences = Owner && Function->GetFName() == FunctionName
+							&& UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Owner) == Target;
+					}
+					if (bReferences) {
+						ObserveExistingGraph(Observed, Blueprint, *Graph);
+						break;
+					}
+				}
+			}
+		}
+
 		bool ApplyGraphSpec(
 			UBlueprint& Blueprint,
 			const TSharedPtr<const FJsonObject>& Spec,
@@ -5207,6 +5453,28 @@ namespace UeAgentBlueprintAuthoring
 			FString Kind;
 			UEdGraph* Graph = ResolveGraph(Blueprint, Spec, Input, Name, Kind, OutError);
 			if (!OutError.IsEmpty()) return false;
+			FObservedGraphs* Observed = Intents && Intents->ObservedGraphs.IsSet() && Phase == EGraphApplyPhase::Interface
+				? &Intents->ObservedGraphs.GetValue() : nullptr;
+			if (Observed && Graph) {
+				ObserveExistingGraph(*Observed, Blueprint, *Graph);
+				const bool bRemove = Operation == EOperation::Remove;
+				const bool bRename = !Name.IsEmpty() && Name != Graph->GetName();
+				if (bRemove || bRename || InputHeader.HasField(TEXT("signature"))) {
+					const FString ActualKind = GetGraphKind(Blueprint, Graph);
+					if (ActualKind == TEXT("function_graph") || ActualKind == TEXT("macro_graph"))
+						ObserveGraphCallers(Blueprint, Graph->GetFName(), Graph->GraphGuid,
+							ActualKind == TEXT("macro_graph") ? Graph : nullptr, *Observed);
+				}
+				if (bRemove || bRename) {
+					TArray<UEdGraph*> Children;
+					Graph->GetAllChildrenGraphs(Children);
+					for (const UEdGraph* Child : Children) {
+						ObserveExistingGraph(*Observed, Blueprint, *Child);
+						if (bRemove) Observed->FindChecked(Child->GraphGuid).After = NAME_None;
+					}
+					if (bRemove) Observed->FindChecked(Graph->GraphGuid).After = NAME_None;
+				}
+			}
 			auto FailGraph = [&](const TCHAR* Code, const FString& Reason, const FString& Field,
 				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& InputField)
 			{
@@ -5279,6 +5547,8 @@ namespace UeAgentBlueprintAuthoring
 					return false;
 				}
 				if (bHasDesiredGuid) Graph->GraphGuid = DesiredGuid;
+				if (Observed)
+					Observed->Add(Graph->GraphGuid, {NAME_None, Graph->GetFName(), Graph->GetOuter() == &Blueprint});
 				++OutCounters.GraphsAdded;
 				bOutNeedsCompile = true;
 			}
@@ -5301,6 +5571,7 @@ namespace UeAgentBlueprintAuthoring
 							MakeShared<FJsonValueString>(Name), TEXT("name"));
 						return false;
 					}
+					if (Observed) Observed->FindChecked(Graph->GraphGuid).After = Graph->GetFName();
 					bOutNeedsCompile = true;
 				}
 				++OutCounters.GraphsUpdated;
@@ -5450,8 +5721,12 @@ namespace UeAgentBlueprintAuthoring
 					}
 					UK2Node_CustomEvent* Event = Cast<UK2Node_CustomEvent>(ExistingNode);
 					FString EventName;
-					if (Event && TryGetString(NodeSpec, TEXT("event_name"), EventName)
-						&& EventName != Event->CustomFunctionName.ToString())
+					const bool bHasNewName = Event && TryGetString(NodeSpec, TEXT("event_name"), EventName)
+						&& EventName != Event->CustomFunctionName.ToString();
+					if (Observed && Event && NodeOperation != EOperation::Create
+						&& (bHasNewName || NodeSpec->HasField(TEXT("signature"))))
+						ObserveGraphCallers(Blueprint, Event->CustomFunctionName, Event->NodeGuid, nullptr, *Observed);
+					if (bHasNewName)
 						Event->OnRenameNode(EventName);
 					const TSharedPtr<const FJsonObject> EventSignature =
 						GetObject(NodeSpec, TEXT("signature"));
@@ -6036,7 +6311,7 @@ namespace UeAgentBlueprintAuthoring
 				}
 				if (Operation != EOperation::Remove) continue;
 				if (!ApplyGraphSpec(Blueprint, Specs[Index].Value, *Specs[Index].Input, OutCounters, bOutNeedsCompile,
-					bAllowScratchCandidateRebind, EGraphApplyPhase::Interface, OutError)) return false;
+					bAllowScratchCandidateRebind, EGraphApplyPhase::Interface, OutError, &Intents)) return false;
 				Specs.RemoveAt(Index);
 			}
 			return true;
@@ -6083,7 +6358,7 @@ namespace UeAgentBlueprintAuthoring
 			bool bInterfaceNeedsCompile = bOutNeedsCompile;
 			for (const FGraphMutationSpec& Record : Specs)
 				if (!ApplyGraphSpec(Blueprint, Record.Value, *Record.Input, OutCounters, bOutNeedsCompile,
-					bAllowScratchCandidateRebind, EGraphApplyPhase::Interface, OutError)) return false;
+					bAllowScratchCandidateRebind, EGraphApplyPhase::Interface, OutError, Intents)) return false;
 			bInterfaceNeedsCompile |= bOutNeedsCompile;
 			if (bInterfaceNeedsCompile)
 			{
@@ -6320,7 +6595,7 @@ namespace UeAgentBlueprintAuthoring
 			if (!GetObjectMap(Extension, TEXT("interfaces"), Interfaces,
 				bInterfacesPresent, OutError)
 				|| (bInterfacesPresent && !ApplyInterfaces(
-					Blueprint, Interfaces, OutCounters, bOutNeedsCompile, OutError)))
+					Blueprint, Interfaces, OutCounters, bOutNeedsCompile, OutError, Intents)))
 			{
 				return false;
 			}
@@ -6340,7 +6615,7 @@ namespace UeAgentBlueprintAuthoring
 				OutCounters,
 				bOutNeedsCompile,
 				VariableDefaults,
-				OutError))
+				OutError, Intents.ObservedMembers.IsSet() ? &Intents.ObservedMembers.GetValue() : nullptr))
 			{
 				return false;
 			}
@@ -6680,7 +6955,9 @@ namespace UeAgentBlueprintAuthoring
 		TSharedPtr<const FJsonObject> Extension;
 		TMap<FString, UE::UAI::Contract::FSourceLocation> InputSources;
 		bool bRequiresCompile = false;
+		bool bReparented = false;
 		TArray<FPreparedGraphCreation> GraphCreations;
+		TMap<FGuid, FName> ObservedVariableDefaults;
 		FPropertyIntents ProposedIntents;
 		FPropertyIntents ActualIntents;
 		bool bAppliedToActual = false;
@@ -6744,8 +7021,83 @@ namespace UeAgentBlueprintAuthoring
 		: Impl(MoveTemp(InImpl))
 	{
 	}
+	void FPreparedBlueprintMutation::AppendGraphObservationContext(bool bAfter, TMap<FString, FString>& Context) const
+	{
+		const auto& Graphs = Impl->ProposedIntents.ObservedGraphs;
+		if (!Graphs.IsSet() || Graphs->IsEmpty()) return;
+		TArray<FString> Guids;
+		for (const auto& Pair : Graphs.GetValue()) {
+			const FString Id = Pair.Key.ToString(EGuidFormats::DigitsWithHyphensLower);
+			const FObservedGraph& Graph = Pair.Value;
+			const FName PresentName = bAfter ? Graph.After : Graph.Before;
+			const FName OtherName = bAfter ? Graph.Before : Graph.After;
+			Guids.Add(Id);
+			if (!PresentName.IsNone()) Context.Add(ObservedGraphNamePrefix + Id, PresentName.ToString());
+			else Context.Add(ObservedAbsentGraphPrefix + Id, Graph.bAssetRoot ? OtherName.ToString() : FString());
+			if (Graph.bAssetRoot) Context.Add(ObservedRootGraphPrefix + Id, TEXT("true"));
+		}
+		Guids.Sort();
+		Context.Add(ObservedGraphGuidsContext, FString::Join(Guids, TEXT(",")));
+	}
+bool FPreparedBlueprintMutation::ReparentsBlueprint() const { return Impl->bReparented; }
+const TMap<FGuid, FName>& FPreparedBlueprintMutation::GetObservedVariableDefaults() const { return Impl->ObservedVariableDefaults; }
 
-	FPreparedBlueprintMutation::~FPreparedBlueprintMutation() = default;
+	void FPreparedBlueprintMutation::AppendMemberObservationContext(bool bAfter, TMap<FString, FString>& Context) const
+	{
+		const auto& Prepared = Impl->ProposedIntents.ObservedMembers;
+		const auto& Interfaces = Impl->ProposedIntents.InterfacePresence;
+		if (Interfaces.IsSet() && !Interfaces->IsEmpty()) {
+			Context.Add(ObservedMemberCapture, TEXT("interfaces"));
+			for (const auto& Pair : Interfaces.GetValue())
+				Context.Add(ObservedInterfacePrefix + Pair.Key, (bAfter ? Pair.Value.Value : Pair.Value.Key) ? TEXT("present") : TEXT("absent"));
+		}
+		if (!Prepared.IsSet() || Prepared->Members.IsEmpty()) return;
+		Context.Add(ObservedMemberCapture, TEXT("declarations"));
+		for (const auto& Pair : Prepared->Members) {
+			const auto& Member = Pair.Value;
+			const FName Name = bAfter ? Member.After : Member.Before;
+			const TCHAR* Prefix = Name.IsNone()
+				? (Member.bDelegate ? ObservedMissingDelegatePrefix : ObservedMissingMemberPrefix)
+				: (Member.bDelegate ? ObservedDelegatePrefix : ObservedMemberPrefix);
+			Context.Add(FString(Prefix) + Pair.Key.ToString(EGuidFormats::DigitsWithHyphensLower),
+				(Name.IsNone() ? (bAfter ? Member.Before : Member.After) : Name).ToString());
+		}
+	AppendReferencedGraphGuids(Prepared->ReferencingGraphs, Context);
+	}
+	bool FPreparedBlueprintMutation::AppendComponentObservationContext(bool bAfter, TMap<FString, FString>& Context, FDiagnostic& Error) const
+{
+	const auto& Prepared = Impl->ProposedIntents.Components;
+	if (!Prepared.IsSet()) return true;
+	const auto& Applied = Impl->ActualIntents.Components;
+	const auto& Expected = bAfter ? Prepared->After : Prepared->Before;
+	if (bAfter && (!Applied.IsSet() || Applied->After.Num() != Expected.Num()
+		|| Applied->Graphs.Num() != Prepared->Graphs.Num() || !Applied->Graphs.Includes(Prepared->Graphs)))
+	{
+		Error = FDiagnostic::Failure(TEXT("blueprint_observed_component_binding_missing"),
+			TEXT("The native component and referenced graph scope does not match preparation."), TEXT("blueprint_state"));
+		return false;
+	}
+	for (const auto& Item : Expected)
+	{
+		const FComponentPlacement* Bound = bAfter ? (Applied.IsSet() ? Applied->After.Find(Item.Key) : nullptr) : &Item.Value;
+		const FComponentPlacement* Before = Prepared->Before.Find(Item.Key);
+		if (!Bound || Bound->ClassPath != Item.Value.ClassPath || Bound->Parent != Item.Value.Parent
+			|| Bound->Guid.IsValid() != Item.Value.Guid.IsValid()
+			|| (Before && Before->Guid == Item.Value.Guid && Bound->Guid != Item.Value.Guid))
+		{
+			Error = FDiagnostic::Failure(TEXT("blueprint_observed_component_binding_missing"),
+				TEXT("The native component presence, class, parent or retained identity does not match preparation."), TEXT("blueprint_state"));
+			Error.PropertyPath = Item.Key.ToString();
+			return false;
+		}
+		Context.Add(ObservedComponentPrefix + Item.Key.ToString(), Bound->Guid.IsValid()
+			? Bound->Guid.ToString(EGuidFormats::DigitsWithHyphensLower) : FString());
+	}
+	AppendReferencedGraphGuids(Prepared->Graphs, Context);
+	return true;
+}
+
+FPreparedBlueprintMutation::~FPreparedBlueprintMutation() = default;
 
 	bool FPreparedBlueprintMutation::ValidateGraphNames(UBlueprint& Blueprint,
 		const TSharedPtr<const FJsonObject>& ProviderExtension, FDiagnostic& OutError)
@@ -7098,9 +7450,30 @@ namespace UeAgentBlueprintAuthoring
 		NewImpl->Extension = ProviderExtension;
 		if (ProviderExtension)
 			NewImpl->InputSources = UeAgentAuthoringDiagnostics::FScopedSourceLocations::CaptureProjection(*ProviderExtension);
+		if (ProviderExtension) {
+		// These structural edits share one native before/final capture on this Blueprint.
+			const auto OnlyFields = [&](std::initializer_list<FString> Allowed) {
+				for (const auto& Field : ProviderExtension->Values)
+					if (Field.Key != TEXT("compile") && Field.Key != TEXT("save")
+						&& std::find(Allowed.begin(), Allowed.end(), Field.Key) == Allowed.end()) return false;
+				return true;
+			};
+		const bool bStructuralScope = OnlyFields({TEXT("members"), TEXT("interfaces"), TEXT("graphs"), TEXT("components")});
+		if (bStructuralScope && ProviderExtension->HasField(TEXT("members")))
+				NewImpl->ProposedIntents.ObservedMembers.Emplace();
+		if (bStructuralScope && (ProviderExtension->HasField(TEXT("graphs")) || ProviderExtension->HasField(TEXT("interfaces")))) {
+				NewImpl->ProposedIntents.ObservedGraphs.Emplace();
+				if (ProviderExtension->HasField(TEXT("interfaces"))) NewImpl->ProposedIntents.InterfacePresence.Emplace();
+			}
+			if (ProviderExtension->HasField(TEXT("class_defaults")) && OnlyFields({TEXT("class_defaults")}))
+				NewImpl->ProposedIntents.PreparingDefaultVariables.Emplace();
+		if (bStructuralScope && ProviderExtension->HasField(TEXT("components")))
+				NewImpl->ProposedIntents.Components.Emplace();
+		}
 		TSet<FGuid> MembersBefore;
 		for (const FBPVariableDescription& Member : ScratchBlueprint.NewVariables)
 			MembersBefore.Add(Member.VarGuid);
+		UClass* const ParentBefore = ScratchBlueprint.ParentClass;
 		const FGraphCreationBaseline GraphsBefore = CaptureGraphCreationBaseline(ScratchBlueprint);
 		if (!ApplyDocument(
 			ScratchBlueprint,
@@ -7113,12 +7486,43 @@ namespace UeAgentBlueprintAuthoring
 		{
 			return false;
 		}
+		NewImpl->bReparented = ParentBefore != ScratchBlueprint.ParentClass;
+		if (NewImpl->ProposedIntents.PreparingDefaultVariables.IsSet()) {
+			NewImpl->ObservedVariableDefaults = MoveTemp(NewImpl->ProposedIntents.PreparingDefaultVariables.GetValue());
+			NewImpl->ProposedIntents.PreparingDefaultVariables.Reset();
+		}
 		CapturePreparedGraphCreations(ScratchBlueprint, GraphsBefore, NewImpl->GraphCreations);
+		if (NewImpl->ProposedIntents.InterfacePresence.IsSet() && !NewImpl->GraphCreations.IsEmpty()) {
+			// InterfaceGraph implementations are private to the interface description.
+			// Only regenerated graphs owned by the existing public graph exporter need separate rows.
+			TArray<UEdGraph*> PublicGraphs;
+			GatherExportGraphs(ScratchBlueprint, PublicGraphs);
+			for (const FPreparedGraphCreation& Change : NewImpl->GraphCreations) {
+				UEdGraph* const* Graph = PublicGraphs.FindByPredicate([&](const UEdGraph* Item) { return Item->GraphGuid == Change.Id; });
+				if (!Graph) continue;
+				auto& Scope = NewImpl->ProposedIntents.ObservedGraphs.GetValue();
+				if (Change.bCreated)
+					Scope.Add(Change.Id, {NAME_None, (*Graph)->GetFName(), (*Graph)->GetOuter() == &ScratchBlueprint});
+				else ObserveExistingGraph(Scope, ScratchBlueprint, **Graph);
+			}
+		}
 		if (!NewImpl->ProposedIntents.FinalizeNodeIdentities(ScratchBlueprint, OutError)) return false;
+	// An inherited component override or an unbound member default has no local
+	// observation for the whole edit. Keep private verification, publish no partial scope.
+	auto& Prepared = NewImpl->ProposedIntents;
+	if ((ProviderExtension && ProviderExtension->HasField(TEXT("components")) && !Prepared.Components.IsSet())
+		|| (Prepared.ObservedMembers.IsSet() && !Prepared.ObservedMembers->bBoundDefaults))
+	{
+		Prepared.ObservedMembers.Reset();
+		Prepared.InterfacePresence.Reset();
+		Prepared.ObservedGraphs.Reset();
+		Prepared.Components.Reset();
+	}
 		// Replay native-created member identities through the existing member parser,
 		// before actual graph construction and compilation can bind to those members.
 		if (const TSharedPtr<const FJsonObject> Members = GetObject(ProviderExtension, TEXT("members")))
 		{
+
 			auto PreparedExtension = MakeShared<FJsonObject>();
 			PreparedExtension->Values = ProviderExtension->Values;
 			auto PreparedMembers = MakeShared<FJsonObject>();
@@ -7194,7 +7598,8 @@ namespace UeAgentBlueprintAuthoring
 			});
 		Impl->ActualIntents.Entries.Reset();
 		Impl->ActualIntents.Connections.Reset();
-		Impl->bAppliedToActual = true;
+		if (Impl->ProposedIntents.Components.IsSet()) Impl->ActualIntents.Components.Emplace();
+	Impl->bAppliedToActual = true;
 		if (!ApplyDocument(
 				Blueprint,
 				Impl->Extension,

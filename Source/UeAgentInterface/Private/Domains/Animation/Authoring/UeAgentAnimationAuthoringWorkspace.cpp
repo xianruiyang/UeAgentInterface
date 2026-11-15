@@ -34,8 +34,9 @@ bool ImportAssetWorkspace(
     OutError.SetFailure(Error, ObjectPath);
     return false;
   }
+  SelectRootPropertyImportReadRequests(*Workspace, Requests);
   UeAgentAuthoringState::FCaptureResult Capture;
-  if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture)) {
+  if (!CapturePropertyImportState(*Workspace, Requests, Capture)) {
     if (Capture.Diagnostic.IsEmpty()) {
       auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("animation_semantic_capture_failed"),
           TEXT("The native animation snapshot capture failed without reporting a diagnostic."), TEXT("workspace_resolve"));
@@ -49,15 +50,14 @@ bool ImportAssetWorkspace(
   auto Resources = MakeSemanticWorkspaceResourceTracker();
   StateSemantic::FUeAgentCanonicalSnapshotPtr Snapshot;
   FAuthoringModelPtr Model;
-  if (!TryBuildCanonicalAuthoringCapture(
+  if (!TryBuildPropertyImportCurrentCapture(&Workspace.Get(),
           ResolveTargetCompositionKind(Profile.TargetKind, Profile.TypeId),
           TEXT("llm_authoring"), Capture.Snapshot, Resources, Snapshot, Model, OutError))
     return false;
   Capture.Snapshot.ReleaseNativeValues();
   return TryCoordinateSemanticWorkspaceImport(
       Workspace, Model.ToSharedRef(), Snapshot.ToSharedRef(),
-      Contract::FUeAgentDescriptorIdentity(TEXT("animation.semantic_workspace"), 1,
-                                          Model->GetSemanticFingerprint()),
+      BuildSemanticWorkspaceImportDescriptor(TEXT("animation.semantic_workspace"), *Model),
       ObjectPath, Resources,
       {TEXT("animation-domain-provider"), PackagePath, ObjectPath, TEXT("animation-semantic"),
        TEXT("animation_semantic_prepare_failed"), TEXT("animation_semantic_apply_failed"),

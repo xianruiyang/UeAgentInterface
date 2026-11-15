@@ -11,6 +11,10 @@ AudioEditor 和 MetasoundEditor 的补丁接口；原版引擎不能仅复制本
 本 README 提供仓库入口与安装边界，命令参数由正式 manifest 和合同维护。配套版本、升级与旧版恢复
 从 [UeAgentInterfacePak](https://github.com/xianruiyang/UeAgentInterfacePak) 进入；局部编译或实践证据不代表全部能力已经验证。
 
+0.4.0 的主要更新是公共 HJSON 编辑、捕获和输出效率：按实际变更范围准备原生操作，复用未变内容，
+减少完整模型、重复解析和整文件重写；默认 committed 发布与显式外部同步保持各自语义。
+具体适用范围、升级与已知限制见 [2026-11-15 发行说明](https://github.com/xianruiyang/UeAgentInterfacePak/blob/v2026.11.15/docs/releases/2026-11-15.md)。
+
 ## 正式调用入口
 
 本地项目通过托管连接使用 Python SDK：

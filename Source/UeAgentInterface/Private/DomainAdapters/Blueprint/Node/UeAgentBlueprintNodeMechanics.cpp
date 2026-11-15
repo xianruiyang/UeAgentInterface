@@ -334,7 +334,6 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 			virtual bool TryCaptureWorkspace(
 				const FUeAgentStateRevision& FrozenRevision,
 				FExportWorkspacePlanPtr& OutPlan,
-				FExportSemanticSignature& OutSemantic,
 				FArtifactPublishError& OutError) override
 			{
 				FTCHARToUTF8 Utf8(*Document);
@@ -343,7 +342,6 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 					reinterpret_cast<const uint8*>(Utf8.Get()),
 					Utf8.Length());
 				const FString FileHash = Sha256Bytes(Bytes);
-				OutSemantic = Signature(Bytes);
 				OutPlan = MakeShared<FExportWorkspacePlan>(
 					EWorkspaceKind::Directory,
 					TEXT("blueprint.hjson"),
@@ -358,28 +356,6 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 				return true;
 			}
 
-			virtual bool TryRebuildStagedWorkspace(
-				const FString& StagedWorkspacePath,
-				const EWorkspaceKind WorkspaceKind,
-				const FString& EntryFile,
-				FUeAgentResourceTracker& Resources,
-				FExportSemanticSignature& OutSemantic,
-				FArtifactPublishError& OutError) override
-			{
-				TArray<uint8> Bytes;
-				const FString Path = StagedWorkspacePath / EntryFile;
-				if (!FFileHelper::LoadFileToArray(Bytes, *Path))
-				{
-					OutError = QueryFact(TEXT("blueprint_node_export_rebuild_failed"), Target, TEXT("The staged export entry file could not be read."),
-						TEXT("/workspace/entry/readable"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), EntryFile);
-					OutError.Stage = TEXT("artifact_publish");
-					OutError.ActualEvidence = MakeShared<FJsonValueString>(Path);
-					return false;
-				}
-				OutSemantic = Signature(Bytes);
-				return true;
-			}
-
 			virtual bool TryReadCurrentTargetRevision(
 				FUeAgentStateRevision& OutRevision,
 				FArtifactPublishError& OutError) override
@@ -388,18 +364,6 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 			}
 
 		private:
-			FExportSemanticSignature Signature(
-				const TArray<uint8>& Bytes) const
-			{
-				const FString FileHash = Sha256Bytes(Bytes);
-				return FExportSemanticSignature(
-					Sha256(TEXT("blueprint.hjson")),
-					Sha256(TEXT("blueprint-node-reference-closure|") + FileHash),
-					FileHash,
-					Sha256(SchemaId),
-					Sha256(TEXT("blueprint-node-business|") + FileHash));
-			}
-
 			bool ReadRevision(
 				FUeAgentStateRevision& OutRevision,
 				FArtifactPublishError& OutError) const

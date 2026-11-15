@@ -1600,13 +1600,18 @@ namespace UE::UAI::Authoring::Timeline
 			Result->SetStringField(TEXT("denominator"), FString::FromInt(Value.Denominator));
 			return Result;
 		};
-		auto Point = [&ClockId, &TickResolution, &Rate](const int32 Tick)
+		auto PointContext = [&ClockId, &TickResolution, &Rate]()
 		{
-			const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			const auto Result = MakeShared<FJsonObject>();
 			Result->SetStringField(TEXT("clock_id"), ClockId);
-			Result->SetStringField(TEXT("tick"), FString::FromInt(Tick));
 			Result->SetObjectField(TEXT("rate"), Rate(TickResolution));
 			Result->SetStringField(TEXT("state"), TEXT("authored"));
+			return Result;
+		};
+		auto Point = [&PointContext](const int32 Tick)
+		{
+			const auto Result = PointContext();
+			Result->SetStringField(TEXT("tick"), FString::FromInt(Tick));
 			return Result;
 		};
 		auto Range = [&ClockId, &Point](const TRange<FFrameNumber>& Value)
@@ -1769,6 +1774,8 @@ namespace UE::UAI::Authoring::Timeline
 			// Playback is not a section factory default. In particular, an empty
 			// animation's [0,0) would manufacture sections that native PostLoad deletes.
 			OutTrack->SetObjectField(TEXT("default_range"), Range(DefaultSection->GetRange()));
+			// A newly bounded open range has a real clock, but no native default tick.
+			OutTrack->SetObjectField(TEXT("bound_point_context"), PointContext());
 			TSharedPtr<FJsonObject> DefaultProperties, DefaultDefinitions;
 			if (!Composition::HjsonImport::CaptureReflectedObjectRecord(*DefaultSection, MovieSceneObjectPropertyPolicy(),
 				DefaultProperties, DefaultDefinitions, PropertyError))

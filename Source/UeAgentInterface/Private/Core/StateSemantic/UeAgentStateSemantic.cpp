@@ -3,14 +3,75 @@
 #include "Dom/JsonValue.h"
 
 #include "Algo/Sort.h"
+#include "Containers/StaticArray.h"
 #include "Core/StateSemantic/UeAgentStateSemanticEvidence.h"
 #include "Core/StateSemantic/UeAgentStateSemanticNormalization.h"
+#include "Misc/ScopeLock.h"
+#include <initializer_list>
 
 namespace UE::UAI::StateSemantic
 {
 	namespace
 	{
 		using namespace UE::UAI::ContextResource;
+		struct FObjectKeyReferences : DefaultKeyFuncs<const FString*>
+		{
+			static bool Matches(const FString* A, const FString* B) { return FExactStringKeyFuncs::Matches(*A, *B); }
+			static uint32 GetKeyHash(const FString* Key) { return FExactStringKeyFuncs::GetKeyHash(*Key); }
+		};
+
+		// Exact immutable leaves carry no source/runtime binding. Weak slots do
+		// not retain value graphs, and collisions simply decline admission. All
+		// logical resource charges still apply. Numeric exact hits are already
+		// grammar-validated immutable leaves from this factory, not input proofs.
+		struct FCanonicalLeafCandidate {
+			EUeAgentValueKind Kind = EUeAgentValueKind::Null;
+			FString Text;
+			TWeakPtr<const FUeAgentCanonicalValue> Value;
+		};
+		struct FCanonicalContainerCandidate {
+			uint32 Hash = 0;
+			TWeakPtr<const FUeAgentCanonicalValue> Value;
+		};
+		struct FCanonicalLeafCandidates {
+			TStaticArray<FCanonicalLeafCandidate, 2048> Slots;
+			TStaticArray<FCanonicalContainerCandidate, 4096> Containers;
+			int64 TextBytes = 0;
+		};
+		static thread_local TUniquePtr<FCanonicalLeafCandidates> CanonicalLeafCandidates;
+		uint32 CanonicalLeafSlot(EUeAgentValueKind Kind, const FString& Text) {
+			return HashCombineFast(GetTypeHash(static_cast<uint8>(Kind)), GetTypeHash(Text)) % 2048;
+		}
+		FUeAgentCanonicalValuePtr FindCanonicalLeaf(EUeAgentValueKind Kind, const FString& Text) {
+			if (!CanonicalLeafCandidates || Text.Len() > 256) return nullptr;
+			const auto& Slot = CanonicalLeafCandidates->Slots[CanonicalLeafSlot(Kind, Text)];
+			return Slot.Kind == Kind && Slot.Text.Equals(Text, ESearchCase::CaseSensitive) ? Slot.Value.Pin() : nullptr;
+		}
+		void RememberCanonicalLeaf(EUeAgentValueKind Kind, const FString& Text, const FUeAgentCanonicalValuePtr& Value) {
+			if (Text.Len() > 256) return;
+			if (!CanonicalLeafCandidates) CanonicalLeafCandidates = MakeUnique<FCanonicalLeafCandidates>();
+			auto& Slot = CanonicalLeafCandidates->Slots[CanonicalLeafSlot(Kind, Text)];
+			if (Slot.Value.IsValid()) return;
+			FString Key = Text;
+			const int64 Delta = Key.GetAllocatedSize() - Slot.Text.GetAllocatedSize();
+			if (sizeof(FCanonicalLeafCandidates) + 32LL * (2048 + 4096)
+				+ CanonicalLeafCandidates->TextBytes + Delta > 1024LL * 1024) return;
+			CanonicalLeafCandidates->TextBytes += Delta;
+			Slot.Kind = Kind; Slot.Text = MoveTemp(Key); Slot.Value = Value;
+		}
+		template <typename Equal>
+		FUeAgentCanonicalValuePtr FindCanonicalContainer(uint32 Hash, EUeAgentValueKind Kind, Equal&& IsEqual) {
+			if (!CanonicalLeafCandidates) return nullptr;
+			const auto& Slot = CanonicalLeafCandidates->Containers[Hash % 4096];
+			if (Slot.Hash != Hash) return nullptr;
+			const auto Value = Slot.Value.Pin();
+			return Value && Value->GetKind() == Kind && IsEqual(*Value) ? Value : nullptr;
+		}
+		void RememberCanonicalContainer(uint32 Hash, const FUeAgentCanonicalValuePtr& Value) {
+			if (!CanonicalLeafCandidates) CanonicalLeafCandidates = MakeUnique<FCanonicalLeafCandidates>();
+			auto& Slot = CanonicalLeafCandidates->Containers[Hash % 4096];
+			if (!Slot.Value.IsValid()) { Slot.Hash = Hash; Slot.Value = Value; }
+		}
 
 		struct FExactNumber
 		{
@@ -55,7 +116,7 @@ namespace UE::UAI::StateSemantic
 
 		bool Charge(
 			FUeAgentResourceTracker& Resources,
-			const TMap<EUeAgentResourceDimension, int64>& Amounts,
+			std::initializer_list<TPair<EUeAgentResourceDimension, int64>> Amounts,
 			const FString& Path,
 			FUeAgentStateSemanticError& OutError)
 		{
@@ -2015,7 +2076,9 @@ namespace UE::UAI::StateSemantic
 		{
 			return false;
 		}
+		if (const auto Existing = FindCanonicalLeaf(EUeAgentValueKind::Null, FString())) { OutValue = Existing; return true; }
 		OutValue = MakeShareable(new FUeAgentCanonicalValue(EUeAgentValueKind::Null));
+		RememberCanonicalLeaf(EUeAgentValueKind::Null, FString(), OutValue);
 		return true;
 	}
 
@@ -2035,11 +2098,14 @@ namespace UE::UAI::StateSemantic
 		{
 			return false;
 		}
+		const FString Key = Value ? TEXT("1") : TEXT("0");
+		if (const auto Existing = FindCanonicalLeaf(EUeAgentValueKind::Boolean, Key)) { OutValue = Existing; return true; }
 		TSharedPtr<FUeAgentCanonicalValue> Mutable =
 			MakeShareable(new FUeAgentCanonicalValue(EUeAgentValueKind::Boolean));
 		Mutable->Kind = EUeAgentValueKind::Boolean;
 		Mutable->bBoolean = Value;
 		OutValue = Mutable;
+		RememberCanonicalLeaf(EUeAgentValueKind::Boolean, Key, OutValue);
 		return true;
 	}
 
@@ -2051,7 +2117,9 @@ namespace UE::UAI::StateSemantic
 	{
 		ResetError(OutError);
 		OutValue.Reset();
-		const int64 StringBytes = MeasureText(Value).Utf8Bytes;
+		// These bytes are accounting only. The immutable text and its grammar
+		// do not depend on a UTF-8 conversion that a disabled tracker discards.
+		const int64 StringBytes = Resources.CollectsUsage() ? MeasureText(Value).Utf8Bytes : 0;
 		if (!Charge(Resources, {
 			{EUeAgentResourceDimension::Nodes, 1},
 			{EUeAgentResourceDimension::StringBytes, StringBytes},
@@ -2061,10 +2129,12 @@ namespace UE::UAI::StateSemantic
 		{
 			return false;
 		}
+		if (const auto Existing = FindCanonicalLeaf(EUeAgentValueKind::String, Value)) { OutValue = Existing; return true; }
 		TSharedPtr<FUeAgentCanonicalValue> Mutable =
 			MakeShareable(new FUeAgentCanonicalValue(EUeAgentValueKind::String));
 		Mutable->Text = Value;
 		OutValue = Mutable;
+		RememberCanonicalLeaf(EUeAgentValueKind::String, Value, OutValue);
 		return true;
 	}
 
@@ -2074,7 +2144,8 @@ namespace UE::UAI::StateSemantic
 		FUeAgentCanonicalValuePtr& OutValue,
 		FUeAgentStateSemanticError& OutError)
 	{
-		if (!IsCanonicalIntegerLexeme(Lexeme))
+		const auto Existing = FindCanonicalLeaf(EUeAgentValueKind::Integer, Lexeme);
+		if (!Existing && !IsCanonicalIntegerLexeme(Lexeme))
 		{
 			OutValue.Reset();
 			return Fail(OutError, TEXT("integer_lexeme_not_canonical"), TEXT("The integer text is not a canonical signed integer spelling."), TEXT("/value"),
@@ -2082,7 +2153,7 @@ namespace UE::UAI::StateSemantic
 		}
 		ResetError(OutError);
 		OutValue.Reset();
-		const int64 StringBytes = MeasureText(Lexeme).Utf8Bytes;
+		const int64 StringBytes = Resources.CollectsUsage() ? MeasureText(Lexeme).Utf8Bytes : 0;
 		if (!Charge(Resources, {
 			{EUeAgentResourceDimension::Nodes, 1},
 			{EUeAgentResourceDimension::StringBytes, StringBytes},
@@ -2092,10 +2163,12 @@ namespace UE::UAI::StateSemantic
 		{
 			return false;
 		}
+		if (Existing) { OutValue = Existing; return true; }
 		TSharedPtr<FUeAgentCanonicalValue> Mutable =
 			MakeShareable(new FUeAgentCanonicalValue(EUeAgentValueKind::Integer));
 		Mutable->Text = Lexeme;
 		OutValue = Mutable;
+		RememberCanonicalLeaf(EUeAgentValueKind::Integer, Lexeme, OutValue);
 		return true;
 	}
 
@@ -2106,7 +2179,8 @@ namespace UE::UAI::StateSemantic
 		FUeAgentStateSemanticError& OutError)
 	{
 		FExactNumber Parsed;
-		if (!ParseExactNumber(Lexeme, Parsed))
+		const auto Existing = FindCanonicalLeaf(EUeAgentValueKind::Decimal, Lexeme);
+		if (!Existing && !ParseExactNumber(Lexeme, Parsed))
 		{
 			OutValue.Reset();
 			return Fail(OutError, TEXT("decimal_lexeme_not_finite"), TEXT("The numeric text is not a finite exact decimal spelling."), TEXT("/value"),
@@ -2114,7 +2188,7 @@ namespace UE::UAI::StateSemantic
 		}
 		ResetError(OutError);
 		OutValue.Reset();
-		const int64 StringBytes = MeasureText(Lexeme).Utf8Bytes;
+		const int64 StringBytes = Resources.CollectsUsage() ? MeasureText(Lexeme).Utf8Bytes : 0;
 		if (!Charge(Resources, {
 			{EUeAgentResourceDimension::Nodes, 1},
 			{EUeAgentResourceDimension::StringBytes, StringBytes},
@@ -2124,10 +2198,12 @@ namespace UE::UAI::StateSemantic
 		{
 			return false;
 		}
+		if (Existing) { OutValue = Existing; return true; }
 		TSharedPtr<FUeAgentCanonicalValue> Mutable =
 			MakeShareable(new FUeAgentCanonicalValue(EUeAgentValueKind::Decimal));
 		Mutable->Text = Lexeme;
 		OutValue = Mutable;
+		RememberCanonicalLeaf(EUeAgentValueKind::Decimal, Lexeme, OutValue);
 		return true;
 	}
 
@@ -2148,23 +2224,39 @@ namespace UE::UAI::StateSemantic
 		{
 			return false;
 		}
+		if (Items.IsEmpty()) if (const auto Existing = FindCanonicalLeaf(EUeAgentValueKind::Array, FString())) { OutValue = Existing; return true; }
+		const bool bShareContainer = !Items.IsEmpty() && Items.Num() <= 32;
+		uint32 ContainerHash = GetTypeHash(static_cast<uint8>(EUeAgentValueKind::Array));
+		if (bShareContainer) {
+			for (const auto& Item : Items) ContainerHash = HashCombineFast(ContainerHash, PointerHash(&Item.Get()));
+			if (const auto Existing = FindCanonicalContainer(ContainerHash, EUeAgentValueKind::Array,
+				[&](const FUeAgentCanonicalValue& Value) {
+					const auto& Previous = Value.GetArrayItems();
+					if (Previous.Num() != Items.Num()) return false;
+					for (int32 I = 0; I < Items.Num(); ++I) if (&Previous[I].Get() != &Items[I].Get()) return false;
+					return true;
+				})) { OutValue = Existing; return true; }
+		}
 		TSharedPtr<FUeAgentCanonicalValue> Mutable =
 			MakeShareable(new FUeAgentCanonicalValue(EUeAgentValueKind::Array));
 		Mutable->ArrayItems = Items;
 		OutValue = Mutable;
+		if (Items.IsEmpty()) RememberCanonicalLeaf(EUeAgentValueKind::Array, FString(), OutValue);
+		else if (bShareContainer) RememberCanonicalContainer(ContainerHash, OutValue);
 		return true;
 	}
 
-	bool FUeAgentCanonicalValue::TryObject(
+	bool FUeAgentCanonicalValue::TryValidateObjectMembers(
 		const TArray<TPair<FString, FUeAgentCanonicalValueRef>>& Items,
 		FUeAgentResourceTracker& Resources,
-		FUeAgentCanonicalValuePtr& OutValue,
 		FUeAgentStateSemanticError& OutError)
 	{
 		ResetError(OutError);
-		OutValue.Reset();
 		int64 StringBytes = 0;
-		TSet<FString, FExactStringKeyFuncs> Keys;
+		const bool bCollectUsage = Resources.CollectsUsage();
+		// Items is const and never moves during this check. The sealed object
+		// below owns its keys; this temporary set only borrows until its last lookup.
+		TSet<const FString*, FObjectKeyReferences, TInlineSetAllocator<8>> Keys;
 		for (const auto& Item : Items)
 		{
 			if (Item.Key.IsEmpty())
@@ -2172,7 +2264,9 @@ namespace UE::UAI::StateSemantic
 				return Fail(OutError, TEXT("object_key_empty"), TEXT("A canonical object member key must be non-empty."), TEXT("/value"),
 					MakeShared<FJsonValueString>(TEXT("non-empty member key")), MakeShared<FJsonValueString>(Item.Key));
 			}
-			if (Keys.Contains(Item.Key))
+			bool bAlreadyPresent = false;
+			if (Items.Num() > 1) Keys.Add(&Item.Key, &bAlreadyPresent);
+			if (bAlreadyPresent)
 			{
 				return Fail(
 					OutError,
@@ -2180,8 +2274,7 @@ namespace UE::UAI::StateSemantic
 					TEXT("The canonical object contains the same member key more than once."),
 					JsonPointerJoin(TEXT("/value"), Item.Key), MakeShared<FJsonValueString>(TEXT("unique member key")), MakeShared<FJsonValueString>(Item.Key));
 			}
-			Keys.Add(Item.Key);
-			StringBytes += MeasureText(Item.Key).Utf8Bytes;
+			if (bCollectUsage) StringBytes += MeasureText(Item.Key).Utf8Bytes;
 		}
 		if (!Charge(Resources, {
 			{EUeAgentResourceDimension::Nodes, 1},
@@ -2193,6 +2286,37 @@ namespace UE::UAI::StateSemantic
 		{
 			return false;
 		}
+		return true;
+	}
+
+	bool FUeAgentCanonicalValue::TryObject(
+		const TArray<TPair<FString, FUeAgentCanonicalValueRef>>& Items,
+		FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalValuePtr& OutValue,
+		FUeAgentStateSemanticError& OutError)
+	{
+		OutValue.Reset();
+		if (!TryValidateObjectMembers(Items, Resources, OutError)) return false;
+		if (Items.IsEmpty()) if (const auto Existing = FindCanonicalLeaf(EUeAgentValueKind::Object, FString())) { OutValue = Existing; return true; }
+		const bool bShareContainer = !Items.IsEmpty() && Items.Num() <= 32;
+		uint32 ContainerHash = GetTypeHash(static_cast<uint8>(EUeAgentValueKind::Object));
+		if (bShareContainer) {
+			// Object order is canonicalized below; hash only selects a candidate.
+			// Exact key spelling and every sealed child identity prove equality.
+			for (const auto& Item : Items) ContainerHash ^= HashCombineFast(GetTypeHash(Item.Key), PointerHash(&Item.Value.Get()));
+			if (const auto Existing = FindCanonicalContainer(ContainerHash, EUeAgentValueKind::Object,
+				[&](const FUeAgentCanonicalValue& Value) {
+					const auto& Previous = Value.GetObjectItems();
+					if (Previous.Num() != Items.Num()) return false;
+					for (const auto& Item : Items) {
+						const auto* Match = Previous.FindByPredicate([&](const auto& Field) {
+							return Field.Key.Equals(Item.Key, ESearchCase::CaseSensitive);
+						});
+						if (!Match || &Match->Value.Get() != &Item.Value.Get()) return false;
+					}
+					return true;
+				})) { OutValue = Existing; return true; }
+		}
 		TSharedPtr<FUeAgentCanonicalValue> Mutable =
 			MakeShareable(new FUeAgentCanonicalValue(EUeAgentValueKind::Object));
 		Mutable->ObjectItems = Items;
@@ -2202,7 +2326,14 @@ namespace UE::UAI::StateSemantic
 				return Left.Key.Compare(Right.Key, ESearchCase::CaseSensitive) < 0;
 			});
 		OutValue = Mutable;
+		if (Items.IsEmpty()) RememberCanonicalLeaf(EUeAgentValueKind::Object, FString(), OutValue);
+		else if (bShareContainer) RememberCanonicalContainer(ContainerHash, OutValue);
 		return true;
+	}
+
+	void ResetCanonicalValueReuse()
+	{
+		CanonicalLeafCandidates.Reset();
 	}
 
 	bool FUeAgentCanonicalValue::TryTemporal(
@@ -2274,6 +2405,18 @@ namespace UE::UAI::StateSemantic
 	{
 		return ObjectItems;
 	}
+	bool FUeAgentCanonicalValue::ContainsStringMatching(TFunctionRef<bool(const FString&)> Matches) const
+	{
+		TArray<const FUeAgentCanonicalValue*> Pending{this};
+		while (!Pending.IsEmpty()) {
+			const auto* Value = Pending.Pop(EAllowShrinking::No);
+			if (Value->GetKind() == EUeAgentValueKind::String && Matches(Value->GetText())) return true;
+			if (Value->GetKind() == EUeAgentValueKind::Array) for (const auto& Item : Value->GetArrayItems()) Pending.Add(&Item.Get());
+			else if (Value->GetKind() == EUeAgentValueKind::Object) for (const auto& Field : Value->GetObjectItems()) Pending.Add(&Field.Value.Get());
+		}
+		return false;
+	}
+
 	const TSharedPtr<const FUeAgentTemporalPoint>&
 	FUeAgentCanonicalValue::GetTemporal() const
 	{
@@ -2334,6 +2477,12 @@ namespace UE::UAI::StateSemantic
 		}
 	}
 
+	struct FUeAgentCanonicalIdentity::FFields
+	{
+		FString SemanticId, TargetKind, OwnerId, Selector, ObjectRole;
+		TMap<FString, FString> Selectors;
+	};
+
 	FUeAgentCanonicalIdentity::FUeAgentCanonicalIdentity(
 		FString InSemanticId,
 		FString InTargetKind,
@@ -2341,13 +2490,16 @@ namespace UE::UAI::StateSemantic
 		FString InSelector,
 		FString InObjectRole,
 		FString InGeneration)
-		: SemanticId(MoveTemp(InSemanticId))
-		, TargetKind(MoveTemp(InTargetKind))
-		, OwnerId(MoveTemp(InOwnerId))
-		, Selector(MoveTemp(InSelector))
-		, ObjectRole(MoveTemp(InObjectRole))
-		, Generation(MoveTemp(InGeneration))
+		: Generation(MoveTemp(InGeneration))
 	{
+		auto Data = MakeShared<FFields>();
+		Fields = Data;
+		FString& SemanticId = Data->SemanticId; SemanticId = MoveTemp(InSemanticId);
+		FString& TargetKind = Data->TargetKind; TargetKind = MoveTemp(InTargetKind);
+		FString& OwnerId = Data->OwnerId; OwnerId = MoveTemp(InOwnerId);
+		FString& Selector = Data->Selector; Selector = MoveTemp(InSelector);
+		FString& ObjectRole = Data->ObjectRole; ObjectRole = MoveTemp(InObjectRole);
+		auto& Selectors = Data->Selectors;
 		bValid = NormalizeIdentityPart(SemanticId, TEXT("semantic_id"), ValidationDiagnostic)
 			&& NormalizeIdentityPart(TargetKind, TEXT("target_kind"), ValidationDiagnostic)
 			&& NormalizeIdentityPart(OwnerId, TEXT("owner"), ValidationDiagnostic)
@@ -2387,13 +2539,16 @@ namespace UE::UAI::StateSemantic
 		TMap<FString, FString> InSelectors,
 		FString InObjectRole,
 		FString InGeneration)
-		: SemanticId(MoveTemp(InSemanticId))
-		, TargetKind(MoveTemp(InTargetKind))
-		, OwnerId(MoveTemp(InOwnerId))
-		, Selectors(MoveTemp(InSelectors))
-		, ObjectRole(MoveTemp(InObjectRole))
-		, Generation(MoveTemp(InGeneration))
+		: Generation(MoveTemp(InGeneration))
 	{
+		auto Data = MakeShared<FFields>();
+		Fields = Data;
+		FString& SemanticId = Data->SemanticId; SemanticId = MoveTemp(InSemanticId);
+		FString& TargetKind = Data->TargetKind; TargetKind = MoveTemp(InTargetKind);
+		FString& OwnerId = Data->OwnerId; OwnerId = MoveTemp(InOwnerId);
+		FString& Selector = Data->Selector;
+		FString& ObjectRole = Data->ObjectRole; ObjectRole = MoveTemp(InObjectRole);
+		auto& Selectors = Data->Selectors; Selectors = MoveTemp(InSelectors);
 		bValid = NormalizeIdentityPart(SemanticId, TEXT("semantic_id"), ValidationDiagnostic)
 			&& NormalizeIdentityPart(TargetKind, TEXT("target_kind"), ValidationDiagnostic)
 			&& NormalizeIdentityPart(OwnerId, TEXT("owner"), ValidationDiagnostic)
@@ -2473,20 +2628,32 @@ namespace UE::UAI::StateSemantic
 		return Result;
 	}
 
-	const FString& FUeAgentCanonicalIdentity::GetSemanticId() const { return SemanticId; }
-	const FString& FUeAgentCanonicalIdentity::GetTargetKind() const { return TargetKind; }
-	const FString& FUeAgentCanonicalIdentity::GetOwnerId() const { return OwnerId; }
-	const FString& FUeAgentCanonicalIdentity::GetSelector() const { return Selector; }
+	TOptional<FUeAgentCanonicalIdentity> FUeAgentCanonicalIdentity::WithCapturedBinding(const FString& CapturedKey) const
+	{
+		if (!bValid) return {};
+		const FString Suffix = FString::Printf(TEXT("%lld:%s"), MeasureText(Generation).Utf8Bytes, *Generation);
+		const FString Prefix = CanonicalKey.LeftChop(Suffix.Len());
+		if (!CapturedKey.StartsWith(Prefix, ESearchCase::CaseSensitive)) return {};
+		FString Length, CapturedGeneration;
+		if (!CapturedKey.Mid(Prefix.Len()).Split(TEXT(":"), &Length, &CapturedGeneration)) return {};
+		const auto Bound = WithGeneration(MoveTemp(CapturedGeneration));
+		return Bound.IsValid() && Bound.GetCanonicalKey() == CapturedKey ? TOptional<FUeAgentCanonicalIdentity>(Bound) : TOptional<FUeAgentCanonicalIdentity>();
+	}
+
+	const FString& FUeAgentCanonicalIdentity::GetSemanticId() const { return Fields->SemanticId; }
+	const FString& FUeAgentCanonicalIdentity::GetTargetKind() const { return Fields->TargetKind; }
+	const FString& FUeAgentCanonicalIdentity::GetOwnerId() const { return Fields->OwnerId; }
+	const FString& FUeAgentCanonicalIdentity::GetSelector() const { return Fields->Selector; }
 	FString FUeAgentCanonicalIdentity::GetSelector(const FString& Name) const
 	{
-		const FString* Found = Selectors.Find(Name);
+		const FString* Found = Fields->Selectors.Find(Name);
 		return Found ? *Found : FString();
 	}
 	const TMap<FString, FString>& FUeAgentCanonicalIdentity::GetSelectors() const
 	{
-		return Selectors;
+		return Fields->Selectors;
 	}
-	const FString& FUeAgentCanonicalIdentity::GetObjectRole() const { return ObjectRole; }
+	const FString& FUeAgentCanonicalIdentity::GetObjectRole() const { return Fields->ObjectRole; }
 	const FString& FUeAgentCanonicalIdentity::GetGeneration() const { return Generation; }
 	const FString& FUeAgentCanonicalIdentity::GetCanonicalKey() const { return CanonicalKey; }
 	bool FUeAgentCanonicalIdentity::IsValid() const { return bValid; }
@@ -2563,6 +2730,95 @@ namespace UE::UAI::StateSemantic
 	bool FUeAgentDefaultValue::IsValid() const { return bValid; }
 	const FUeAgentStateSemanticError& FUeAgentDefaultValue::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 
+	FString NormalizePropertyConstraintValue(const FString& Key, const FString& Value)
+	{
+		if (Key.Equals(TEXT("clamp_min"), ESearchCase::CaseSensitive)
+			|| Key.Equals(TEXT("clamp_max"), ESearchCase::CaseSensitive)
+			|| Key.Equals(TEXT("ui_min"), ESearchCase::CaseSensitive)
+			|| Key.Equals(TEXT("ui_max"), ESearchCase::CaseSensitive))
+		{
+			FString Normalized;
+			if (TryNormalizeNumberLexeme(Value, Normalized)) return Normalized;
+		}
+		return Value;
+	}
+
+	void NormalizePropertyConstraints(TMap<FString, FString>& Constraints)
+	{
+		for (auto& Pair : Constraints) Pair.Value = NormalizePropertyConstraintValue(Pair.Key, Pair.Value);
+	}
+
+	bool TryNormalizePropertyDefinition(const FUeAgentCanonicalValueRef& Value,
+		FUeAgentResourceTracker& Resources, FUeAgentCanonicalValuePtr& OutValue,
+		FUeAgentStateSemanticError& OutError)
+	{
+		OutValue = Value;
+		if (Value->GetKind() != EUeAgentValueKind::Object) return true;
+		const auto& Fields = Value->GetObjectItems();
+		const bool bDescriptor = Fields.ContainsByPredicate([](const auto& Field) {
+			return Field.Key.Equals(TEXT("type"), ESearchCase::CaseSensitive)
+				&& Field.Value->GetKind() == EUeAgentValueKind::Object;
+		});
+		TArray<TPair<FString, FUeAgentCanonicalValueRef>> Result;
+		bool bChanged = false;
+		for (const auto& Field : Fields)
+		{
+			FUeAgentCanonicalValuePtr Next = Field.Value;
+			if (bDescriptor && Field.Key.Equals(TEXT("constraints"), ESearchCase::CaseSensitive)
+				&& Field.Value->GetKind() == EUeAgentValueKind::Object)
+			{
+				TArray<TPair<FString, FUeAgentCanonicalValueRef>> Constraints;
+				bool bBoundsChanged = false;
+				for (const auto& Bound : Field.Value->GetObjectItems())
+				{
+					FUeAgentCanonicalValuePtr Normalized = Bound.Value;
+					if (Bound.Value->GetKind() == EUeAgentValueKind::String) {
+						const FString Text = NormalizePropertyConstraintValue(Bound.Key, Bound.Value->GetText());
+						if (!Text.Equals(Bound.Value->GetText(), ESearchCase::CaseSensitive)
+							&& !FUeAgentCanonicalValue::TryString(Text, Resources, Normalized, OutError)) return false;
+					}
+					bBoundsChanged |= Normalized.Get() != &Bound.Value.Get();
+					Constraints.Emplace(Bound.Key, Normalized.ToSharedRef());
+				}
+				if (bBoundsChanged && !FUeAgentCanonicalValue::TryObject(Constraints, Resources, Next, OutError)) return false;
+			}
+			else if ((bDescriptor && Field.Key.Equals(TEXT("value_definition"), ESearchCase::CaseSensitive))
+				|| (!bDescriptor && Field.Key.Equals(TEXT("element_definition"), ESearchCase::CaseSensitive)))
+			{
+				if (!TryNormalizePropertyDefinition(Field.Value, Resources, Next, OutError)) return false;
+			}
+			else if (!bDescriptor && Field.Key.Equals(TEXT("fields"), ESearchCase::CaseSensitive)
+				&& Field.Value->GetKind() == EUeAgentValueKind::Object)
+			{
+				TArray<TPair<FString, FUeAgentCanonicalValueRef>> Members;
+				bool bMembersChanged = false;
+				for (const auto& Member : Field.Value->GetObjectItems()) {
+					FUeAgentCanonicalValuePtr Normalized;
+					if (!TryNormalizePropertyDefinition(Member.Value, Resources, Normalized, OutError)) return false;
+					bMembersChanged |= Normalized.Get() != &Member.Value.Get();
+					Members.Emplace(Member.Key, Normalized.ToSharedRef());
+				}
+				if (bMembersChanged && !FUeAgentCanonicalValue::TryObject(Members, Resources, Next, OutError)) return false;
+			}
+			else if (!bDescriptor && Field.Key.Equals(TEXT("items"), ESearchCase::CaseSensitive)
+				&& Field.Value->GetKind() == EUeAgentValueKind::Array)
+			{
+				TArray<FUeAgentCanonicalValueRef> Items;
+				bool bItemsChanged = false;
+				for (const auto& Item : Field.Value->GetArrayItems()) {
+					FUeAgentCanonicalValuePtr Normalized;
+					if (!TryNormalizePropertyDefinition(Item, Resources, Normalized, OutError)) return false;
+					bItemsChanged |= Normalized.Get() != &Item.Get();
+					Items.Add(Normalized.ToSharedRef());
+				}
+				if (bItemsChanged && !FUeAgentCanonicalValue::TryArray(Items, Resources, Next, OutError)) return false;
+			}
+			bChanged |= Next.Get() != &Field.Value.Get();
+			Result.Emplace(Field.Key, Next.ToSharedRef());
+		}
+		return !bChanged || FUeAgentCanonicalValue::TryObject(Result, Resources, OutValue, OutError);
+	}
+
 	FUeAgentStateDetails::FUeAgentStateDetails(
 		FString InDisplayName,
 		FString InTooltip,
@@ -2577,6 +2833,7 @@ namespace UE::UAI::StateSemantic
 		, Availability(MoveTemp(InAvailability))
 		, Constraints(MoveTemp(InConstraints))
 	{
+		NormalizePropertyConstraints(Constraints);
 		if (!IsNonEmpty(DisplayName)) ValidationDiagnostic = InvalidState(TEXT("canonical_details_invalid"), TEXT("The captured entry has an empty display name."), TEXT("/details/display_name"));
 		else if (!IsNonEmpty(Availability)) ValidationDiagnostic = InvalidState(TEXT("canonical_details_invalid"), TEXT("The captured entry has an empty availability description."), TEXT("/details/availability"));
 		for (int32 Index = 0; !ValidationDiagnostic && Index < CategoryPath.Num(); ++Index)
@@ -2606,12 +2863,23 @@ namespace UE::UAI::StateSemantic
 	const FUeAgentStateSemanticError& FUeAgentStateDetails::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 	bool FUeAgentStateDetails::operator==(const FUeAgentStateDetails& Other) const
 	{
-		return DisplayName == Other.DisplayName
-			&& Tooltip == Other.Tooltip
-			&& CategoryPath == Other.CategoryPath
-			&& bEditable == Other.bEditable
-			&& Availability == Other.Availability
-			&& Constraints.OrderIndependentCompareEqual(Other.Constraints);
+		if (!DisplayName.Equals(Other.DisplayName, ESearchCase::CaseSensitive)
+			|| !Tooltip.Equals(Other.Tooltip, ESearchCase::CaseSensitive)
+			|| CategoryPath.Num() != Other.CategoryPath.Num() || bEditable != Other.bEditable
+			|| !Availability.Equals(Other.Availability, ESearchCase::CaseSensitive)
+			|| Constraints.Num() != Other.Constraints.Num()) return false;
+		for (int32 I = 0; I < CategoryPath.Num(); ++I)
+			if (!CategoryPath[I].Equals(Other.CategoryPath[I], ESearchCase::CaseSensitive)) return false;
+		for (const auto& Pair : Constraints) {
+			bool bFound = false;
+			for (const auto& OtherPair : Other.Constraints)
+				if (Pair.Key.Equals(OtherPair.Key, ESearchCase::CaseSensitive)) {
+					if (!Pair.Value.Equals(OtherPair.Value, ESearchCase::CaseSensitive)) return false;
+					bFound = true; break;
+				}
+			if (!bFound) return false;
+		}
+		return true;
 	}
 
 	FUeAgentStateProvenance::FUeAgentStateProvenance(
@@ -2681,6 +2949,18 @@ namespace UE::UAI::StateSemantic
 		return !(*this == Other);
 	}
 
+	struct FUeAgentStateEntry::FPayload
+	{
+		FPayload(FUeAgentCanonicalType InType, FUeAgentCanonicalValueRef InValue,
+			FUeAgentStateDetails InDetails, FUeAgentCanonicalValuePtr InAuthoringDescriptor)
+			: Type(MoveTemp(InType)), Value(MoveTemp(InValue)), Details(MoveTemp(InDetails)),
+			AuthoringDescriptor(MoveTemp(InAuthoringDescriptor)) {}
+		FUeAgentCanonicalType Type;
+		FUeAgentCanonicalValueRef Value;
+		FUeAgentStateDetails Details;
+		FUeAgentCanonicalValuePtr AuthoringDescriptor;
+	};
+
 	FUeAgentStateEntry::FUeAgentStateEntry(
 		FUeAgentCanonicalIdentity InIdentity,
 		FUeAgentCanonicalType InType,
@@ -2691,16 +2971,27 @@ namespace UE::UAI::StateSemantic
 		EUeAgentAuthoredPresence InAuthoredPresence,
 		EUeAgentOverrideState InOverrideState,
 		FUeAgentCanonicalValuePtr InAuthoringDescriptor)
+		: FUeAgentStateEntry(MoveTemp(InIdentity),
+			MakeShared<const FPayload>(MoveTemp(InType), MoveTemp(InValue), MoveTemp(InDetails), MoveTemp(InAuthoringDescriptor)),
+			MoveTemp(InDefault), MoveTemp(InObservedRevision), InAuthoredPresence, InOverrideState)
+	{
+	}
+
+	FUeAgentStateEntry::FUeAgentStateEntry(FUeAgentCanonicalIdentity InIdentity,
+		TSharedRef<const FPayload> InPayload, FUeAgentDefaultValue InDefault,
+		FUeAgentStateRevision InObservedRevision, EUeAgentAuthoredPresence InAuthoredPresence,
+		EUeAgentOverrideState InOverrideState)
 		: Identity(MoveTemp(InIdentity))
-		, Type(MoveTemp(InType))
-		, Value(MoveTemp(InValue))
+		, Payload(MoveTemp(InPayload))
 		, Default(MoveTemp(InDefault))
-		, Details(MoveTemp(InDetails))
-		, AuthoringDescriptor(MoveTemp(InAuthoringDescriptor))
 		, ObservedRevision(MoveTemp(InObservedRevision))
 		, AuthoredPresence(InAuthoredPresence)
 		, OverrideState(InOverrideState)
 	{
+		const auto& Type = Payload->Type;
+		const auto& Value = Payload->Value;
+		const auto& Details = Payload->Details;
+		const auto& AuthoringDescriptor = Payload->AuthoringDescriptor;
 		const auto MatchesType =
 			[](const FUeAgentCanonicalValueRef& Candidate, const FUeAgentCanonicalType& CanonicalType)
 			{
@@ -2732,12 +3023,12 @@ namespace UE::UAI::StateSemantic
 		bValid = !ValidationDiagnostic;
 	}
 
-	const FUeAgentCanonicalValuePtr& FUeAgentStateEntry::GetAuthoringDescriptor() const { return AuthoringDescriptor; }
+	const FUeAgentCanonicalValuePtr& FUeAgentStateEntry::GetAuthoringDescriptor() const { return Payload->AuthoringDescriptor; }
 	const FUeAgentCanonicalIdentity& FUeAgentStateEntry::GetIdentity() const { return Identity; }
-	const FUeAgentCanonicalType& FUeAgentStateEntry::GetType() const { return Type; }
-	const FUeAgentCanonicalValueRef& FUeAgentStateEntry::GetValue() const { return Value; }
+	const FUeAgentCanonicalType& FUeAgentStateEntry::GetType() const { return Payload->Type; }
+	const FUeAgentCanonicalValueRef& FUeAgentStateEntry::GetValue() const { return Payload->Value; }
 	const FUeAgentDefaultValue& FUeAgentStateEntry::GetDefault() const { return Default; }
-	const FUeAgentStateDetails& FUeAgentStateEntry::GetDetails() const { return Details; }
+	const FUeAgentStateDetails& FUeAgentStateEntry::GetDetails() const { return Payload->Details; }
 	const FUeAgentStateRevision& FUeAgentStateEntry::GetObservedRevision() const
 	{
 		return ObservedRevision;
@@ -2758,14 +3049,19 @@ namespace UE::UAI::StateSemantic
 	{
 		return FUeAgentStateEntry(
 			Identity,
-			Type,
-			Value,
+			Payload,
 			Default,
-			Details,
 			MoveTemp(Revision),
 			AuthoredPresence,
-			OverrideState,
-			AuthoringDescriptor);
+			OverrideState);
+	}
+
+	FUeAgentStateEntry FUeAgentStateEntry::WithIdentityAndDefault(
+		FUeAgentCanonicalIdentity InIdentity, FUeAgentDefaultValue InDefault,
+		FUeAgentStateRevision InObservedRevision) const
+	{
+		return FUeAgentStateEntry(MoveTemp(InIdentity), Payload, MoveTemp(InDefault),
+			MoveTemp(InObservedRevision), AuthoredPresence, OverrideState);
 	}
 
 	FUeAgentCanonicalSnapshot::FUeAgentCanonicalSnapshot(
@@ -2782,6 +3078,13 @@ namespace UE::UAI::StateSemantic
 		, Provenance(MoveTemp(InProvenance))
 		, Entries(MoveTemp(InEntries))
 	{
+		EntryCount = Entries.Num();
+		bCaptureRebindable = Provenance.GetSourceKind() == TEXT("independent_readback");
+		for (const auto& Entry : Entries)
+			bCaptureRebindable &= Entry.GetIdentity().GetGeneration().Equals(Revision.GetGeneration(), ESearchCase::CaseSensitive)
+				&& Entry.GetDefault().GetSourceKind() == EUeAgentDefaultSourceKind::PostCreateReadback
+				&& Entry.GetDefault().GetSourceIdentity().Equals(Entry.GetIdentity().GetCanonicalKey(), ESearchCase::CaseSensitive)
+				&& &Entry.GetDefault().GetValue().Get() == &Entry.GetValue().Get();
 	}
 
 	bool FUeAgentCanonicalSnapshot::TryCreate(
@@ -2807,6 +3110,18 @@ namespace UE::UAI::StateSemantic
 			Resources,
 			OutSnapshot,
 			OutError);
+	}
+
+	bool FUeAgentCanonicalSnapshot::TryCreate(
+		const FString& SnapshotId, EUeAgentStatePlane StatePlane,
+		const FUeAgentStateRevision& Revision, const FUeAgentTemporalPoint& CapturedAt,
+		const FUeAgentStateProvenance& Provenance, TArray<FUeAgentStateEntry>&& Entries,
+		FUeAgentResourceTracker& Resources, FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+		FUeAgentStateSemanticError& OutError)
+	{
+		return TryCreateWithRequiredProvenance(SnapshotId, StatePlane, Revision, CapturedAt,
+			Provenance, TEXT("independent_readback"), TEXT("snapshot_requires_independent_readback"),
+			Entries, Resources, OutSnapshot, OutError, &Entries);
 	}
 
 	bool FUeAgentCanonicalSnapshot::TryCreateExpected(
@@ -2845,7 +3160,7 @@ namespace UE::UAI::StateSemantic
 		const TArray<FUeAgentStateEntry>& Entries,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalSnapshotPtr& OutSnapshot,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError, TArray<FUeAgentStateEntry>* OwnedEntries)
 	{
 		ResetError(OutError);
 		OutSnapshot.Reset();
@@ -2884,14 +3199,20 @@ namespace UE::UAI::StateSemantic
 		{
 			return false;
 		}
-		TArray<FUeAgentStateEntry> Ordered = Entries;
-		Ordered.Sort(
+		TArray<FUeAgentStateEntry> Ordered;
+		if (OwnedEntries) Ordered = MoveTemp(*OwnedEntries);
+		else Ordered = Entries;
+		const auto Less =
 			[](const FUeAgentStateEntry& Left, const FUeAgentStateEntry& Right)
 			{
 				return Left.GetIdentity().GetCanonicalKey().Compare(
 					Right.GetIdentity().GetCanonicalKey(),
 					ESearchCase::CaseSensitive) < 0;
-			});
+			};
+		bool bSorted = true;
+		for (int32 Index = 1; Index < Ordered.Num(); ++Index)
+			if (!Less(Ordered[Index - 1], Ordered[Index])) { bSorted = false; break; }
+		if (!bSorted) Ordered.Sort(Less);
 		FString PreviousKey;
 		for (const FUeAgentStateEntry& Entry : Ordered)
 		{
@@ -2933,6 +3254,280 @@ namespace UE::UAI::StateSemantic
 		return true;
 	}
 
+	struct FUeAgentCanonicalSnapshot::FCaptureEntryBlock
+	{
+		TArray<FUeAgentStateEntry> Entries;
+		// Indices borrow the immutable entries' original spelling. Retain the
+		// existing FString uniqueness rule and first-occurrence order without
+		// copying another semantic string for every captured entry.
+		TArray<int32> SemanticRepresentatives;
+		void SealSemanticRepresentatives()
+		{
+			SemanticRepresentatives.Reset();
+			TSet<FString> Seen;
+			for (int32 I = 0; I < Entries.Num(); ++I) {
+				const FString& Semantic = Entries[I].GetIdentity().GetSemanticId();
+				if (!Seen.Contains(Semantic)) { Seen.Add(Semantic); SemanticRepresentatives.Add(I); }
+			}
+		}
+	};
+
+	struct FUeAgentCanonicalSnapshot::FIdentityIndex
+	{
+		struct FKeyPosition
+		{
+			uint32 Hash;
+			int32 Entry;
+		};
+		struct FSemantic
+		{
+			int32 Count = 0;
+			bool bIndexed = false;
+			TArray<FKeyPosition> CanonicalPrefixes;
+			TArray<FKeyPosition> SelectorValues;
+			int64 AllocatedBytes() const
+			{
+				return sizeof(FSemantic) + 64 + CanonicalPrefixes.GetAllocatedSize() + SelectorValues.GetAllocatedSize();
+			}
+		};
+		FString Selector;
+		// Immutable per-semantic payloads keep an overlay's shared index immutable.
+		// Admission copies only this small directory, never another whole index.
+		TMap<FString, TSharedPtr<const FSemantic>> Semantics;
+		int64 AllocatedBytes() const
+		{
+			int64 Bytes = sizeof(FIdentityIndex) + 64 + Selector.GetAllocatedSize() + Semantics.GetAllocatedSize();
+			for (const auto& Pair : Semantics) Bytes += Pair.Key.GetAllocatedSize() + Pair.Value->AllocatedBytes();
+			return Bytes;
+		}
+	};
+
+	TArray<TSharedRef<const FUeAgentCanonicalSnapshot::FCaptureEntryBlock>>
+	FUeAgentCanonicalSnapshot::CopyCaptureBlocks() const
+	{
+		FScopeLock Lock(&EntryMutex);
+		if (!CaptureBlocks.IsEmpty()) return CaptureBlocks;
+		TArray<TSharedRef<const FCaptureEntryBlock>> Result;
+		for (int32 First = 0; First < Entries.Num(); First += 256)
+		{
+			auto Block = MakeShared<FCaptureEntryBlock>();
+			const int32 Count = FMath::Min(256, Entries.Num() - First);
+			Block->Entries.Reserve(Count);
+			for (int32 I = 0; I < Count; ++I) Block->Entries.Add(Entries[First + I]);
+			Block->SealSemanticRepresentatives();
+			Result.Add(Block);
+		}
+		return Result;
+	}
+
+	const FUeAgentStateEntry& FUeAgentCanonicalSnapshot::RawEntry(const int32 Index) const
+	{
+		check(Index >= 0 && Index < EntryCount);
+		return bEntriesMaterialized ? Entries[Index] : CaptureBlocks[Index / 256]->Entries[Index % 256];
+	}
+
+	FUeAgentStateEntry FUeAgentCanonicalSnapshot::BindEntry(const FUeAgentStateEntry& Entry) const
+	{
+		if (!bCaptureRebindable || (Entry.GetObservedRevision() == Revision && Entry.GetIdentity().GetGeneration() == Revision.GetGeneration())) return Entry;
+		auto Identity = Entry.GetIdentity().WithGeneration(Revision.GetGeneration());
+		FUeAgentDefaultValue Default(EUeAgentDefaultSourceKind::PostCreateReadback,
+			Identity.GetCanonicalKey(), Entry.GetDefault().GetProvenance(), Entry.GetValue());
+		return Entry.WithIdentityAndDefault(MoveTemp(Identity), MoveTemp(Default), Revision);
+	}
+
+	FUeAgentStateEntry FUeAgentCanonicalSnapshot::ReadEntry(const int32 Index) const
+	{
+		FScopeLock Lock(&EntryMutex);
+		return BindEntry(RawEntry(Index));
+	}
+
+	TArray<int32> FUeAgentCanonicalSnapshot::FindSemanticEntryIndices(const FString& SemanticId) const
+	{
+		FScopeLock Lock(&EntryMutex);
+		TArray<int32> Result;
+		for (int32 I = 0; I < EntryCount; ++I)
+			if (RawEntry(I).GetIdentity().GetSemanticId().Equals(SemanticId, ESearchCase::CaseSensitive)) Result.Add(I);
+		return Result;
+	}
+
+	TArray<FString> FUeAgentCanonicalSnapshot::GetSemanticIds() const
+	{
+		FScopeLock Lock(&EntryMutex);
+		TArray<FString> Result;
+		TSet<FString> Seen;
+		if (!CaptureBlocks.IsEmpty()) {
+			for (const auto& Block : CaptureBlocks)
+				for (const int32 I : Block->SemanticRepresentatives) {
+					const FString& Semantic = Block->Entries[I].GetIdentity().GetSemanticId();
+					if (!Seen.Contains(Semantic)) { Seen.Add(Semantic); Result.Add(Semantic); }
+				}
+			return Result;
+		}
+		for (int32 I = 0; I < EntryCount; ++I)
+		{
+			const FString& Semantic = RawEntry(I).GetIdentity().GetSemanticId();
+			if (!Seen.Contains(Semantic)) { Seen.Add(Semantic); Result.Add(Semantic); }
+		}
+		return Result;
+	}
+
+	TArray<int32> FUeAgentCanonicalSnapshot::FindTargetEntryIndices(const FString& SemanticId,
+		const FString& TargetKey, const FString& AlternateSelector, int32& OutSemanticCount) const
+	{
+		FScopeLock Lock(&EntryMutex);
+		OutSemanticCount = 0;
+		TArray<int32> Result;
+		// Budget optional lookup material, not the complete snapshot. Each semantic
+		// keeps compact sorted (hash, position) pairs; exact matching stays with the
+		// consumer. A large unrelated semantic cannot discard useful smaller indices.
+		if (!bCaptureRebindable || AlternateSelector.Len() > 256)
+		{
+			for (int32 I = 0; I < EntryCount; ++I)
+				if (RawEntry(I).GetIdentity().GetSemanticId() == SemanticId) Result.Add(I);
+			OutSemanticCount = Result.Num(); return Result;
+		}
+		// Canonical-only lookups can consume any existing selector index: the
+		// canonical-prefix membership is identical and exact matching follows.
+		const bool bSameSelector = IdentityIndex
+			&& (AlternateSelector.IsEmpty() || IdentityIndex->Selector == AlternateSelector);
+		const auto* Found = bSameSelector ? IdentityIndex->Semantics.Find(SemanticId) : nullptr;
+		TSharedPtr<const FIdentityIndex::FSemantic> Semantic = Found ? *Found : nullptr;
+		if (!Semantic)
+		{
+			const double Started = FPlatformTime::Seconds();
+			auto Index = bSameSelector ? MakeShared<FIdentityIndex>(*IdentityIndex) : MakeShared<FIdentityIndex>();
+			if (!bSameSelector) Index->Selector = AlternateSelector;
+			auto Current = MakeShared<FIdentityIndex::FSemantic>();
+			int32 SelectorCount = 0;
+			for (int32 I = 0; I < EntryCount; ++I)
+			{
+				const auto& Identity = RawEntry(I).GetIdentity();
+				if (Identity.GetSemanticId() != SemanticId) continue;
+				++Current->Count;
+				if (Identity.GetSelectors().Contains(Index->Selector)) ++SelectorCount;
+			}
+			Index->Semantics.Add(SemanticId, Current);
+			constexpr int64 Budget = 32ll * 1024 * 1024;
+			const int64 Required = (static_cast<int64>(Current->Count) + SelectorCount) * sizeof(FIdentityIndex::FKeyPosition);
+			if (Required <= Budget - Index->AllocatedBytes())
+			{
+				Current->CanonicalPrefixes.Reserve(Current->Count);
+				Current->SelectorValues.Reserve(SelectorCount);
+				for (int32 I = 0; I < EntryCount; ++I)
+				{
+					const auto& Identity = RawEntry(I).GetIdentity();
+					if (Identity.GetSemanticId() != SemanticId) continue;
+					const FString Suffix = FString::Printf(TEXT("%lld:%s"), MeasureText(Identity.GetGeneration()).Utf8Bytes, *Identity.GetGeneration());
+					Current->CanonicalPrefixes.Add({GetTypeHash(Identity.GetCanonicalKey().LeftChop(Suffix.Len())), I});
+					if (const auto* Selector = Identity.GetSelectors().Find(Index->Selector))
+						Current->SelectorValues.Add({GetTypeHash(*Selector), I});
+				}
+				const auto Less = [](const FIdentityIndex::FKeyPosition& A, const FIdentityIndex::FKeyPosition& B)
+				{ return A.Hash < B.Hash || (A.Hash == B.Hash && A.Entry < B.Entry); };
+				Current->CanonicalPrefixes.Sort(Less); Current->SelectorValues.Sort(Less);
+				Current->bIndexed = Index->AllocatedBytes() <= Budget;
+				if (!Current->bIndexed) { Current->CanonicalPrefixes.Empty(); Current->SelectorValues.Empty(); }
+			}
+			const int64 Bytes = Index->AllocatedBytes();
+			Semantic = Current;
+			if (Bytes <= Budget) IdentityIndex = MoveTemp(Index);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=canonical_identity_index entries=%d semantic_entries=%d allocated_bytes=%lld retained=%s total_s=%.6f"),
+				EntryCount, Current->Count, Bytes, Current->bIndexed ? TEXT("true") : TEXT("false"), FPlatformTime::Seconds() - Started);
+		}
+		OutSemanticCount = Semantic->Count;
+		if (!Semantic->bIndexed)
+		{
+			for (int32 I = 0; I < EntryCount; ++I)
+				if (RawEntry(I).GetIdentity().GetSemanticId() == SemanticId) Result.Add(I);
+			OutSemanticCount = Result.Num(); return Result;
+		}
+		const auto AppendMatches = [&](const TArray<FIdentityIndex::FKeyPosition>& Positions, const uint32 Hash)
+		{
+			int32 First = 0, Last = Positions.Num();
+			while (First < Last) {
+				const int32 Mid = First + (Last - First) / 2;
+				if (Positions[Mid].Hash < Hash) First = Mid + 1; else Last = Mid;
+			}
+			for (int32 I = First; I < Positions.Num() && Positions[I].Hash == Hash; ++I) Result.AddUnique(Positions[I].Entry);
+		};
+		if (!AlternateSelector.IsEmpty())
+			AppendMatches(Semantic->SelectorValues, GetTypeHash(TargetKey));
+		const FString Suffix = FString::Printf(TEXT("%lld:%s"), MeasureText(Revision.GetGeneration()).Utf8Bytes, *Revision.GetGeneration());
+		if (TargetKey.EndsWith(Suffix, ESearchCase::IgnoreCase))
+			AppendMatches(Semantic->CanonicalPrefixes, GetTypeHash(TargetKey.LeftChop(Suffix.Len())));
+		// Preserve the original canonical entry order for ambiguity diagnostics.
+		Result.Sort();
+		return Result;
+	}
+
+	bool FUeAgentCanonicalSnapshot::TryCreateCaptureOverlay(const FUeAgentCanonicalSnapshot& Previous,
+		const FString& SnapshotId, const FUeAgentStateRevision& Revision,
+		const FUeAgentTemporalPoint& CapturedAt, const FUeAgentStateProvenance& Provenance,
+		const TMap<int32, FUeAgentStateEntry>& Replacements, FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalSnapshotPtr& OutSnapshot, FUeAgentStateSemanticError& OutError)
+	{
+		OutSnapshot.Reset(); OutError.Reset();
+		if (!Previous.bCaptureRebindable
+			|| Revision.GetSourceId() != Previous.Revision.GetSourceId()
+			|| Provenance.GetSourceId() != Previous.Provenance.GetSourceId()) return false;
+		if (!IsNonEmpty(SnapshotId) || !Revision.IsValid() || !CapturedAt.IsValid() || !Provenance.IsValid())
+		{
+			OutError = FUeAgentStateSemanticError::Failure(TEXT("snapshot_contract_invalid"),
+				!IsNonEmpty(SnapshotId) ? TEXT("The captured snapshot has no identifier.")
+				: !Revision.IsValid() ? TEXT("The captured snapshot has an invalid revision.")
+				: !CapturedAt.IsValid() ? TEXT("The captured snapshot has an invalid capture time.")
+				: TEXT("The captured snapshot has incomplete provenance."), TEXT("canonical_snapshot"));
+			OutError.SemanticPointer = TEXT("/snapshot"); return false;
+		}
+		if (Provenance.GetSourceKind() != TEXT("independent_readback")) return false;
+		for (const auto& Pair : Replacements)
+		{
+			if (Pair.Key < 0 || Pair.Key >= Previous.EntryCount) return false;
+			const auto& Entry = Pair.Value;
+			if (!Entry.IsValid()) { OutError = Entry.GetValidationDiagnostic(); return false; }
+			const auto Before = Previous.ReadEntry(Pair.Key);
+			if (!Entry.GetIdentity().GetCanonicalKey().Equals(Before.GetIdentity().WithGeneration(Revision.GetGeneration()).GetCanonicalKey(), ESearchCase::CaseSensitive)
+				|| Entry.GetObservedRevision() != Revision
+				|| Entry.GetDefault().GetSourceKind() != EUeAgentDefaultSourceKind::PostCreateReadback
+				|| !Entry.GetDefault().GetSourceIdentity().Equals(Entry.GetIdentity().GetCanonicalKey(), ESearchCase::CaseSensitive)
+				|| &Entry.GetDefault().GetValue().Get() != &Entry.GetValue().Get()) return false;
+		}
+		if (!Charge(Resources, {
+			{EUeAgentResourceDimension::Nodes, 1},
+			{EUeAgentResourceDimension::Items, Previous.EntryCount},
+			{EUeAgentResourceDimension::WorkUnits, 1 + Previous.EntryCount},
+			{EUeAgentResourceDimension::EstimatedMemoryBytes, 128 + Previous.EntryCount * 128},
+		}, TEXT("/snapshot"), OutError)) return false;
+		TSharedPtr<FUeAgentCanonicalSnapshot> Result = MakeShareable(new FUeAgentCanonicalSnapshot(SnapshotId, Previous.StatePlane,
+			Revision, CapturedAt, Provenance, {}));
+		Result->EntryCount = Previous.EntryCount;
+		Result->bEntriesMaterialized = false;
+		Result->CaptureBlocks = Previous.CopyCaptureBlocks();
+		{ FScopeLock PreviousLock(&Previous.EntryMutex); Result->IdentityIndex = Previous.IdentityIndex; }
+		TMap<int32, TSharedRef<FCaptureEntryBlock>> ChangedBlocks;
+		for (const auto& Pair : Replacements)
+		{
+			const int32 BlockIndex = Pair.Key / 256;
+			auto* Changed = ChangedBlocks.Find(BlockIndex);
+			if (!Changed)
+			{
+				auto Block = MakeShared<FCaptureEntryBlock>();
+				Block->Entries = Result->CaptureBlocks[BlockIndex]->Entries;
+				Changed = &ChangedBlocks.Add(BlockIndex, Block);
+				Result->CaptureBlocks[BlockIndex] = Block;
+			}
+			(*Changed)->Entries[Pair.Key % 256] = Pair.Value;
+		}
+		for (const auto& Pair : ChangedBlocks) Pair.Value->SealSemanticRepresentatives();
+		int64 SummaryBytes = 0;
+		for (const auto& Block : Result->CaptureBlocks)
+			SummaryBytes += sizeof(Block->SemanticRepresentatives) + Block->SemanticRepresentatives.GetAllocatedSize();
+		if (!Charge(Resources, {{EUeAgentResourceDimension::EstimatedMemoryBytes, SummaryBytes}},
+			TEXT("/snapshot/semantic_ids"), OutError)) return false;
+		OutSnapshot = MoveTemp(Result);
+		return true;
+	}
+
 	const FString& FUeAgentCanonicalSnapshot::GetSnapshotId() const { return SnapshotId; }
 	EUeAgentStatePlane FUeAgentCanonicalSnapshot::GetStatePlane() const { return StatePlane; }
 	const FUeAgentStateRevision& FUeAgentCanonicalSnapshot::GetRevision() const { return Revision; }
@@ -2946,6 +3541,18 @@ namespace UE::UAI::StateSemantic
 	}
 	const TArray<FUeAgentStateEntry>& FUeAgentCanonicalSnapshot::GetEntries() const
 	{
+		FScopeLock Lock(&EntryMutex);
+		if (!bEntriesMaterialized)
+		{
+			const double Started = FPlatformTime::Seconds();
+			Entries.Reserve(EntryCount);
+			for (const auto& Block : CaptureBlocks)
+				for (const auto& Entry : Block->Entries) Entries.Add(BindEntry(Entry));
+			bEntriesMaterialized = true;
+			CaptureBlocks.Reset();
+			UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=canonical_legacy_materialization entries=%d total_s=%.6f"),
+				EntryCount, FPlatformTime::Seconds() - Started);
+		}
 		return Entries;
 	}
 

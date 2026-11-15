@@ -2480,7 +2480,8 @@ bool ApplyIKRigDocument(UIKRigDefinition &Rig,
            {TEXT("goal"), EJson::String}}, OutError,
           TEXT("/chains/") + Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")))) return false;
       const FName Name(*Pair.Key);
-      const FBoneChain* ExistingChain = Controller->GetRetargetChainByName(Name);
+      const FBoneChain* ExistingChain = Controller->GetRetargetChains().FindByPredicate(
+          [Name](const FBoneChain& Candidate) { return Candidate.ChainName == Name; });
       const FBoneChain Before = ExistingChain ? *ExistingChain : FBoneChain();
       FString Start = Before.StartBone.BoneName.ToString();
       FString End = Before.EndBone.BoneName.ToString();

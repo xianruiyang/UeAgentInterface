@@ -11,6 +11,7 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringObjectMetadata.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
+#include "Utilities/AuthoringCore/UeAgentNativeNormalizationIntent.h"
 #include "Utilities/AuthoringObjectApply/UeAgentAuthoringObjectApply.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
@@ -42,13 +43,18 @@ bool ReadSectionProperties(UAnimMontage& Asset, const FCompositeSection& Section
       UeAgentDetailsAuthoringService::ProjectReadableProperties(Snapshot, Properties, Error);
 }
 
+FString SectionBindingKey(int32 SourceIndex, int32 DesiredIndex) {
+  return SourceIndex == INDEX_NONE ? TEXT("new:") + FString::FromInt(DesiredIndex) : FString::FromInt(SourceIndex);
+}
+
 bool ApplySectionProperties(UAnimMontage& Asset, FCompositeSection& Section,
-    const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& Error, const FString& CanonicalAssetPath) {
+    const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& Error, const FString& CanonicalAssetPath,
+    TSharedPtr<FJsonObject>* BoundRows) {
   UeAgentAuthoringState::FStateSnapshot Snapshot;
   TSharedPtr<FJsonObject> Properties;
   TArray<TSharedPtr<FJsonValue>> Descriptors;
   if (!ReadSectionProperties(Asset, Section, Snapshot, Properties, Error) ||
-      !UeAgentDetailsAuthoringService::DecodeReadableProperties(Snapshot, Value, Descriptors, Error)) return false;
+      !UeAgentDetailsAuthoringService::DecodeReadableProperties(Snapshot, Value, Descriptors, Error, BoundRows)) return false;
   UeAgentAuthoringObjectApply::FOptions Options;
   Options.DiagnosticTargetPath = CanonicalAssetPath;
   Options.bAllowDomainAuthorizedOwners = true;
@@ -271,10 +277,22 @@ bool ApplyMontageStructure(UAnimMontage& Asset, const TSharedPtr<const FJsonObje
   }
   if (const auto Sections = Document->TryGetField(TEXT("sections"))) {
     const auto BeforeSections = Asset.CompositeSections;
+    struct FSectionPropertyArguments {
+      FName SectionName;
+      FString BindingKey;
+      TSharedPtr<FJsonValue> Source;
+    };
+    TArray<FSectionPropertyArguments> PropertyArguments;
+    const bool bRecordArguments = UeAgentNativeNormalizationIntent::IsValueRecording();
     TArray<int32> SectionSources;
     if (!ApplyRows(Asset, TEXT("sections"), Sections, Asset.CompositeSections, [&](FCompositeSection& Section, const FJsonObject& Row, int32 SourceSection) {
-      if (const auto Properties = Row.TryGetField(TEXT("properties")))
-        if (!ApplySectionProperties(Asset, Section, Properties, Error, CanonicalAssetPath)) return false;
+      if (const auto Properties = Row.TryGetField(TEXT("properties"))) {
+        TSharedPtr<FJsonObject> BoundRows;
+        if (!ApplySectionProperties(Asset, Section, Properties, Error, CanonicalAssetPath,
+            bRecordArguments ? &BoundRows : nullptr)) return false;
+        if (BoundRows) PropertyArguments.Add({Section.SectionName, SectionBindingKey(SourceSection, SectionSources.Num()),
+            MakeShared<FJsonValueObject>(BoundRows)});
+      }
       if (Row.HasField(TEXT("next_section"))) {
         FString NextSection;
         if (!Row.TryGetStringField(TEXT("next_section"), NextSection)) {
@@ -326,6 +344,13 @@ bool ApplyMontageStructure(UAnimMontage& Asset, const TSharedPtr<const FJsonObje
     }
     Asset.CompositeSections.Sort([](const FCompositeSection& A, const FCompositeSection& B) { return A.GetTime() < B.GetTime(); });
     UAnimMontageFactory::EnsureStartingSection(&Asset);
+    for (const auto& Arguments : PropertyArguments) {
+      const int32 NativeIndex = Asset.GetSectionIndex(Arguments.SectionName);
+      const FString ComparisonPath = TEXT("/sections/") + Arguments.BindingKey + TEXT("/properties");
+      const FString NativePath = TEXT("/sections/") + FString::FromInt(NativeIndex) + TEXT("/properties");
+      if (!UeAgentNativeNormalizationIntent::RecordValue(ComparisonPath, NativePath, Arguments.Source, Arguments.Source, Error))
+        return false;
+    }
     ++Changes;
   }
   if (!ApplyAnimationEvents(Asset, *Document, Changes, Error, false, &CapturedNotifies, CanonicalAssetPath)) return false;
@@ -425,8 +450,7 @@ bool ProjectMontageOriginalIntent(UeAgentAuthoringState::FStateEntry& NativeEntr
     if (!StateSemantic::CanonicalJson::TryToJsonValue(*Binding.Value, Json, Error)) return false;
     auto Row = ProjectRow(Json);
     if (!Row) return false;
-    const FString Key = Binding.CapturedIndex == INDEX_NONE
-        ? TEXT("new:") + FString::FromInt(Index) : FString::FromInt(Binding.CapturedIndex);
+    const FString Key = SectionBindingKey(Binding.CapturedIndex, Index);
     DesiredBySource->SetField(Key, Row);
     SourcePaths.Add(TEXT("/sections/") + Key, TEXT("/sections/") + FString::FromInt(Index));
     SourceByName.Add(SectionName(Row), Key);

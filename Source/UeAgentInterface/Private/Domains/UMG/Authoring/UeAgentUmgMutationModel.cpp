@@ -184,6 +184,14 @@ bool ValidateKnownFields(const TSharedPtr<const FJsonObject>& Object,
 	return true;
 }
 
+bool ValidateAuthoredEntryFields(const FMapEntry& Entry, TSet<FString> Allowed,
+	const TCHAR* ErrorCode, UE::UAI::Contract::FDiagnostic& OutError)
+{
+	// Workspace lowering attached provenance to this entry after public field validation.
+	Allowed.Add(TEXT("authoring_source"));
+	return ValidateKnownFields(Entry.Spec, Allowed, ErrorCode, OutError);
+}
+
 UClass* ResolveClass(const FString& ClassPath, UClass* RequiredBase)
 {
 	UClass* Class =
@@ -585,11 +593,10 @@ bool ApplyWidgetTree(UWidgetBlueprint& Blueprint,
 		const auto Slot = GetObject(Entry.Spec, TEXT("slot"));
 		if (Slot && !UeAgentDetailsAuthoringService::ReadPropertyPayload(Slot, TEXT("properties"), PropertyDocument, OutError)) return false;
 		if (Slot) NormalizedProperties.Add(Slot.Get(), PropertyDocument);
-		if (!ValidateKnownFields(Entry.Spec,
+		if (!ValidateAuthoredEntryFields(Entry,
 				{TEXT("operation"),
 					TEXT("name"),
 					TEXT("candidate"),
-					TEXT("authoring_source"),
 					TEXT("class"),
 					TEXT("parent"),
 					TEXT("index"),
@@ -1024,7 +1031,7 @@ bool ApplyBindings(UWidgetBlueprint& Blueprint,
 	{
 		ON_SCOPE_EXIT { if (!OutError.IsEmpty()) UeAgentAuthoringDiagnostics::LocateFailure(OutError, *Entry.Spec,
 			TEXT("binding_apply"), UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint)); };
-		if (!ValidateKnownFields(Entry.Spec,
+		if (!ValidateAuthoredEntryFields(Entry,
 				{TEXT("operation"),
 					TEXT("widget_name"),
 					TEXT("property_name"),
@@ -1397,11 +1404,10 @@ bool ApplyAnimations(UWidgetBlueprint& Blueprint,
 	{
 		ON_SCOPE_EXIT { if (!OutError.IsEmpty()) UeAgentAuthoringDiagnostics::LocateFailure(OutError, *Entry.Spec,
 			TEXT("animation_apply"), UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint)); };
-		if (!ValidateKnownFields(Entry.Spec,
+		if (!ValidateAuthoredEntryFields(Entry,
 				{TEXT("operation"),
 					TEXT("name"),
 					TEXT("display_label"),
-					TEXT("authoring_source"),
 					TEXT("start_seconds"),
 					TEXT("duration_seconds"),
 					TEXT("display_rate_num"),

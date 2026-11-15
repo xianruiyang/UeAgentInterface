@@ -371,8 +371,15 @@ namespace UeAgentBehaviorTreeAuthoring
 
 	bool ReadGraphDocument(UBehaviorTree& Tree, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		return ReadGraphDocument(Tree, OutValue, OutError, nullptr);
+	}
+
+	bool ReadGraphDocument(UBehaviorTree& Tree, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError,
+		TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
+	{
 		FGraphCapture Capture;
-		if (!CaptureGraph(Tree, Capture, OutError)) return false;
+		if (!CaptureGraph(Tree, Capture, OutError, OutStructure != nullptr)) return false;
+		if (OutStructure && !CaptureObservedGraph(Tree, Capture, OutStructure->Emplace(), OutError)) return false;
 		const auto Document = ReadGraphContentsDocument(Capture);
 		const auto OwnedGraphs = MakeShared<FJsonObject>();
 		for (const FOwnedGraphCapture& Captured : Capture.OwnedGraphs)

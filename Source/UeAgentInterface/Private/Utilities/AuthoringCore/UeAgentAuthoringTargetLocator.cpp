@@ -2,6 +2,7 @@
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringTargetLocator.h"
 
+#include "Containers/ArrayView.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -61,14 +62,15 @@ namespace UeAgentAuthoringTargetLocator
 			{
 				return Candidate.CanonicalKey.Equals(Criterion.Value, ESearchCase::IgnoreCase);
 			}
-			const FString CandidateValue = Candidate.GetSelector(Criterion.Name);
-			return !CandidateValue.IsEmpty() && CandidateValue.Equals(
+			// Criterion names have already been normalized against this model.
+			const FString* CandidateValue = Candidate.Selectors.Find(Criterion.Name);
+			return CandidateValue && !CandidateValue->IsEmpty() && CandidateValue->Equals(
 				Criterion.Value,
 				Criterion.bCaseSensitive ? ESearchCase::CaseSensitive : ESearchCase::IgnoreCase);
 		}
 
 		void AddDiagnosticCandidates(
-			const TArray<UeAgentAuthoringIdentity::FCanonicalIdentity>& Candidates,
+			TConstArrayView<UeAgentAuthoringIdentity::FCanonicalIdentity> Candidates,
 			const TArray<int32>& SourceIndices,
 			const TArray<FCriterion>& Criteria,
 			int32 MaxDiagnosticCandidates,
@@ -192,17 +194,30 @@ namespace UeAgentAuthoringTargetLocator
 		return Result;
 	}
 
-	bool ResolveExact(
-		const FTargetQuery& Query,
-		const TArray<UeAgentAuthoringIdentity::FCanonicalIdentity>& Candidates,
+	// Query construction is not a proof. Both public queries and a current
+	// identity still go through the same model/key parser and matching rules.
+	struct FTargetQueryView
+	{
+		const FString& ModelId; const FString& TargetKind; const FString& CanonicalKey;
+		const TMap<FString, FString>& Selectors;
+		FTargetQueryView(const FTargetQuery& Query)
+			: ModelId(Query.ModelId), TargetKind(Query.TargetKind), CanonicalKey(Query.CanonicalKey), Selectors(Query.Selectors) {}
+		explicit FTargetQueryView(const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity)
+			: ModelId(Identity.ModelId), TargetKind(Identity.TargetKind), CanonicalKey(Identity.CanonicalKey), Selectors(NoSelectors()) {}
+		static const TMap<FString, FString>& NoSelectors() { static const TMap<FString, FString> Empty; return Empty; }
+	};
+
+	static bool ResolveExactImpl(
+		const FTargetQueryView& Query,
+		TConstArrayView<UeAgentAuthoringIdentity::FCanonicalIdentity> Candidates,
 		FResolveResult& OutResult,
 		int32 MaxDiagnosticCandidates,
-		const UeAgentAuthoringIdentity::FRegistry* Registry)
+		const UeAgentAuthoringIdentity::FRegistry* Registry,
+		bool bCollectSuccessCandidates)
 	{
 		OutResult = FResolveResult();
 		OutResult.Status = TEXT("failed");
 		const UeAgentAuthoringIdentity::FRegistry& ResolvedRegistry = Registry ? *Registry : UeAgentAuthoringIdentity::FRegistry::Get();
-		UeAgentAuthoringIdentity::FModelDescriptor Model;
 		const FString ModelId = NormalizeId(Query.ModelId);
 		const FString TargetKind = NormalizeId(Query.TargetKind);
 		if (ModelId.IsEmpty() || (Query.CanonicalKey.TrimStartAndEnd().IsEmpty() && Query.Selectors.IsEmpty()))
@@ -212,12 +227,14 @@ namespace UeAgentAuthoringTargetLocator
 				ModelId.IsEmpty() ? TEXT("identity_model") : TEXT("selectors"), TEXT("non-empty query field"), nullptr);
 			return false;
 		}
-		if (!ResolvedRegistry.FindModel(ModelId, Model))
+		const auto ModelView = ResolvedRegistry.FindModelView(ModelId);
+		if (!ModelView)
 		{
 			OutResult.Diagnostic = PropertyFailure(TEXT("target_identity_model_unknown"), TEXT("The requested target identity model is not registered."),
 				TEXT("identity_model"), TEXT("registered identity model"), MakeShared<FJsonValueString>(ModelId));
 			return false;
 		}
+		const auto& Model = *ModelView;
 		if (!Model.TargetKind.IsEmpty() && (TargetKind.IsEmpty() || Model.TargetKind != TargetKind))
 		{
 			OutResult.Diagnostic = PropertyFailure(TEXT("target_identity_model_mismatch"), TEXT("The requested target kind does not match its identity model."),
@@ -230,20 +247,49 @@ namespace UeAgentAuthoringTargetLocator
 		if (bHasCanonicalKey)
 		{
 			FDiagnostic ParseError;
-			if (!UeAgentAuthoringIdentity::ParseCanonicalKey(Query.CanonicalKey, ParsedCanonicalIdentity, ParseError, &ResolvedRegistry))
+			FString ParsedModelId, ParsedTargetKind;
+			const bool bParsed = Query.Selectors.IsEmpty()
+				? UeAgentAuthoringIdentity::ValidateCanonicalKey(Query.CanonicalKey, ResolvedRegistry, ModelView, ParsedModelId, ParsedTargetKind, ParseError)
+				: UeAgentAuthoringIdentity::ParseCanonicalKey(Query.CanonicalKey, ParsedCanonicalIdentity, ParseError, &ResolvedRegistry);
+			if (!bParsed)
 			{
 				OutResult.Diagnostic = FDiagnostic::WrapFailure(TEXT("target_query_invalid"), ParseError, TEXT("target_resolve"));
 				return false;
 			}
-			if (ParsedCanonicalIdentity.ModelId != ModelId || (!TargetKind.IsEmpty() && ParsedCanonicalIdentity.TargetKind != TargetKind))
+			const FString& KeyModelId = Query.Selectors.IsEmpty() ? ParsedModelId : ParsedCanonicalIdentity.ModelId;
+			const FString& KeyTargetKind = Query.Selectors.IsEmpty() ? ParsedTargetKind : ParsedCanonicalIdentity.TargetKind;
+			if (KeyModelId != ModelId || (!TargetKind.IsEmpty() && KeyTargetKind != TargetKind))
 			{
-				const bool bModelMismatch = ParsedCanonicalIdentity.ModelId != ModelId;
+				const bool bModelMismatch = KeyModelId != ModelId;
 				OutResult.Diagnostic = PropertyFailure(TEXT("target_identity_model_mismatch"),
 					TEXT("The supplied canonical identity does not match the query model or target kind."),
 					bModelMismatch ? TEXT("identity_model") : TEXT("target_kind"),
-					*(bModelMismatch ? ModelId : TargetKind), MakeShared<FJsonValueString>(bModelMismatch ? ParsedCanonicalIdentity.ModelId : ParsedCanonicalIdentity.TargetKind));
+					*(bModelMismatch ? ModelId : TargetKind), MakeShared<FJsonValueString>(bModelMismatch ? KeyModelId : KeyTargetKind));
 				return false;
 			}
+		}
+
+		// Diagnostic-only validation of one canonical-key candidate never uses
+		// criterion/candidate/search arrays. Keep the actual parser above: the
+		// public identity fields may have been changed since their builder ran.
+		if (!bCollectSuccessCandidates && Candidates.Num() == 1 && bHasCanonicalKey && Query.Selectors.IsEmpty())
+		{
+			const auto& Candidate = Candidates[0];
+			// Exact same current field needs no copied/trimmed key. Whitespace
+			// still has the original query meaning, including non-trim selectors.
+			const bool bSameUntrimmedKey = &Candidate.CanonicalKey == &Query.CanonicalKey
+				&& !FChar::IsWhitespace(Query.CanonicalKey[0])
+				&& !FChar::IsWhitespace(Query.CanonicalKey[Query.CanonicalKey.Len() - 1]);
+			const bool bKeyMatches = bSameUntrimmedKey
+				|| Candidate.CanonicalKey.Equals(Query.CanonicalKey.TrimStartAndEnd(), ESearchCase::IgnoreCase);
+			if (Candidate.IsValid() && Candidate.ModelId == ModelId
+				&& (TargetKind.IsEmpty() || Candidate.TargetKind == TargetKind) && bKeyMatches)
+			{
+				OutResult.Status = TEXT("resolved"); OutResult.ResolvedIndex = 0; return true;
+			}
+			OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_not_found"),
+				TEXT("No target in the requested model and context matches all supplied selectors."), TEXT("target_resolve"));
+			return false;
 		}
 
 		TArray<FCriterion> Criteria;
@@ -318,6 +364,29 @@ namespace UeAgentAuthoringTargetLocator
 			OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_query_invalid"),
 				TEXT("Target resolution requires at least one nonempty identity or selector."), TEXT("target_resolve"));
 			return false;
+		}
+
+		// A single exact match cannot be ambiguous. Keep the full failure path below
+		// so selector-conflict and not-found diagnostics remain identical.
+		if (Candidates.Num() == 1)
+		{
+			const auto& Candidate = Candidates[0];
+			if (Candidate.IsValid() && Candidate.ModelId == ModelId
+				&& (TargetKind.IsEmpty() || Candidate.TargetKind == TargetKind)
+				&& !Criteria.ContainsByPredicate([&Candidate](const FCriterion& Criterion)
+					{ return !MatchesCriterion(Candidate, Criterion); }))
+			{
+				OutResult.Status = TEXT("resolved");
+				OutResult.ResolvedIndex = 0;
+				if (bCollectSuccessCandidates)
+				{
+					FDiagnosticCandidate& Match = OutResult.Candidates.AddDefaulted_GetRef();
+					Match.SourceIndex = 0;
+					Match.MatchedCriteria = Criteria.Num();
+					Match.Identity = Candidate;
+				}
+				return true;
+			}
 		}
 
 		TArray<int32> EligibleIndices;
@@ -434,6 +503,33 @@ namespace UeAgentAuthoringTargetLocator
 		return false;
 	}
 
+	bool ResolveExact(const FTargetQuery& Query,
+		const TArray<UeAgentAuthoringIdentity::FCanonicalIdentity>& Candidates,
+		FResolveResult& OutResult, int32 MaxDiagnosticCandidates,
+		const UeAgentAuthoringIdentity::FRegistry* Registry)
+	{
+		return ResolveExactImpl(Query, MakeArrayView(Candidates), OutResult,
+			MaxDiagnosticCandidates, Registry, true);
+	}
+
+	bool ValidateExact(const FTargetQuery& Query,
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Candidate,
+		FDiagnostic& OutError, const UeAgentAuthoringIdentity::FRegistry* Registry)
+	{
+		FResolveResult Result;
+		const bool bResolved = ResolveExactImpl(Query, MakeArrayView(&Candidate, 1), Result, -1, Registry, false);
+		OutError = MoveTemp(Result.Diagnostic);
+		return bResolved;
+	}
+
+	bool ValidateIdentity(const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity,
+		FDiagnostic& OutError, const UeAgentAuthoringIdentity::FRegistry* Registry)
+	{
+		FResolveResult Result;
+		const bool bResolved = ResolveExactImpl(FTargetQueryView(Identity), MakeArrayView(&Identity, 1), Result, -1, Registry, false);
+		OutError = MoveTemp(Result.Diagnostic); return bResolved;
+	}
+
 	bool BuildPropertyIdentity(
 		const UObject* RootObject,
 		const FString& PropertyPath,
@@ -456,12 +552,9 @@ namespace UeAgentAuthoringTargetLocator
 			OutError);
 	}
 
-	bool BuildPropertyIdentity(
-		const FString& RootOwnerPath,
-		const FString& PropertyPath,
-		const FString& NotificationOwnerPath,
-		UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-		FDiagnostic& OutError)
+	using FPropertyIdentityViews = TArray<TPair<FStringView, FStringView>, TInlineAllocator<3>>;
+	static bool PropertyIdentityInputs(const FString& RootOwnerPath, const FString& PropertyPath,
+		const FString& NotificationOwnerPath, FPropertyIdentityViews& Selectors, FDiagnostic& OutError)
 	{
 		if (RootOwnerPath.IsEmpty() || PropertyPath.IsEmpty())
 		{
@@ -470,12 +563,31 @@ namespace UeAgentAuthoringTargetLocator
 				RootOwnerPath.IsEmpty() ? TEXT("owner_path") : TEXT("property_path"), TEXT("non-empty path"), MakeShared<FJsonValueString>(FString()));
 			return false;
 		}
-		TMap<FString, FString> Selectors;
-		Selectors.Add(TEXT("owner_path"), RootOwnerPath);
-		Selectors.Add(TEXT("property_path"), PropertyPath);
-		if (!NotificationOwnerPath.IsEmpty()) Selectors.Add(TEXT("notification_owner_path"), NotificationOwnerPath);
-		return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
+		Selectors.Add({FStringView(TEXT("owner_path")), FStringView(RootOwnerPath)});
+		Selectors.Add({FStringView(TEXT("property_path")), FStringView(PropertyPath)});
+		if (!NotificationOwnerPath.IsEmpty()) Selectors.Add({FStringView(TEXT("notification_owner_path")), FStringView(NotificationOwnerPath)});
+		return true;
+	}
+
+	bool BuildPropertyIdentity(const FString& RootOwnerPath, const FString& PropertyPath,
+		const FString& NotificationOwnerPath, UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
+		FDiagnostic& OutError)
+	{
+		FPropertyIdentityViews Selectors;
+		if (!PropertyIdentityInputs(RootOwnerPath, PropertyPath, NotificationOwnerPath, Selectors, OutError)) return false;
+		return UeAgentAuthoringIdentity::BuildCanonicalIdentityFromViews(
 			TEXT("property_identity"), TEXT("property"), Selectors, OutIdentity, OutError);
+	}
+
+	bool ComparePropertyIdentity(const FString& RootOwnerPath, const FString& PropertyPath,
+		const FString& NotificationOwnerPath, const FString& ExpectedKey,
+		bool& OutMatches, FString& OutActualKey, FDiagnostic& OutError)
+	{
+		OutMatches = false;
+		FPropertyIdentityViews Selectors;
+		if (!PropertyIdentityInputs(RootOwnerPath, PropertyPath, NotificationOwnerPath, Selectors, OutError)) { OutActualKey.Reset(); return false; }
+		return UeAgentAuthoringIdentity::CompareCanonicalIdentityFromViews(
+			TEXT("property_identity"), TEXT("property"), Selectors, ExpectedKey, OutMatches, OutActualKey, OutError);
 	}
 
 	namespace

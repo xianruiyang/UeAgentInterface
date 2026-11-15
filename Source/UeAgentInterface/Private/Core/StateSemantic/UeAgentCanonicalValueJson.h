@@ -62,12 +62,26 @@ namespace UE::UAI::StateSemantic
 		UEAGENTINTERFACE_API bool AreJsonValuesEquivalent(
 			const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right);
 
+		/** True only when the current JSON has the same generic canonical
+		 * projection, including numeric kind and exact retained spelling.
+		 * This is a material reuse proof, not a native observation or binding. */
+		UEAGENTINTERFACE_API bool MatchesCanonicalProjection(
+			const TSharedPtr<FJsonValue>& Current, const FUeAgentCanonicalValue& Previous);
+
 		/** Projects only a typed leaf after its complete allocation preflight succeeds. */
 		UEAGENTINTERFACE_API bool TryProjectTypedLeaf(
 			const FUeAgentCanonicalValue& Value,
 			TFunctionRef<bool(int64)> ChargeMemory,
 			TSharedPtr<FJsonValue>& OutValue,
 			UE::UAI::Contract::FDiagnostic& OutError);
+		/** Same scalar producer as generic conversion, without graph discovery
+		 * for an already-selected non-container leaf. Never retains the input. */
+		UEAGENTINTERFACE_API bool TryFromJsonScalarValue(
+			const FJsonValue& Value,
+			UE::UAI::ContextResource::FUeAgentResourceTracker& Resources,
+			TSharedPtr<const FUeAgentCanonicalValue>& OutValue,
+			UE::UAI::Contract::FDiagnostic& OutError);
+
 		UEAGENTINTERFACE_API bool TryFromJsonValue(
 			const TSharedPtr<FJsonValue>& Value,
 			UE::UAI::ContextResource::FUeAgentResourceTracker& Resources,
@@ -78,5 +92,16 @@ namespace UE::UAI::StateSemantic
 			const FUeAgentCanonicalValue& Value,
 			TSharedPtr<FJsonValue>& OutValue,
 			UE::UAI::Contract::FDiagnostic& OutError);
+
+		/** Codec input that will be projected back to canonical values: preserve the
+		 * integer/decimal distinction even for integral decimal spellings. */
+		UEAGENTINTERFACE_API bool TryToAuthoringCodecJson(
+			const FUeAgentCanonicalValue& Value, TSharedPtr<FJsonValue>& OutValue,
+			UE::UAI::Contract::FDiagnostic& OutError);
+		/** Native declaration signatures use the UE JSON writer's original numeric spelling. */
+		UEAGENTINTERFACE_API bool TryToAuthoringDeclarationJson(
+			const FUeAgentCanonicalValue& Value, TSharedPtr<FJsonValue>& OutValue,
+			UE::UAI::Contract::FDiagnostic& OutError);
+		UEAGENTINTERFACE_API bool NeedsDecimalPoint(const FString& DecimalLexeme);
 	}
 }

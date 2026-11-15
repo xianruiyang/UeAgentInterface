@@ -43,6 +43,12 @@ namespace UE::UAI::CommandHandlers::LongRunning
 			{
 				return Owner;
 			}
+			TUniquePtr<IUeAgentOperationReadScope> TryBeginConcurrentRead(const FUeAgentCommandRequest& Request) override
+			{
+				if (Route.CommandId != TEXT("operation.status") && Route.CommandId != TEXT("operation.receipt")) return {};
+				return OperationPort->TryBeginConcurrentRead(FUeAgentOperationRequest(Route.DescriptorIdentity,
+					Request.GetRequestId(), TEXT("uai-command:") + Request.GetRequestId(), FUeAgentContractValue(Request.GetParamsJson())));
+			}
 
 			virtual FUeAgentCommandResult Submit(
 				const FUeAgentCommandRequest& Request,

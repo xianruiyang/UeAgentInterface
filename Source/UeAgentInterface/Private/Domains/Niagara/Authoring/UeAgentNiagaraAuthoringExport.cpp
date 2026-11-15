@@ -522,7 +522,8 @@ namespace UeAgentNiagaraAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport)
 	{
   auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
@@ -545,6 +546,6 @@ namespace UeAgentNiagaraAuthoring
 			UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
 				TEXT("niagara"),
 				GetAssetKind(&Asset));
-		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(CompositionKind, ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
+		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(CompositionKind, ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult, PreparedExport);
 	}
 }

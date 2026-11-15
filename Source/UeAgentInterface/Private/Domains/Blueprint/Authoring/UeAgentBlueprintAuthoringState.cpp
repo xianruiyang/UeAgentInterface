@@ -7,6 +7,7 @@
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintNativeNormalization.h"
 
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringOps.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Components/ActorComponent.h"
@@ -54,11 +55,14 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
 #include "Utilities/UeAgentBlueprintInputBindings.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UeAgentBlueprintAuthoring
 {
+	static bool AppendReparentHierarchyReadRequests(UBlueprint& Blueprint, const FString& AssetPath,
+		TArray<UeAgentAuthoringState::FReadRequest>& Requests, FDiagnostic& Error);
 	namespace
 	{
 		FString GuidText(const FGuid& Guid)
@@ -104,6 +108,46 @@ namespace UeAgentBlueprintAuthoring
 			OutRequests.Add(MoveTemp(Request));
 			return true;
 		}
+
+		bool AppendMemberReadRequest(UBlueprint& Blueprint, const FString& AssetPath, const FBPVariableDescription& Member,
+			TArray<UeAgentAuthoringState::FReadRequest>& Requests, FDiagnostic& Error)
+		{
+			const bool bDelegate = Member.VarType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate;
+			return AddReadRequest(bDelegate ? DelegateSemanticId : VariableSemanticId, MemberIdentityModelId,
+				TEXT("blueprint_member"), {{TEXT("asset_path"), AssetPath}, {TEXT("member_guid"), GuidText(Member.VarGuid)},
+					{TEXT("member_kind"), bDelegate ? TEXT("delegate") : TEXT("variable")}, {TEXT("member_name"), Member.VarName.ToString()}},
+				&Blueprint, {}, Requests, Error);
+		}
+
+		bool AppendInterfaceReadRequest(UBlueprint& Blueprint, const FString& AssetPath, const UClass& Interface,
+			TArray<UeAgentAuthoringState::FReadRequest>& Requests, FDiagnostic& Error)
+		{
+			return AddReadRequest(InterfaceSemanticId, InterfaceIdentityModelId, TEXT("blueprint_interface"),
+				{{TEXT("asset_path"), AssetPath}, {TEXT("interface_class"), Interface.GetPathName()}}, &Blueprint, {}, Requests, Error);
+		}
+
+		bool CaptureBlueprintProjection(const FString& WorkspaceTargetKind, const TArray<UeAgentAuthoringState::FReadRequest>& Requests,
+			UeAgentAuthoringState::FStateValue& OutValue, FDiagnostic& Error, int32* OutEntryCount = nullptr)
+		{
+			UeAgentAuthoringState::FCaptureResult Capture;
+			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture)) { Error = Capture.Diagnostic; return false; }
+			if (OutEntryCount) *OutEntryCount = Capture.Snapshot.Num();
+			auto Resources = UE::UAI::HjsonWorkspace::MakeSemanticWorkspaceResourceTracker();
+			UE::UAI::HjsonWorkspace::FWorkspaceError ProjectionError;
+			if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(WorkspaceTargetKind, TEXT("llm_authoring"),
+				Capture.Snapshot, Resources, OutValue.AuthoringProjection, ProjectionError)) {
+				Error = ProjectionError.GetDiagnostic(); return false;
+			}
+			return true;
+		}
+
+		bool AppendObservedMemberReadRequests(UBlueprint& Blueprint, const UeAgentAuthoringState::FReadRequest& Request,
+			const FString& AssetPath, TArray<UeAgentAuthoringState::FReadRequest>& Reads, FDiagnostic& Error);
+		bool AppendLocalComponentReadRequests(const FString& AssetPath, USCS_Node& Node, const FString& Parent,
+			TArray<UeAgentAuthoringState::FReadRequest>& Requests, FDiagnostic& Error);
+		bool AppendObservedComponentReadRequests(UBlueprint& Blueprint, const FString& AssetPath,
+			const TMap<FString, FString>& Context, TArray<UeAgentAuthoringState::FReadRequest>& Requests, FDiagnostic& Error);
+
 
 		TSharedRef<FJsonObject> BuildPinTypeState(const FEdGraphPinType& PinType,
 			const UBlueprint* Blueprint = nullptr, const FString& CanonicalAssetPath = FString())
@@ -897,6 +941,39 @@ namespace UeAgentBlueprintAuthoring
 						TEXT("asset_path"), Request.TargetIdentity.GetSelector(TEXT("asset_path")));
 					State->SetStringField(TEXT("asset_kind"), GetAssetKind(Blueprint));
 				}
+				else {
+					// Keep the native verification envelope for operation comparison.
+					// Its GUID summaries have no published property identity.
+					OutValue.bAuthoringVisible = false;
+					const FString* GraphGuids = Request.Context.Find(ObservedGraphGuidsContext);
+					const bool bHasMembers = Request.Context.Contains(ObservedMemberCapture);
+					bool bHasComponents = false;
+					if (Request.bCaptureAuthoringProjection)
+						for (const auto& Field : Request.Context)
+							if (Field.Key.StartsWith(ObservedComponentPrefix)) { bHasComponents = true; break; }
+					if (Request.bCaptureAuthoringProjection && Request.Context.Contains(ObservedReparentHierarchy)) {
+						TArray<UeAgentAuthoringState::FReadRequest> Reads;
+						if (!AppendReparentHierarchyReadRequests(*const_cast<UBlueprint*>(Blueprint),
+							Request.TargetIdentity.GetSelector(TEXT("asset_path")), Reads, OutError)
+							|| !CaptureBlueprintProjection(TEXT("ue.blueprint.asset"), Reads, OutValue, OutError))
+							return UeAgentAuthoringState::EReadOutcome::Failed;
+					} else if (Request.bCaptureAuthoringProjection && (GraphGuids || bHasMembers || bHasComponents)) {
+						const FString AssetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+						TArray<UeAgentAuthoringState::FReadRequest> Roots;
+						if (!AddReadRequest(ExportTargetSemanticId, AssetIdentityModelId, TEXT("blueprint_asset"),
+							{{TEXT("asset_path"), AssetPath}}, Blueprint, {}, Roots, OutError))
+							return UeAgentAuthoringState::EReadOutcome::Failed;
+						if (bHasComponents && !AppendObservedComponentReadRequests(*const_cast<UBlueprint*>(Blueprint),
+							AssetPath, Request.Context, Roots, OutError)) return UeAgentAuthoringState::EReadOutcome::Failed;
+						if (bHasMembers && !AppendObservedMemberReadRequests(*const_cast<UBlueprint*>(Blueprint),
+							Request, AssetPath, Roots, OutError)) return UeAgentAuthoringState::EReadOutcome::Failed;
+						const bool bCaptured = GraphGuids
+							? CaptureObservedGraphBodies(*const_cast<UBlueprint*>(Blueprint), AssetPath, *GraphGuids,
+								TEXT("ue.blueprint.asset"), MoveTemp(Roots), OutValue, OutError, &Request.Context)
+							: CaptureBlueprintProjection(TEXT("ue.blueprint.asset"), Roots, OutValue, OutError);
+						if (!bCaptured) return UeAgentAuthoringState::EReadOutcome::Failed;
+					}
+				}
 				OutValue.Value = MakeShared<FJsonValueObject>(State);
 				return UeAgentAuthoringState::EReadOutcome::Resolved;
 			}
@@ -1148,12 +1225,15 @@ namespace UeAgentBlueprintAuthoring
 			const TMap<FString, FString>& BaseSelectors,
 			const TSet<FName>& Excluded,
 			TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-			FDiagnostic& OutError)
+			FDiagnostic& OutError,
+			const TSet<FName>* Included = nullptr)
 		{
 			if (!Object) return true;
 			UeAgentAuthoringState::FEditablePropertyReadOptions Options;
 			Options.SemanticId = SemanticId;
 			Options.ExcludedProperties = Excluded;
+			if (Included) Options.IncludeProperty = [Included](const FProperty* Property, const void*, const UObject*)
+				{ return Included->Contains(Property->GetFName()); };
 			if (!ModelId.IsEmpty())
 			{
 				Options.BuildSnapshotIdentity =
@@ -1169,6 +1249,125 @@ namespace UeAgentBlueprintAuthoring
 			}
 			return UeAgentAuthoringState::AppendEditableObjectPropertyReadRequests(
 				Object, Options, OutRequests, OutError);
+		}
+
+		bool AppendLocalComponentReadRequests(const FString& AssetPath, USCS_Node& Node, const FString& Parent,
+			TArray<UeAgentAuthoringState::FReadRequest>& Requests, FDiagnostic& Error)
+		{
+			const FString Name = Node.GetVariableName().ToString();
+			const TMap<FString, FString> Selectors{{TEXT("asset_path"), AssetPath}, {TEXT("component_guid"), GuidText(Node.VariableGuid)},
+				{TEXT("component_kind"), Node.ComponentClass->GetName()}, {TEXT("component_name"), Name}};
+			return AddReadRequest(ComponentSemanticId, ComponentIdentityModelId, TEXT("blueprint_component"), Selectors, Node.ComponentTemplate,
+				{{TEXT("component_name"), Name}, {TEXT("parent_name"), Parent}, {TEXT("source"), TEXT("scs")}}, Requests, Error)
+				&& AppendPropertyRequests(Node.ComponentTemplate, ComponentPropertySemanticId, ComponentPropertyIdentityModelId,
+					TEXT("blueprint_component_property"), Selectors, {}, Requests, Error);
+		}
+
+		bool AppendObservedComponentReadRequests(UBlueprint& Blueprint, const FString& AssetPath,
+			const TMap<FString, FString>& Context, TArray<UeAgentAuthoringState::FReadRequest>& Requests, FDiagnostic& Error)
+		{
+			USimpleConstructionScript* SCS = Blueprint.SimpleConstructionScript;
+			TArray<UeAgentBlueprintAuthoringOps::FInheritedComponent> InheritedComponents;
+			UeAgentBlueprintAuthoringOps::GatherInheritedComponents(Blueprint, InheritedComponents);
+			TMap<UActorComponent*, FString> Inherited;
+			for (const auto& Entry : InheritedComponents) Inherited.Add(Entry.Component, Entry.Name);
+			TMap<const USCS_Node*, FString> Parents;
+			if (SCS)
+				for (USCS_Node* Root : SCS->GetRootNodes()) BuildSCSParentMap(Blueprint, Root, FString(), Inherited, Parents);
+			TSet<FName> Names;
+			for (const auto& Field : Context)
+			{
+				if (!Field.Key.StartsWith(ObservedComponentPrefix)) continue;
+				const FName Name(*Field.Key.RightChop(FCString::Strlen(ObservedComponentPrefix)));
+				FGuid Guid;
+				const bool bPresent = !Field.Value.IsEmpty();
+				const bool bValid = !bPresent || (FGuid::ParseExact(Field.Value, EGuidFormats::DigitsWithHyphensLower, Guid) && Guid.IsValid());
+				USCS_Node* Match = nullptr;
+				int32 Count = 0;
+				if (SCS)
+					for (USCS_Node* Node : SCS->GetAllNodes())
+						if (Node && (Node->GetVariableName() == Name || (bPresent && Node->VariableGuid == Guid))) { Match = Node; ++Count; }
+				if (!SCS || !bValid || (bPresent ? Count != 1 || Match->VariableGuid != Guid || Match->GetVariableName() != Name
+					|| !Match->ComponentClass || !Match->ComponentTemplate || !Parents.Contains(Match) : Count != 0))
+				{
+					Error = FDiagnostic::Failure(TEXT("blueprint_observed_component_binding_missing"),
+						TEXT("The current construction script does not match the observed local component identity and presence."), TEXT("blueprint_state"));
+					Error.TargetPath = AssetPath;
+					Error.PropertyPath = Name.ToString();
+					return false;
+				}
+				if (Match && !AppendLocalComponentReadRequests(AssetPath, *Match, Parents.FindChecked(Match), Requests, Error)) return false;
+				Names.Add(Name);
+			}
+			const UObject* CDO = Blueprint.GeneratedClass ? Blueprint.GeneratedClass->GetDefaultObject(false) : nullptr;
+			return AppendPropertyRequests(CDO, ClassDefaultPropertySemanticId, ClassDefaultPropertyIdentityModelId,
+				TEXT("blueprint_class_default_property"), {{TEXT("asset_path"), AssetPath}}, {}, Requests, Error, &Names);
+		}
+
+		bool AppendObservedMemberReadRequests(UBlueprint& Blueprint, const UeAgentAuthoringState::FReadRequest& Request,
+			const FString& AssetPath, TArray<UeAgentAuthoringState::FReadRequest>& Reads, FDiagnostic& Error)
+		{
+			const UObject* CDO = Blueprint.GeneratedClass ? Blueprint.GeneratedClass->GetDefaultObject(false) : nullptr;
+			TSet<FName> SelectedDefaults;
+			int32 RequiredDefaultCount = 0;
+			for (const auto& Field : Request.Context) {
+				if (Field.Key.StartsWith(ObservedInterfacePrefix)) {
+					const FString Path = Field.Key.RightChop(FCString::Strlen(ObservedInterfacePrefix));
+					const auto* Description = Blueprint.ImplementedInterfaces.FindByPredicate([&](const auto& Item) {
+						return Item.Interface && Item.Interface->GetPathName() == Path;
+					});
+					if ((Description != nullptr) != (Field.Value == TEXT("present"))) {
+						Error = FDiagnostic::Failure(TEXT("blueprint_observed_interface_binding_missing"),
+							TEXT("The prepared interface declaration does not match the current Blueprint."), TEXT("blueprint_state"));
+						Error.TargetPath = AssetPath;
+						Error.PropertyPath = Path;
+						return false;
+					}
+					if (Description && !AppendInterfaceReadRequest(Blueprint, AssetPath, *Description->Interface.Get(), Reads, Error)) return false;
+					continue;
+				}
+				const TCHAR* Prefix = nullptr;
+				for (const TCHAR* Candidate : {ObservedMemberPrefix, ObservedMissingMemberPrefix, ObservedDelegatePrefix,
+					ObservedMissingDelegatePrefix, ObservedDefaultMemberPrefix})
+					if (Field.Key.StartsWith(Candidate, ESearchCase::CaseSensitive)) { Prefix = Candidate; break; }
+				if (!Prefix) continue;
+				FGuid Guid;
+				const FName Name(*Field.Value);
+				const bool bGuidValid = FGuid::ParseExact(Field.Key.RightChop(FCString::Strlen(Prefix)),
+					EGuidFormats::DigitsWithHyphensLower, Guid) && Guid.IsValid();
+				const bool bPresent = Prefix != ObservedMissingMemberPrefix && Prefix != ObservedMissingDelegatePrefix;
+				const bool bDelegate = Prefix == ObservedDelegatePrefix || Prefix == ObservedMissingDelegatePrefix;
+				const bool bDefaultOnly = Prefix == ObservedDefaultMemberPrefix;
+				const FBPVariableDescription* Member = Blueprint.NewVariables.FindByPredicate([&](const FBPVariableDescription& Candidate)
+					{ return Candidate.VarGuid == Guid || Candidate.VarName == Name; });
+				const FProperty* Property = CDO ? FindFProperty<FProperty>(CDO->GetClass(), Name) : nullptr;
+				const bool bBound = bPresent
+					? Member && Member->VarGuid == Guid && Member->VarName == Name && Property && Property->GetOwnerClass() == Blueprint.GeneratedClass
+						&& ((Member->VarType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate) == bDelegate)
+					: !Member && !Property;
+				if (!bGuidValid || !CDO || !bBound) {
+					Error = FDiagnostic::Failure(TEXT("blueprint_observed_member_binding_missing"),
+						TEXT("The member and generated field must match the prepared identity, kind and capture side."), TEXT("blueprint_state"));
+					Error.TargetPath = AssetPath;
+					Error.PropertyPath = Field.Value;
+					return false;
+				}
+				if (!bPresent) continue;
+				if (!bDefaultOnly && !AppendMemberReadRequest(Blueprint, AssetPath, *Member, Reads, Error)) return false;
+				// Delegates own their public native signature through the member accessor.
+				if (!bDelegate) SelectedDefaults.Add(Name);
+				if (bDefaultOnly) ++RequiredDefaultCount;
+			}
+			const int32 Start = Reads.Num();
+			if (!SelectedDefaults.IsEmpty() && !AppendPropertyRequests(CDO, ClassDefaultPropertySemanticId, ClassDefaultPropertyIdentityModelId,
+				TEXT("blueprint_class_default_property"), {{TEXT("asset_path"), AssetPath}}, {}, Reads, Error, &SelectedDefaults)) return false;
+			if (RequiredDefaultCount && Reads.Num() - Start != RequiredDefaultCount) {
+				Error = FDiagnostic::Failure(TEXT("blueprint_observed_member_binding_missing"),
+					TEXT("A selected generated default has no editable public property binding."), TEXT("blueprint_state"));
+				Error.TargetPath = AssetPath;
+				return false;
+			}
+			return true;
 		}
 
 		UeAgentAuthoringNativeDefaults::EProbeOutcome ProbeNativeDefault(
@@ -1243,6 +1442,81 @@ namespace UeAgentBlueprintAuthoring
 				State.SetObjectField(TEXT("input_binding"), Binding);
 			}
 		}
+	}
+
+	bool ProjectObservedNodePinDefaults(FJsonObject& DesiredNode, UeAgentAuthoringState::FStateEntry& NativeNode,
+		const UeAgentAuthoringState::FStateSnapshot& FinalCapture, const TArray<UeAgentAuthoringState::FReadRequest>* Requests,
+		FDiagnostic& Error)
+	{
+		const TSharedPtr<FJsonObject>* DesiredPins = nullptr;
+		if (NativeNode.SemanticId != NodeSemanticId || !DesiredNode.TryGetObjectField(TEXT("pin_defaults"), DesiredPins)) return true;
+		const auto ObservedPins = MakeShared<FJsonObject>();
+		const auto PinTypes = MakeShared<FJsonObject>();
+		const FString Asset = NativeNode.TargetIdentity.GetSelector(TEXT("asset_path"));
+		const FString Graph = NativeNode.TargetIdentity.GetSelector(TEXT("graph_guid"));
+		const FString Node = NativeNode.TargetIdentity.GetSelector(TEXT("node_guid"));
+		for (const auto& Field : (*DesiredPins)->Values)
+		{
+			const FString Path = TEXT("/pin_defaults/") + UE::UAI::HjsonWorkspace::EscapeJsonPointerSegment(Field.Key);
+			auto BindingError = [&](const TCHAR* Reason) {
+				Error = FDiagnostic::Failure(TEXT("blueprint_pin_intent_binding_invalid"), Reason, TEXT("final_readback"));
+				Error.Source.JsonPath = Path; Error.TargetPath = Asset;
+				return false;
+			};
+			const auto Spec = Field.Value && Field.Value->Type == EJson::Object ? Field.Value->AsObject() : nullptr;
+			FString Name, Authored, Guid;
+			int32 Occurrence = INDEX_NONE;
+			if (!Spec || !Spec->TryGetStringField(TEXT("pin_name"), Name)
+				|| !Spec->TryGetNumberField(TEXT("pin_occurrence"), Occurrence)
+				|| !Spec->TryGetStringField(TEXT("default_value"), Authored))
+				return BindingError(TEXT("A pin default requires its resolved name, occurrence and authored text."));
+			Spec->TryGetStringField(TEXT("guid"), Guid);
+			const UeAgentAuthoringState::FReadRequest* Bound = nullptr;
+			if (Requests && !Asset.IsEmpty() && !Graph.IsEmpty() && !Node.IsEmpty()) for (const auto& Read : *Requests)
+			{
+				if (Read.SemanticId != PinDefaultSemanticId) continue;
+				const auto& Id = Read.TargetIdentity;
+				if (Id.GetSelector(TEXT("asset_path")) != Asset || Id.GetSelector(TEXT("graph_guid")) != Graph
+					|| Id.GetSelector(TEXT("node_guid")) != Node || Id.GetSelector(TEXT("pin_name")) != Name
+					|| Id.GetSelector(TEXT("pin_occurrence")) != LexToString(Occurrence)
+					|| (!Guid.IsEmpty() && Id.GetSelector(TEXT("pin_guid")) != Guid)) continue;
+				if (Bound) return BindingError(TEXT("More than one captured pin matches this node and pin selector."));
+				Bound = &Read;
+			}
+			FGuid PinGuid;
+			const auto* Owner = Bound ? Cast<UEdGraphNode>(Bound->RootObject) : nullptr;
+			const UEdGraphPin* Pin = Owner && FGuid::Parse(Bound->TargetIdentity.GetSelector(TEXT("pin_guid")), PinGuid)
+				? Owner->FindPinById(PinGuid) : nullptr;
+			UeAgentAuthoringState::FStateEntry Observed;
+			if (!Pin || !FinalCapture.FindEntry(Bound->SemanticId, Bound->TargetIdentity.CanonicalKey, Observed)
+				|| !Observed.bAvailable || !Observed.Value)
+				return BindingError(TEXT("The final capture has no bound native value for this graph node pin."));
+			UeAgentAuthoringTypeDescriptors::FDescriptor DesiredType;
+			TSharedPtr<FJsonValue> DesiredValue;
+			if (!UeAgentBlueprintAuthoringOps::TryDescribePinDefault(Pin->PinType, Authored, DesiredType, DesiredValue, Error))
+			{
+				Error.Source.JsonPath = Path + TEXT("/default_value"); return false;
+			}
+			Spec->SetField(TEXT("default_value"), DesiredValue);
+			const auto Actual = MakeShared<FJsonObject>();
+			Actual->SetStringField(TEXT("pin_name"), Pin->PinName.ToString());
+			Actual->SetNumberField(TEXT("pin_occurrence"), GetPinOccurrence(*Owner, *Pin));
+			if (!Guid.IsEmpty()) Actual->SetStringField(TEXT("guid"), GuidText(Pin->PinId));
+			Actual->SetField(TEXT("default_value"), Observed.Value);
+			ObservedPins->SetObjectField(Field.Key, Actual);
+			const auto DefaultType = MakeShared<FJsonObject>();
+			DefaultType->SetObjectField(TEXT("type"), Observed.GetType().ToJsonObject());
+			if (Observed.ValueDefinition) DefaultType->SetField(TEXT("value_definition"), Observed.ValueDefinition);
+			const auto Fields = MakeShared<FJsonObject>(); Fields->SetObjectField(TEXT("default_value"), DefaultType);
+			const auto Definition = MakeShared<FJsonObject>(); Definition->SetObjectField(TEXT("fields"), Fields);
+			const auto Type = MakeShared<FJsonObject>(); Type->SetStringField(TEXT("kind"), TEXT("object"));
+			const auto Row = MakeShared<FJsonObject>();
+			Row->SetObjectField(TEXT("type"), Type); Row->SetObjectField(TEXT("value_definition"), Definition);
+			PinTypes->SetObjectField(Field.Key, Row);
+		}
+		NativeNode.Value->AsObject()->SetObjectField(TEXT("pin_defaults"), ObservedPins);
+		UeAgentAuthoringSemanticCompare::BindComparisonObjectRows(NativeNode, TEXT("pin_defaults"), PinTypes);
+		return true;
 	}
 
 	UObject* CreateFactorySeed(
@@ -1449,7 +1723,11 @@ namespace UeAgentBlueprintAuthoring
 		if (Parent) State.SetStringField(TEXT("parent_graph"), Parent->GetName());
 	}
 
-	static bool BuildBlueprintContentReadRequests(
+static bool AppendBlueprintGraphReadRequests(UBlueprint* Blueprint, const FString& AssetPath,
+	const TArray<UEdGraph*>& Graphs, bool bForVerification,
+	TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, FDiagnostic& OutError);
+
+static bool BuildBlueprintContentReadRequests(
 		UBlueprint& BlueprintObject,
 		const bool bResetRequests,
 		const bool bIncludeAssetEnvelope,
@@ -1457,7 +1735,7 @@ namespace UeAgentBlueprintAuthoring
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
 		FDiagnostic& OutError,
 		const FString& CanonicalAssetPath,
-		const bool bForVerification)
+		const bool bForVerification, const bool bReparentHierarchy = false)
 	{
 		if (bResetRequests) OutRequests.Reset();
 		OutError.Reset();
@@ -1466,36 +1744,18 @@ namespace UeAgentBlueprintAuthoring
 			? Blueprint->GetOutermost()->GetName()
 			: CanonicalAssetPath;
 		const TMap<FString, FString> AssetSelectors = { { TEXT("asset_path"), AssetPath } };
-		if (bIncludeAssetEnvelope && (!AddReadRequest(
-			ExportTargetSemanticId, AssetIdentityModelId, TEXT("blueprint_asset"),
-			AssetSelectors, Blueprint, {}, OutRequests, OutError)
-			|| !AddReadRequest(
-				ParentClassSemanticId, AssetIdentityModelId, TEXT("blueprint_asset"),
-				AssetSelectors, Blueprint, {}, OutRequests, OutError)))
-		{
-			return false;
+		if (bIncludeAssetEnvelope || bReparentHierarchy) {
+			if (!AddReadRequest(ExportTargetSemanticId, AssetIdentityModelId, TEXT("blueprint_asset"),
+				AssetSelectors, Blueprint, {}, OutRequests, OutError)) return false;
+			OutRequests.Last().MarkExportTarget();
+			if (!AddReadRequest(ParentClassSemanticId, AssetIdentityModelId, TEXT("blueprint_asset"),
+				AssetSelectors, Blueprint, {}, OutRequests, OutError)) return false;
 		}
 
-		for (const FBPInterfaceDescription& Description : Blueprint->ImplementedInterfaces)
-		{
-			const UClass* InterfaceClass = Description.Interface.Get();
-			if (!InterfaceClass)
-			{
-				continue;
-			}
-			const FString InterfacePath = InterfaceClass->GetPathName();
-			if (!AddReadRequest(
-				InterfaceSemanticId,
-				InterfaceIdentityModelId,
-				TEXT("blueprint_interface"),
-				{ { TEXT("asset_path"), AssetPath },
-					{ TEXT("interface_class"), InterfacePath } },
-				Blueprint,
-				{},
-				OutRequests,
-				OutError))
-			{
-				return false;
+		if (!bReparentHierarchy) {
+			for (const FBPInterfaceDescription& Description : Blueprint->ImplementedInterfaces) {
+				const UClass* InterfaceClass = Description.Interface.Get();
+				if (InterfaceClass && !AppendInterfaceReadRequest(*Blueprint, AssetPath, *InterfaceClass, OutRequests, OutError)) return false;
 			}
 		}
 
@@ -1507,27 +1767,9 @@ namespace UeAgentBlueprintAuthoring
 			return false;
 		}
 
-		for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
-		{
-			const bool bDelegate = Variable.VarType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate;
-			const TMap<FString, FString> Selectors = {
-				{ TEXT("asset_path"), AssetPath },
-				{ TEXT("member_guid"), GuidText(Variable.VarGuid) },
-				{ TEXT("member_kind"), bDelegate ? TEXT("delegate") : TEXT("variable") },
-				{ TEXT("member_name"), Variable.VarName.ToString() },
-			};
-			if (!AddReadRequest(
-				bDelegate ? DelegateSemanticId : VariableSemanticId,
-				MemberIdentityModelId,
-				TEXT("blueprint_member"),
-				Selectors,
-				Blueprint,
-				{},
-				OutRequests,
-				OutError))
-			{
-				return false;
-			}
+		if (!bReparentHierarchy) {
+			for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
+				if (!AppendMemberReadRequest(*Blueprint, AssetPath, Variable, OutRequests, OutError)) return false;
 		}
 
 		if (Blueprint->GeneratedClass)
@@ -1560,33 +1802,7 @@ namespace UeAgentBlueprintAuthoring
 			for (USCS_Node* Node : SCS->GetAllNodes())
 			{
 				if (!Node || !Node->ComponentTemplate || !Node->ComponentClass) continue;
-				const FString Name = Node->GetVariableName().ToString();
-				const TMap<FString, FString> Selectors = {
-					{ TEXT("asset_path"), AssetPath },
-					{ TEXT("component_guid"), GuidText(Node->VariableGuid) },
-					{ TEXT("component_kind"), Node->ComponentClass->GetName() },
-					{ TEXT("component_name"), Name },
-				};
-				const TMap<FString, FString> Context = {
-					{ TEXT("component_name"), Name },
-					{ TEXT("parent_name"), Parents.FindRef(Node) },
-					{ TEXT("source"), TEXT("scs") },
-				};
-				if (!AddReadRequest(
-					ComponentSemanticId, ComponentIdentityModelId, TEXT("blueprint_component"),
-					Selectors, Node->ComponentTemplate, Context, OutRequests, OutError)
-					|| !AppendPropertyRequests(
-						Node->ComponentTemplate,
-						ComponentPropertySemanticId,
-						ComponentPropertyIdentityModelId,
-						TEXT("blueprint_component_property"),
-						Selectors,
-						{},
-						OutRequests,
-						OutError))
-				{
-					return false;
-				}
+				if (!AppendLocalComponentReadRequests(AssetPath, *Node, Parents.FindRef(Node), OutRequests, OutError)) return false;
 			}
 		}
 
@@ -1628,8 +1844,15 @@ namespace UeAgentBlueprintAuthoring
 
 		}
 
-		auto AppendGraphs = [&](const TArray<UEdGraph*>& Graphs)
-		{
+	TArray<UEdGraph*> ExportGraphs;
+	GatherExportGraphs(*Blueprint, ExportGraphs);
+	return AppendBlueprintGraphReadRequests(Blueprint, AssetPath, ExportGraphs, bForVerification, OutRequests, OutError);
+}
+
+static bool AppendBlueprintGraphReadRequests(UBlueprint* Blueprint, const FString& AssetPath,
+	const TArray<UEdGraph*>& Graphs, bool bForVerification,
+	TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, FDiagnostic& OutError)
+{
 			for (UEdGraph* Graph : Graphs)
 			{
 				if (!Graph) continue;
@@ -1794,19 +2017,65 @@ namespace UeAgentBlueprintAuthoring
 					}
 				}
 			}
-			return true;
-		};
-
-		TArray<UEdGraph*> ExportGraphs;
-		GatherExportGraphs(*Blueprint, ExportGraphs);
-		if (!AppendGraphs(ExportGraphs))
-		{
-			return false;
-		}
 		return true;
 	}
 
-	bool BuildAssetExportSnapshotReadRequests(
+bool CaptureObservedGraphBodies(UBlueprint& Blueprint, const FString& AssetPath, const FString& GraphGuids,
+	const FString& WorkspaceTargetKind, TArray<UeAgentAuthoringState::FReadRequest> Requests,
+	UeAgentAuthoringState::FStateValue& OutValue, FDiagnostic& Error, const TMap<FString, FString>* GraphContext)
+{
+	TArray<FString> Guids;
+	GraphGuids.ParseIntoArray(Guids, TEXT(","), false);
+	TArray<UEdGraph*> ExportGraphs, Selected;
+	GatherExportGraphs(Blueprint, ExportGraphs);
+	TSet<FString> Matched;
+	TSet<FString> Absent;
+	TSet<FName> AbsentRootNames;
+	if (GraphContext)
+		for (const FString& Guid : Guids)
+			if (const FString* Name = GraphContext->Find(ObservedAbsentGraphPrefix + Guid)) {
+				Absent.Add(Guid);
+				if (!Name->IsEmpty()) AbsentRootNames.Add(FName(**Name));
+			}
+	bool bBindingMismatch = false;
+	for (UEdGraph* Graph : ExportGraphs) {
+		if (!Graph || !Graph->GraphGuid.IsValid()) continue;
+		const FString Id = GuidText(Graph->GraphGuid);
+		const FString* ExpectedName = GraphContext ? GraphContext->Find(ObservedGraphNamePrefix + Id) : nullptr;
+		if (Graph->GetOuter() == &Blueprint && AbsentRootNames.Contains(Graph->GetFName())
+			&& (!ExpectedName || Graph->GetFName() != FName(**ExpectedName))) bBindingMismatch = true;
+		if (!Guids.Contains(Id)) continue;
+		if ((GraphContext && GraphContext->Contains(ObservedRootGraphPrefix + Id) && Graph->GetOuter() != &Blueprint)
+			|| Absent.Contains(Id) || (ExpectedName && Graph->GetFName() != FName(**ExpectedName)))
+			bBindingMismatch = true;
+		Selected.Add(Graph);
+		Matched.Add(Id);
+	}
+	if (Guids.IsEmpty() || bBindingMismatch || Selected.Num() + Absent.Num() != Guids.Num()
+		|| Matched.Num() != Selected.Num()) {
+		Error = FDiagnostic::Failure(TEXT("blueprint_observed_graph_binding_missing"),
+			TEXT("The prepared graph identities do not match the current asset's public graphs."), TEXT("blueprint_state"));
+		Error.TargetPath = AssetPath;
+		return false;
+	}
+	if (!AppendBlueprintGraphReadRequests(&Blueprint, AssetPath, Selected, false, Requests, Error)) return false;
+	int32 EntryCount = 0;
+	if (!CaptureBlueprintProjection(WorkspaceTargetKind, Requests, OutValue, Error, &EntryCount)) return false;
+	UE_LOG(LogTemp, Display, TEXT("UAI read timing phase=blueprint_observed_graphs graphs=%d requests=%d public_entries=%d"),
+		Selected.Num(), Requests.Num(), EntryCount);
+	return true;
+}
+
+	static bool AppendReparentHierarchyReadRequests(UBlueprint& Blueprint, const FString& AssetPath,
+	TArray<UeAgentAuthoringState::FReadRequest>& Requests, FDiagnostic& Error)
+{
+	// ReparentBlueprint validates the SCS, refreshes all nodes and recompiles
+	// the generated class and CDO. Read those surfaces on this target only.
+	const bool bActor = Blueprint.ParentClass && Blueprint.ParentClass->IsChildOf(AActor::StaticClass());
+	return BuildBlueprintContentReadRequests(Blueprint, false, false, bActor, Requests, Error, AssetPath, false, true);
+}
+
+bool BuildAssetExportSnapshotReadRequests(
 		UObject& Asset,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
 		FDiagnostic& OutError)

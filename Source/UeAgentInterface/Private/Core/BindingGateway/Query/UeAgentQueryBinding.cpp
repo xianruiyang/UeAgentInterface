@@ -9,6 +9,7 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Utilities/UeAgentCurveJson.h"
 
 namespace UE::UAI::BindingGateway::Query
 {
@@ -888,10 +889,59 @@ namespace UE::UAI::BindingGateway::Query
 				|| Lower.EndsWith(TEXT("_key"));
 		}
 
+		enum class EPublicReferenceContext : uint8
+		{
+			None,
+			LevelActor,
+			LevelAttachment,
+			ActorReference,
+			PropertyValue,
+			PropertyMembers,
+			CurveAssetReference
+		};
+
+		EPublicReferenceContext ChildReferenceContext(
+			const EPublicReferenceContext Context,
+			const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Object,
+			const FString& Key)
+		{
+			if (Context == EPublicReferenceContext::PropertyMembers)
+				return EPublicReferenceContext::PropertyValue;
+			if (Context == EPublicReferenceContext::PropertyValue)
+			{
+				if (Key == TEXT("fields") || Key == TEXT("items") || Key == TEXT("entries"))
+					return EPublicReferenceContext::PropertyMembers;
+				if (Key == TEXT("key") || Key == TEXT("value"))
+					return EPublicReferenceContext::PropertyValue;
+				if (Key.Equals(TEXT("asset_reference"), ESearchCase::CaseSensitive))
+				{
+					const auto HasString = [&Object](const TCHAR* Field, const TCHAR* Expected)
+					{
+						return Object.GetObjectItems().ContainsByPredicate([Field, Expected](const auto& Pair)
+						{
+							return Pair.Key.Equals(Field, ESearchCase::CaseSensitive)
+								&& Pair.Value->GetKind() == UE::UAI::StateSemantic::EUeAgentValueKind::String
+								&& Pair.Value->GetText().Equals(Expected, ESearchCase::CaseSensitive);
+						});
+					};
+					if (HasString(TEXT("schema"), UeAgentCurveJson::SchemaName)
+						&& HasString(TEXT("curve_kind"), TEXT("asset_reference")))
+						return EPublicReferenceContext::CurveAssetReference;
+				}
+			}
+			if (Context == EPublicReferenceContext::LevelActor && Key == TEXT("attachment"))
+				return EPublicReferenceContext::LevelAttachment;
+			if ((Context == EPublicReferenceContext::LevelActor && Key == TEXT("managed_id"))
+				|| (Context == EPublicReferenceContext::LevelAttachment && Key == TEXT("parent_managed_id")))
+				return EPublicReferenceContext::ActorReference;
+			return EPublicReferenceContext::None;
+		}
+
 		TSharedPtr<FJsonValue> PublicCanonicalValueJson(
 			const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value,
 			const bool bFilterMachineFields,
-			const FString& FieldName = FString())
+			const FString& FieldName = FString(),
+			const EPublicReferenceContext ReferenceContext = EPublicReferenceContext::None)
 		{
 			using UE::UAI::StateSemantic::EUeAgentValueKind;
 			switch (Value.GetKind())
@@ -902,6 +952,7 @@ namespace UE::UAI::BindingGateway::Query
 				return MakeShared<FJsonValueBoolean>(Value.GetBoolean());
 			case EUeAgentValueKind::String:
 				if (bFilterMachineFields
+					&& ReferenceContext != EPublicReferenceContext::ActorReference
 					&& IsIdentityBearingContentGraphField(FieldName)
 					&& IsOpaqueMachineString(Value.GetText()))
 				{
@@ -922,7 +973,8 @@ namespace UE::UAI::BindingGateway::Query
 					TSharedPtr<FJsonValue> Projected = PublicCanonicalValueJson(
 						Item.Get(),
 						bFilterMachineFields,
-						FieldName);
+						FieldName, ReferenceContext == EPublicReferenceContext::PropertyMembers
+							? EPublicReferenceContext::PropertyValue : EPublicReferenceContext::None);
 					if (Projected.IsValid())
 					{
 						Items.Add(MoveTemp(Projected));
@@ -935,15 +987,18 @@ namespace UE::UAI::BindingGateway::Query
 				TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
 				for (const auto& Item : Value.GetObjectItems())
 				{
-					if (bFilterMachineFields
-						&& IsMachineOnlyContentGraphField(Item.Key))
+					const bool bCurveAssetPath = ReferenceContext == EPublicReferenceContext::CurveAssetReference
+						&& Item.Key.Equals(TEXT("asset_path"), ESearchCase::CaseSensitive)
+						&& Item.Value->GetKind() == EUeAgentValueKind::String;
+					if (bFilterMachineFields && !bCurveAssetPath && IsMachineOnlyContentGraphField(Item.Key))
 					{
 						continue;
 					}
 					TSharedPtr<FJsonValue> Projected = PublicCanonicalValueJson(
 							Item.Value.Get(),
 							bFilterMachineFields,
-							Item.Key);
+							Item.Key,
+							ChildReferenceContext(ReferenceContext, Value, Item.Key));
 					if (Projected.IsValid())
 					{
 						Fields->SetField(Item.Key, MoveTemp(Projected));
@@ -1011,9 +1066,14 @@ namespace UE::UAI::BindingGateway::Query
 			const UE::UAI::Projection::FUeAgentProjectedEntry& Entry,
 			const bool bFilterMachineFields)
 		{
+			const bool bLevelActorItem = Entry.GetIdentity().GetSemanticId() == TEXT("uai.semantic.level.actor")
+				&& Entry.GetIdentity().GetObjectRole() == TEXT("item");
 			TSharedPtr<FJsonValue> Value = PublicCanonicalValueJson(
 				Entry.GetValue().Get(),
-				bFilterMachineFields);
+				bFilterMachineFields, FString(),
+				bLevelActorItem ? EPublicReferenceContext::LevelActor
+					: Entry.GetIdentity().GetSelector(TEXT("section")) == TEXT("properties")
+						? EPublicReferenceContext::PropertyValue : EPublicReferenceContext::None);
 			if (!Value.IsValid())
 			{
 				return nullptr;
@@ -1761,7 +1821,6 @@ namespace UE::UAI::BindingGateway::Query
 				TEXT("The selected public Query projection requires a snapshot payload."));
 			return false;
 		}
-
 		TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 		switch (PublicProjection.Strategy)
 		{

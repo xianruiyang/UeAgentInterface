@@ -8,6 +8,8 @@
 
 class UOptimusDeformer;
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UeAgentDeformerAuthoring
 {
 	inline constexpr const TCHAR* DomainId = TEXT("deformer");
@@ -37,5 +39,6 @@ namespace UeAgentDeformerAuthoring
 		UOptimusDeformer& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

@@ -288,45 +288,32 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 		class FVerifiedExternalInputExportSource final : public IVerifiedExportWorkspaceSource
 		{
 		public:
-			FVerifiedExternalInputExportSource(FString InTarget, FAuthoringModelRef InModel)
-				: Target(MoveTemp(InTarget)), Model(MoveTemp(InModel)) {}
+			FVerifiedExternalInputExportSource(FString InTarget, FAuthoringModelRef InModel, FPreparedWorkspaceExport* InPrepared)
+				: Prepared(InPrepared), Target(MoveTemp(InTarget)), Model(MoveTemp(InModel)) {}
 			virtual bool TryFreezeTarget(FUeAgentStateRevision& OutRevision, FArtifactPublishError& OutError) override
 			{ return ReadRevision(OutRevision, OutError); }
 			virtual bool TryCaptureWorkspace(const FUeAgentStateRevision& FrozenRevision,
-				FExportWorkspacePlanPtr& OutPlan, FExportSemanticSignature& OutSemantic,
+				FExportWorkspacePlanPtr& OutPlan,
 				FArtifactPublishError& OutError) override
 			{
 				auto Resources = MakeResources();
 				FWorkspaceError Error;
-				if (!TryBuildCompositionExportPlan(Model,
-					{Target, FrozenRevision, Model->GetSemanticFingerprint()}, {}, Resources, OutPlan, Error))
+				const FCompositionSnapshotBinding Binding{Target, FrozenRevision, Model->GetSemanticFingerprint()};
+				const auto* TargetUnit = Model->FindUnit(TEXT("target"));
+				if (!TryPrepareCompositionExportState(TargetUnit ? TargetUnit->GetSemanticTypeRef() : FString(),
+					*Model, Binding, Resources, Prepared, Error)
+					|| !TryBuildCompositionExportPlan(Model, Binding, {}, Resources, OutPlan, Error, FString(), Prepared))
 				{
 					OutError = Error.GetDiagnostic();
 					return false;
 				}
-				OutSemantic = Signature(Model->GetSemanticFingerprint());
-				return true;
-			}
-			virtual bool TryRebuildStagedWorkspace(const FString& Path, EWorkspaceKind,
-				const FString&, FUeAgentResourceTracker& Resources,
-				FExportSemanticSignature& OutSemantic, FArtifactPublishError& OutError) override
-			{
-				FResolvedSemanticWorkspacePtr Workspace;
-				FWorkspaceError Error;
-				if (!TryResolveSemanticWorkspace(FWorkspaceSource::Directory(Path),
-					ESemanticWorkspaceMode::State, Resources, Workspace, Error))
-				{
-					OutError = Error.GetDiagnostic();
-					return false;
-				}
-				OutSemantic = Signature(Workspace->GetModel()->GetSemanticFingerprint());
+				Prepared = nullptr; // Verification retains this source, never the request-local handoff.
 				return true;
 			}
 			virtual bool TryReadCurrentTargetRevision(FUeAgentStateRevision& OutRevision,
 				FArtifactPublishError& OutError) override { return ReadRevision(OutRevision, OutError); }
 		private:
-			FExportSemanticSignature Signature(const FString& Fingerprint) const
-			{ return FExportSemanticSignature(Fingerprint, Fingerprint, Fingerprint, Fingerprint, Fingerprint); }
+			FPreparedWorkspaceExport* Prepared = nullptr;
 			bool ReadRevision(FUeAgentStateRevision& OutRevision, FArtifactPublishError& OutError) const
 			{
 				FString Revision;
@@ -413,7 +400,7 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 		const FString& TargetIdentity,
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError, FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		OutError.Reset();
@@ -493,12 +480,12 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 		FUeAgentResourceTracker Resources = MakeResources();
 		FArtifactPublishReceipt Receipt;
 		FArtifactPublishError PublishError;
+		FVerifiedExportRequest VerifiedRequest(
+			MakeShared<FVerifiedExternalInputExportSource>(TargetIdentity, Model.ToSharedRef(), PreparedExport),
+			WorkspacePath, TEXT("hjson-external-input-domain-owner"));
+		VerifiedRequest.SetWorkspacePreparation(PreparedExport);
 		if (!TryExportVerifiedWorkspace(
-				FVerifiedExportRequest(
-					MakeShared<FVerifiedExternalInputExportSource>(
-						TargetIdentity, Model.ToSharedRef()),
-					WorkspacePath,
-					TEXT("hjson-external-input-domain-owner")),
+				VerifiedRequest,
 				Resources,
 				Receipt,
 				PublishError))

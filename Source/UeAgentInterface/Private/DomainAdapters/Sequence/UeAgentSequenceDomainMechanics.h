@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 
 namespace UeAgentAuthoringOperationApply { struct FBackendOptions; }
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
 
 namespace UE::UAI::DomainAdapters::Sequence
 {
@@ -21,5 +22,6 @@ namespace UE::UAI::DomainAdapters::Sequence
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		HjsonWorkspace::FWorkspaceError& OutError);
+		HjsonWorkspace::FWorkspaceError& OutError,
+		HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

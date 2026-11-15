@@ -597,11 +597,24 @@ namespace UE::UAI::HjsonWorkspace
 		return true;
 	}
 
+	bool IsGraphNodeNativeNameProperty(const FString& PropertyName)
+	{
+		return PropertyName == TEXT("ParameterName") || PropertyName == TEXT("InputName")
+			|| PropertyName == TEXT("OutputName") || PropertyName == TEXT("Name");
+	}
+
+	bool IsGraphItemContentOnlyField(const FString& SemanticType, const FString& FieldName)
+	{
+		// TryCaptureTextureGraph produces id/name/direction/cpp_type beside this
+		// evaluated string. Those structural fields still invalidate projection;
+		// only the evaluated payload belongs to the existing content writer.
+		return SemanticType == TEXT("uai.semantic.texture_graph.pin") && FieldName == TEXT("value");
+	}
+
 	const FUeAgentCanonicalValueRef* FindGraphNodeNativeNameProperty(
 		const FString& PropertyName, const TMap<FString, FUeAgentCanonicalValueRef>& Values)
 	{
-		if (PropertyName != TEXT("ParameterName") && PropertyName != TEXT("InputName")
-			&& PropertyName != TEXT("OutputName") && PropertyName != TEXT("Name")) return nullptr;
+		if (!IsGraphNodeNativeNameProperty(PropertyName)) return nullptr;
 		for (const TCHAR* Field : {TEXT("literal"), TEXT("value")})
 		{
 			const auto* Value = Values.Find(Field);
@@ -664,36 +677,56 @@ namespace UE::UAI::HjsonWorkspace
 		return FString();
 	}
 
-	bool TryBuildGraphModelNodeAliases(const FAuthoringModel& Model, const FString& GraphId,
+FString ResolveGraphModelItemOwner(const FAuthoringModel& Model,
+	const FString& ItemSemanticType, const FString& ItemOwner)
+{
+	FString GraphOwner = ItemOwner;
+	// Ordinary owned property objects stay on their direct owner. Nested
+	// GraphItem routes use .node; an owned graph starts a new name scope.
+	if (ItemSemanticType.EndsWith(TEXT(".node")))
+	{
+		auto Parent = Model.FindDeclaration(GraphOwner);
+		while (Parent && Parent->GetUnitKind() == ESemanticUnitKind::ItemState)
+		{
+			GraphOwner = Parent->GetOwnerRef();
+			Parent = Model.FindDeclaration(GraphOwner);
+		}
+	}
+	return GraphOwner;
+}
+
+bool TryBuildGraphModelNodeAliases(const FAuthoringModel& Model, const FString& GraphId,
 		FGraphAuthoringAliasProjection& OutProjection, FWorkspaceError& OutError)
 	{
-		TMap<FString, TMap<FString, FUeAgentCanonicalValueRef>> PropertiesByOwner;
-		for (const FSemanticUnit& Property : Model.GetUnits())
-		{
-			if (Property.GetUnitKind() != ESemanticUnitKind::PropertySet || Property.GetFieldSetRef().IsEmpty()) continue;
-			if (const auto* Value = FindGraphNodeNativeNameProperty(Property.GetFieldSetRef(), Property.GetValues()))
-				PropertiesByOwner.FindOrAdd(Property.GetOwnerRef()).Add(Property.GetFieldSetRef(), *Value);
-		}
-		TArray<FGraphAuthoringNodeAliasInput> Inputs;
-		for (const FSemanticUnit& Node : Model.GetUnits())
+		TSet<FString> NodeIds;
+		for (const auto& Node : Model.GetDeclarations())
 		{
 			if (Node.GetUnitKind() != ESemanticUnitKind::ItemState) continue;
-			FString GraphOwner = Node.GetOwnerRef();
-			// Nested GraphItem routes use .node; ordinary owned property objects do not.
-			if (Node.GetSemanticTypeRef().EndsWith(TEXT(".node")))
-			{
-				const FSemanticUnit* Parent = Model.FindUnit(GraphOwner);
-				while (Parent && Parent->GetUnitKind() == ESemanticUnitKind::ItemState)
-				{
-					GraphOwner = Parent->GetOwnerRef();
-					Parent = Model.FindUnit(GraphOwner);
-				}
-			}
-			if (GraphOwner == GraphId)
-				Inputs.Add({Node.GetUnitId(), ReadGraphNodeSemanticName(
-					Node.GetValues(), PropertiesByOwner.Find(Node.GetUnitId())),
-					ReadGraphNodeNativeIdentity(Node.GetValues())});
+		if (ResolveGraphModelItemOwner(Model, Node.GetSemanticTypeRef(), Node.GetOwnerRef()) == GraphId)
+			NodeIds.Add(Node.GetUnitId());
 		}
+		TMap<FString, TMap<FString, FUeAgentCanonicalValueRef>> PropertiesByOwner;
+		int32 NamingProperties = 0;
+		for (const auto& Declaration : Model.GetDeclarations())
+		{
+			if (Declaration.GetUnitKind() != ESemanticUnitKind::PropertySet
+				|| !NodeIds.Contains(Declaration.GetOwnerRef()) || !IsGraphNodeNativeNameProperty(Declaration.GetFieldSetRef())) continue;
+			const auto* Property = Model.FindUnit(Declaration.GetUnitId());
+			if (!Property) { Model.CheckValueReadResult(OutError); return false; }
+			++NamingProperties;
+			if (const auto* Value = FindGraphNodeNativeNameProperty(Property->GetFieldSetRef(), Property->GetValues()))
+				PropertiesByOwner.FindOrAdd(Property->GetOwnerRef()).Add(Property->GetFieldSetRef(), *Value);
+		}
+		TArray<FGraphAuthoringNodeAliasInput> Inputs;
+		for (const auto& Declaration : Model.GetDeclarations()) if (NodeIds.Contains(Declaration.GetUnitId()))
+		{
+			const auto* Node = Model.FindUnit(Declaration.GetUnitId());
+			if (!Node) { Model.CheckValueReadResult(OutError); return false; }
+			Inputs.Add({Node->GetUnitId(), ReadGraphNodeSemanticName(
+				Node->GetValues(), PropertiesByOwner.Find(Node->GetUnitId())),
+				ReadGraphNodeNativeIdentity(Node->GetValues())});
+		}
+		UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=graph_name_consumers nodes=%d naming_properties=%d complete_value_array=false"), Inputs.Num(), NamingProperties);
 		return TryBuildGraphAuthoringAliasProjection(Inputs, OutProjection, OutError);
 	}
 
@@ -1537,15 +1570,15 @@ namespace UE::UAI::HjsonWorkspace
 		for (const auto& Unit : Workspace.GetModel()->GetUnits())
 		{
 			if (bScoped && Unit.GetUnitId() != GraphUnitId) continue;
-			const auto* Graph = Unit.GetValues().Find(TEXT("graph"));
-			const auto* Nodes = Unit.GetValues().Find(TEXT("nodes"));
+			const auto* Graph = Unit.FindValue(TEXT("graph"));
+			const auto* Nodes = Unit.FindValue(TEXT("nodes"));
 			if (!Nodes || (*Nodes)->GetKind() != EUeAgentValueKind::Object
-				|| !IsGraphAuthoringStructureType(Unit.GetSemanticTypeRef(), Unit.GetValues().Contains(TEXT("edges")))) continue;
+				|| !IsGraphAuthoringStructureType(Unit.GetSemanticTypeRef(), Unit.HasValue(TEXT("edges")))) continue;
 			bool bGraphMatches = bScoped || (Graph && Matches(**Graph, GraphId, {TEXT("graph_guid"), TEXT("id"), TEXT("name")}));
 			// Graph entries keep their native identity fields at the value root;
 			// document projections may instead carry a nested graph record.
 			for (const TCHAR* Field : {TEXT("graph_guid"), TEXT("id"), TEXT("name")})
-				if (const auto* Value = Unit.GetValues().Find(Field))
+				if (const auto* Value = Unit.FindValue(Field))
 					bGraphMatches |= (*Value)->GetKind() == EUeAgentValueKind::String
 						&& SameIdentity((*Value)->GetText(), GraphId);
 			if (!bGraphMatches) continue;
@@ -1556,7 +1589,7 @@ namespace UE::UAI::HjsonWorkspace
 				const FString NodePointer = TEXT("/nodes/") + Escape(Node.Key);
 				if (const auto* Source = Workspace.FindValueSource(Unit.GetUnitId(), NodePointer + Suffix)) ExactSources.AddUnique(Source);
 				if (const auto* Source = Workspace.FindValueSource(Unit.GetUnitId(), NodePointer)) OutRelatedSources.AddUnique(Source);
-				const auto* Edges = Unit.GetValues().Find(TEXT("edges"));
+				const auto* Edges = Unit.FindValue(TEXT("edges"));
 				if (!Edges || (*Edges)->GetKind() != EUeAgentValueKind::Object) continue;
 				FString NativeId;
 				if (!TryReadCanonicalString(*Node.Value, TEXT("id"), NativeId))

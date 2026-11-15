@@ -224,7 +224,7 @@ namespace UeAgentMaterialAuthoring
 				TSharedPtr<FJsonValue> InInstanceLayers,
 				FFunctionSettings InFunctionSettings,
 				bool bInCompile,
-				bool bInSave, const TSharedPtr<const FJsonObject>& InTarget, const TSharedPtr<const FJsonObject>& InExtension)
+				bool bInSave, bool bInEditsInstanceParent, const TSharedPtr<const FJsonObject>& InTarget, const TSharedPtr<const FJsonObject>& InExtension)
 				: PackagePath(MoveTemp(InPackagePath))
 				, AssetKind(MoveTemp(InAssetKind))
 				, Operation(InOperation)
@@ -236,6 +236,7 @@ namespace UeAgentMaterialAuthoring
 				, FunctionSettings(MoveTemp(InFunctionSettings))
 				, bCompile(bInCompile)
 				, bSave(bInSave)
+				, bEditsInstanceParent(bInEditsInstanceParent)
 			{
 				// This diagnostic wrapper only reads the original objects; retaining identity preserves source locations.
 				if (InTarget) SourceDocument->SetObjectField(TEXT("target"), ConstCastSharedPtr<FJsonObject>(InTarget));
@@ -558,11 +559,13 @@ namespace UeAgentMaterialAuthoring
 			{
 				UObject* Owner = Actual ? Actual : Existing;
 				UE::UAI::Contract::FDiagnostic Error;
-				if (!BuildAssetSnapshotReadRequest(Owner, PackagePath, AssetKind, false, OutRequests, Error))
+				if (!BuildDomainSnapshotRequest(Owner, false, OutRequests, Error))
 				{
 					SetFailure(OutFailure, Error);
 					return false;
 				}
+				const int32 FirstProperty = OutRequests.Num();
+				const bool bOwnsPublicObservation = HasMaterialOrFunctionObservation(OutRequests.Last());
 				const FMaterialExpressionCollection* Collection = Owner ? GetExpressionCollection(*Owner) : nullptr;
 				if (Cast<UMaterialInstanceConstant>(Owner)) return true;
 				if (!Collection) {
@@ -581,6 +584,7 @@ namespace UeAgentMaterialAuthoring
 						return false;
 					}
 				}
+				if (bOwnsPublicObservation) MarkVerificationProperties(FirstProperty, OutRequests);
 				return true;
 			}
 
@@ -630,6 +634,38 @@ namespace UeAgentMaterialAuthoring
 			int32 GetRootInputCount() const { return Graph.IsValid() ? Graph->GetRootInputCount() : 0; }
 
 		private:
+			static bool HasMaterialOrFunctionObservation(const UeAgentAuthoringState::FReadRequest& Request)
+			{
+				return Request.Context.Contains(ObservedGraphName) || Request.Context.Contains(ObservedFunctionRoot);
+			}
+			static void MarkVerificationProperties(int32 First, TArray<UeAgentAuthoringState::FReadRequest>& Requests)
+			{
+				for (int32 Index = First; Index < Requests.Num(); ++Index) Requests[Index].MarkVerificationOnly();
+			}
+			bool BuildDomainSnapshotRequest(UObject* Root, bool bExpectedAbsent, TArray<UeAgentAuthoringState::FReadRequest>& Requests,
+				UE::UAI::Contract::FDiagnostic& Error) const
+			{
+				if (!BuildAssetSnapshotReadRequest(Root, PackagePath, AssetKind, bExpectedAbsent, Requests, Error)) return false;
+				// The prepared graph owns its expression and connection observations.
+				// Authored root fields have separate read requests in the same capture.
+				if (Operation == EOperation::Update && Root && !bExpectedAbsent && Graph && Graph->IsReady()
+					&& !InstanceLayers && InstanceEdits.IsEmpty()
+					&& (AssetKind == TEXT("material") || AssetKind == TEXT("material_function")))
+				{
+					Requests.Last().Context.Add(ObservedGraphName, GetAuthoringGraphName(AssetKind == TEXT("material_function")));
+					return true;
+				}
+				if (Operation == EOperation::Update && !bExpectedAbsent && Cast<UMaterialFunction>(Root)
+					&& !Graph && !InstanceLayers && InstanceEdits.IsEmpty())
+				{
+					Requests.Last().Context.Add(ObservedFunctionRoot, AssetKind);
+					return true;
+				}
+				if (Operation != EOperation::Update || bExpectedAbsent || !Cast<UMaterialInstanceConstant>(Root) || Graph) return true;
+				// Parent and layer edits can replace every inherited parameter, including the last one.
+				return BindObservedInstanceParameters(InstanceEdits, bEditsInstanceParent || InstanceLayers.IsValid(), Requests.Last(), Error);
+			}
+
 			bool BuildReadRequests(
 				UObject* Root,
 				const bool bExpectedAbsent,
@@ -646,17 +682,19 @@ namespace UeAgentMaterialAuthoring
 						SetFailure(OutFailure, Error); return false;
 					}
 				}
-				if (!BuildAssetSnapshotReadRequest(
-					Root, PackagePath, AssetKind, bExpectedAbsent, OutRequests, Error))
+				if (!BuildDomainSnapshotRequest(Root, bExpectedAbsent, OutRequests, Error))
 				{
 					SetFailure(OutFailure, Error);
 					return false;
 				}
+				const int32 FirstProperty = OutRequests.Num();
+				const bool bOwnsPublicObservation = HasMaterialOrFunctionObservation(OutRequests.Last());
 				if (!bExpectedAbsent && Root && Graph.IsValid()
 					&& !Graph->AppendPropertyReadRequests(*Root, PackagePath, OutRequests, OutFailure))
 				{
 					return false;
 				}
+				if (bOwnsPublicObservation) MarkVerificationProperties(FirstProperty, OutRequests);
 				return true;
 			}
 
@@ -675,6 +713,7 @@ namespace UeAgentMaterialAuthoring
 			FFunctionSettings FunctionSettings;
 			bool bCompile = true;
 			bool bSave = false;
+			bool bEditsInstanceParent = false;
 		};
 
 		class FAssetLifecycle final : public IReflectionOperationLifecycle
@@ -874,7 +913,7 @@ namespace UeAgentMaterialAuthoring
 						*ValidationOwner,
 						*GraphDocument,
 						PackagePath,
-						AssetKind == TEXT("material") ? TEXT("MaterialGraph") : TEXT("MaterialFunctionGraph"),
+						GetAuthoringGraphName(AssetKind == TEXT("material_function")),
 						Error, Context))
 					{
 						if (!ValidationOwner && Error.IsEmpty()) {
@@ -888,6 +927,12 @@ namespace UeAgentMaterialAuthoring
 					}
 				}
 
+				const bool bEditsInstanceParent = Cast<UMaterialInstanceConstant>(Existing) && Request.Input->Properties.ContainsByPredicate(
+					[](const TSharedPtr<FJsonValue>& Value) {
+						FString Path;
+						return Value && Value->Type == EJson::Object && Value->AsObject()->TryGetStringField(TEXT("property_path"), Path)
+							&& FName(*Path) == GET_MEMBER_NAME_CHECKED(UMaterialInstance, Parent);
+					});
 				OutState = MakeUnique<FAssetLifecycleState>(
 					PackagePath,
 					AssetKind,
@@ -900,7 +945,7 @@ namespace UeAgentMaterialAuthoring
 					MoveTemp(FunctionSettings),
 					ReadBool(Request.Input->ProviderExtension, TEXT("compile"), true),
 					ReadBool(Request.Input->ProviderExtension, TEXT("save"), false),
-					Request.Input->Target, Request.Input->ProviderExtension);
+					bEditsInstanceParent, Request.Input->Target, Request.Input->ProviderExtension);
 				return true;
 			}
 		};

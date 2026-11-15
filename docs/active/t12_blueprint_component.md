@@ -86,6 +86,12 @@ compiles, saves, unloads, reloads, and reads back the persisted SCS through the
 shared lifecycle seam. T13 remains the sole source-carrier and common recursive
 initialization authority.
 
+A directory edit may change local SCS components and member declarations together.
+The Blueprint operation observes the selected components, members and their affected
+graphs on both sides of the same transaction. A graph referenced by both is emitted
+once. The workspace refresh receipt reports whether the committed change was published.
+An older receipt with `workspace_committed_capture_missing` retains its pending status.
+
 The component tree includes inherited native and parent Blueprint SCS templates.
 Inherited property edits use the native editable object/override template in the
 child Blueprint; they do not write the ancestor template. An owned component can

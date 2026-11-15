@@ -433,6 +433,60 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 				return Fail(OutError, Outcome.Diagnostic);
 			return true;
 		}
+		bool BuildTableRowIntent(const PlanningPreflight::FChangeDraft& Change, const FString& Target,
+			const TCHAR* Kind, TSharedPtr<FJsonObject>& Desired, Contract::FDiagnostic& Error)
+		{
+			const auto Find = [](const FUeAgentCanonicalValue* Object, const FString& Key) -> const FUeAgentCanonicalValue* {
+				if (!Object || Object->GetKind() != EUeAgentValueKind::Object) return nullptr;
+				const auto* Pair = Object->GetObjectItems().FindByPredicate([&](const auto& Item) { return Item.Key == Key; });
+				return Pair ? &Pair->Value.Get() : nullptr;
+			};
+			const auto* After = Change.GetProposedAfter().Get();
+			const auto* Rows = Find(After, TEXT("rows"));
+			if (!Rows || Rows->GetKind() != EUeAgentValueKind::Object) {
+				Error = TableDomainCondition(FString(Kind) + TEXT("_rows_missing"), TEXT("The prepared row intent has no desired rows object."), Target, TEXT("/desired_rows_present"), false, true);
+				return false;
+			}
+			const auto* BeforeRows = Find(Change.GetExpectedBefore().Get(), TEXT("rows"));
+			Desired = MakeShared<FJsonObject>();
+			for (const auto& Field : After->GetObjectItems()) if (Field.Key != TEXT("rows")) {
+				TSharedPtr<FJsonValue> Value;
+				if (!CanonicalJson::TryToJsonValue(Field.Value.Get(), Value, Error)) return false;
+				Desired->SetField(Field.Key, Value);
+			}
+			const auto DesiredRows = MakeShared<FJsonObject>();
+			auto RowResources = MakeSemanticWorkspaceResourceTracker();
+			int32 ChangedProperties = 0;
+			for (const auto& Row : Rows->GetObjectItems()) {
+				const auto Properties = MakeShared<FJsonObject>();
+				const auto* RowProperties = Find(&Row.Value.Get(), TEXT("properties"));
+				const auto* BeforeProperties = Find(Find(BeforeRows, Row.Key), TEXT("properties"));
+				if (!RowProperties || RowProperties->GetKind() != EUeAgentValueKind::Object) {
+					Error = TableDomainCondition(FString(Kind) + TEXT("_row_properties_missing"), TEXT("The prepared row intent has no properties object."), Target, TEXT("/rows/") + EscapeJsonPointerSegment(Row.Key) + TEXT("/properties"), false, true);
+					return false;
+				}
+				for (const auto& Property : RowProperties->GetObjectItems()) {
+					const auto* Before = BeforeProperties && BeforeProperties->GetKind() == EUeAgentValueKind::Object
+						? BeforeProperties->GetObjectItems().FindByPredicate([&](const auto& Item) { return Item.Key == Property.Key; }) : nullptr;
+					if (Before) {
+						FUeAgentSemanticComparison Comparison;
+						FUeAgentStateSemanticError CompareError;
+						if (!TryCompareValues(Before->Value, Property.Value, TEXT("/rows/") + EscapeJsonPointerSegment(Row.Key), RowResources, Comparison, CompareError)) { Error = MoveTemp(CompareError); return false; }
+						if (Comparison.IsEquivalent()) continue;
+					}
+					TSharedPtr<FJsonValue> Value;
+					if (!CanonicalJson::TryToJsonValue(Property.Value.Get(), Value, Error)) return false;
+					Properties->SetField(Property.Key, Value); ++ChangedProperties;
+				}
+				const auto Record = MakeShared<FJsonObject>();
+				Record->SetObjectField(TEXT("properties"), Properties);
+				DesiredRows->SetObjectField(Row.Key, Record);
+			}
+			Desired->SetObjectField(TEXT("rows"), DesiredRows);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=%s_row_intents membership=%d changed_properties=%d"), Kind, DesiredRows->Values.Num(), ChangedProperties);
+			return true;
+		}
+
 		bool ImportDataTableWorkspace(const FString& Target,
 			const DomainAuthoring::FResolvedDomainHjsonDocument& Document,
 			FString& OutPayload, FWorkspaceError& OutError)
@@ -444,8 +498,10 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			UeAgentAuthoringState::FCaptureResult Capture;
 			if (!Table) return Fail(OutError, TableDomainCondition(TEXT("data_table_target_missing"), TEXT("The import target could not be loaded as a DataTable."), Target, TEXT("/target_object_present"), false, true));
 			if (!RegisterDataTableAuthoringState(Error)
-				|| !BuildDataTableAuthoringReadRequests(*Table, Target, Requests, Error)
-				|| !UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+				|| !BuildDataTableAuthoringReadRequests(*Table, Target, Requests, Error))
+				{ OutError.SetFailure(Error, Target); return false; }
+			SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
+			if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 				{
 					OutError.SetFailure(Error.IsEmpty() ? Capture.Diagnostic : Error, Target);
 					return false;
@@ -453,13 +509,13 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			auto Resources = MakeSemanticWorkspaceResourceTracker();
 			FUeAgentCanonicalSnapshotPtr Snapshot;
 			FAuthoringModelPtr Model;
-			if (!TryBuildCanonicalAuthoringCapture(TEXT("ue.data_table.asset"), TEXT("llm_authoring"),
+			if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(), TEXT("ue.data_table.asset"), TEXT("llm_authoring"),
 				Capture.Snapshot, Resources, Snapshot, Model, OutError)) return false;
 			Capture.Snapshot.ReleaseNativeValues();
 			Table = nullptr;
 			return TryCoordinateSemanticWorkspaceImport(Document.SemanticWorkspace.ToSharedRef(),
 				Model.ToSharedRef(), Snapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(TEXT("data_table.semantic_workspace"), 1, Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("data_table.semantic_workspace"), *Model),
 				Target, Resources,
 				{TEXT("datatable-curvetable-domain-provider"), Target, Target, TEXT("data-table-semantic"),
 				 TEXT("data_table_prepare_failed"), TEXT("data_table_apply_failed"), TEXT("data_table_readback_invalid"), TEXT("data_table_schema_invalid"),
@@ -477,11 +533,11 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 						return false;
 					}
 					// ChangedUnitIds also contains related units sharing the asset identity. The actual draft defines writes.
-					bool bRowsChanged = false;
+					const PlanningPreflight::FChangeDraft* RowsChange = nullptr;
 					for (const auto& Change : Prepared.GetChangeSetDraft().GetChanges())
 					{
 						const FString& SemanticId = Change.GetIdentity().GetSemanticId();
-						if (SemanticId == TEXT("data_table.rows")) bRowsChanged = true;
+						if (SemanticId == TEXT("data_table.rows")) RowsChange = &Change;
 						else if (SemanticId != TEXT("core.property")
 							|| Change.GetIdentity().GetSelector(TEXT("owner_path")) != Target
 							|| Change.GetIdentity().GetSelector(TEXT("property_path")).IsEmpty())
@@ -493,30 +549,15 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 					}
 					// PropertyChangesByUnitId is another projection of these same root changes;
 					// the shared root projection above has already validated their intent and owner.
-					if (!bRowsChanged)
+					if (!RowsChange)
 						return ApplyDataTableAuthoring(Target, RequestId, nullptr, Outcome, nullptr,
 							Projection.RootObjectProperties);
-					for (const auto& Unit : Prepared.GetWorkspace()->GetModel()->GetUnits())
-					{
-						if (Unit.GetSemanticTypeRef() != TEXT("data_table.rows")) continue;
-						const auto Desired = MakeShared<FJsonObject>();
-						for (const auto& Field : Unit.GetValues())
-						{
-							TSharedPtr<FJsonValue> Value;
-							UE::UAI::Contract::FDiagnostic Error;
-							if (!CanonicalJson::TryToJsonValue(Field.Value.Get(), Value, Error))
-							{
-								Outcome.Diagnostic = Error;
-								return false;
-							}
-							Desired->SetField(Field.Key, Value);
-						}
-						return ApplyDataTableAuthoring(Target, RequestId, Desired, Outcome, nullptr,
-							Projection.RootObjectProperties);
-					}
-					Outcome.Diagnostic = TableDomainCondition(TEXT("data_table_rows_missing"), TEXT("The change draft modifies table rows, but the desired model has no corresponding rows unit."), Target, TEXT("/desired_rows_unit_present"), false, true);
-					Outcome.Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(TEXT("data_table.rows"));
-					return false;
+					// The draft already owns merged current facts and the desired state.
+					// Keep complete membership, but send only changed property values to
+					// the native codec. Unchanged rows need no descriptor/struct material.
+					TSharedPtr<FJsonObject> Desired;
+					if (!BuildTableRowIntent(*RowsChange, Target, TEXT("data_table"), Desired, Outcome.Diagnostic)) return false;
+					return ApplyDataTableAuthoring(Target, RequestId, Desired, Outcome, nullptr, Projection.RootObjectProperties);
 				},
 				[&Target](FString& Payload, FString& Revision, FWorkspaceError& ReadError)
 				{
@@ -540,8 +581,10 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			UeAgentAuthoringState::FCaptureResult Capture;
 			if (!Table) return Fail(OutError, TableDomainCondition(TEXT("curve_table_target_missing"), TEXT("The import target could not be loaded as a CurveTable."), Target, TEXT("/target_object_present"), false, true));
 			if (!RegisterCurveTableAuthoringState(Error)
-				|| !BuildCurveTableAuthoringReadRequests(*Table, Target, Requests, Error)
-				|| !UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+				|| !BuildCurveTableAuthoringReadRequests(*Table, Target, Requests, Error))
+				{ OutError.SetFailure(Error, Target); return false; }
+			SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
+			if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 				{
 					OutError.SetFailure(Error.IsEmpty() ? Capture.Diagnostic : Error, Target);
 					return false;
@@ -549,13 +592,13 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			auto Resources = MakeSemanticWorkspaceResourceTracker();
 			FUeAgentCanonicalSnapshotPtr Snapshot;
 			FAuthoringModelPtr Model;
-			if (!TryBuildCanonicalAuthoringCapture(TEXT("ue.curve_table.asset"), TEXT("llm_authoring"),
+			if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(), TEXT("ue.curve_table.asset"), TEXT("llm_authoring"),
 				Capture.Snapshot, Resources, Snapshot, Model, OutError)) return false;
 			Capture.Snapshot.ReleaseNativeValues();
 			Table = nullptr;
 			return TryCoordinateSemanticWorkspaceImport(Document.SemanticWorkspace.ToSharedRef(),
 				Model.ToSharedRef(), Snapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(TEXT("curve_table.semantic_workspace"), 1, Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("curve_table.semantic_workspace"), *Model),
 				Target, Resources,
 				{TEXT("datatable-curvetable-domain-provider"), Target, Target, TEXT("curve-table-semantic"),
 				 TEXT("curve_table_prepare_failed"), TEXT("curve_table_apply_failed"), TEXT("curve_table_readback_invalid"), TEXT("curve_table_schema_invalid"),
@@ -573,11 +616,11 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 						return false;
 					}
 					// ChangedUnitIds also contains related units sharing the asset identity. The actual draft defines writes.
-					bool bRowsChanged = false;
+					const PlanningPreflight::FChangeDraft* RowsChange = nullptr;
 					for (const auto& Change : Prepared.GetChangeSetDraft().GetChanges())
 					{
 						const FString& SemanticId = Change.GetIdentity().GetSemanticId();
-						if (SemanticId == TEXT("curve_table.rows")) bRowsChanged = true;
+						if (SemanticId == TEXT("curve_table.rows")) RowsChange = &Change;
 						else if (SemanticId != TEXT("core.property")
 							|| Change.GetIdentity().GetSelector(TEXT("owner_path")) != Target
 							|| Change.GetIdentity().GetSelector(TEXT("property_path")).IsEmpty())
@@ -589,30 +632,12 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 					}
 					// PropertyChangesByUnitId is another projection of these same root changes;
 					// the shared root projection above has already validated their intent and owner.
-					if (!bRowsChanged)
+					if (!RowsChange)
 						return ApplyCurveTableAuthoring(Target, RequestId, nullptr, Outcome, nullptr,
 							Projection.RootObjectProperties);
-					for (const auto& Unit : Prepared.GetWorkspace()->GetModel()->GetUnits())
-					{
-						if (Unit.GetSemanticTypeRef() != TEXT("curve_table.rows")) continue;
-						const auto Desired = MakeShared<FJsonObject>();
-						for (const auto& Field : Unit.GetValues())
-						{
-							TSharedPtr<FJsonValue> Value;
-							UE::UAI::Contract::FDiagnostic Error;
-							if (!CanonicalJson::TryToJsonValue(Field.Value.Get(), Value, Error))
-							{
-								Outcome.Diagnostic = Error;
-								return false;
-							}
-							Desired->SetField(Field.Key, Value);
-						}
-						return ApplyCurveTableAuthoring(Target, RequestId, Desired, Outcome, nullptr,
-							Projection.RootObjectProperties);
-					}
-					Outcome.Diagnostic = TableDomainCondition(TEXT("curve_table_rows_missing"), TEXT("The change draft modifies table rows, but the desired model has no corresponding rows unit."), Target, TEXT("/desired_rows_unit_present"), false, true);
-					Outcome.Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(TEXT("curve_table.rows"));
-					return false;
+					TSharedPtr<FJsonObject> Desired;
+					if (!BuildTableRowIntent(*RowsChange, Target, TEXT("curve_table"), Desired, Outcome.Diagnostic)) return false;
+					return ApplyCurveTableAuthoring(Target, RequestId, Desired, Outcome, nullptr, Projection.RootObjectProperties);
 				},
 				[&Target](FString& Payload, FString& Revision, FWorkspaceError& ReadError)
 				{
@@ -711,7 +736,8 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			const FString& Target,
 			const FString& RootType,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -736,7 +762,7 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 				FString Profile = TEXT("llm_authoring");
 				Params->TryGetStringField(TEXT("profile_id"), Profile);
 				UeAgentExportWorkspaceWriter::FWorkspaceResult Result;
-				if (!TryExportCompositionWorkspace(TEXT("ue.data_table.asset"), Profile, Capture.Snapshot, WorkspacePath, Result))
+				if (!TryExportCompositionWorkspace(TEXT("ue.data_table.asset"), Profile, Capture.Snapshot, WorkspacePath, Result, PreparedExport))
 				{
 					OutError.SetFailure(Result.Diagnostic, Target);
 					return false;
@@ -758,7 +784,7 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 				FString Profile = TEXT("llm_authoring");
 				Params->TryGetStringField(TEXT("profile_id"), Profile);
 				UeAgentExportWorkspaceWriter::FWorkspaceResult Result;
-				if (!TryExportCompositionWorkspace(TEXT("ue.curve_table.asset"), Profile, Capture.Snapshot, WorkspacePath, Result))
+				if (!TryExportCompositionWorkspace(TEXT("ue.curve_table.asset"), Profile, Capture.Snapshot, WorkspacePath, Result, PreparedExport))
 				{
 					OutError.SetFailure(Result.Diagnostic, Target);
 					return false;
@@ -776,7 +802,8 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -829,7 +856,8 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 				Target,
 				RootTypeIdentity,
 				OutPayloadJson,
-				OutError);
+				OutError,
+				PreparedExport);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

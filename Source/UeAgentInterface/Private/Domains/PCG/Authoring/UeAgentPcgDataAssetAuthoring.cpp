@@ -293,9 +293,14 @@ bool Apply(UPCGDataAsset& Asset, const TSharedPtr<FJsonValue>& Value,
             return false;
         }
         const auto CreatePoints = [&]() -> UPCGBasePointData* {
-            return RequestedType == TEXT("point_array")
+            UPCGBasePointData* Points = RequestedType == TEXT("point_array")
                 ? static_cast<UPCGBasePointData*>(NewObject<UPCGPointArrayData>(&Asset, NAME_None, RF_Transactional))
                 : static_cast<UPCGBasePointData*>(NewObject<UPCGPointData>(&Asset, NAME_None, RF_Transactional));
+            // Point metadata creates Elements immediately. UE also materializes the
+            // registered Data domain on load, even when the archive records it as empty.
+            // Give both newly authored point representations the same native initial state.
+            Points->MutableMetadata()->GetMetadataDomain(PCGMetadataDomainID::Data);
+            return Points;
         };
         if (const auto Points = Row->TryGetField(TEXT("points")))
         {

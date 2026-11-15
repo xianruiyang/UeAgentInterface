@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Domains/PCG/Authoring/UeAgentPCGAuthoringState.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 
 #include "Domains/PCG/Authoring/UeAgentPCGAuthoringDescriptors.h"
 #include "Domains/PCG/Authoring/UeAgentPCGGraphAuthoring.h"
@@ -18,6 +20,9 @@
 
 namespace UeAgentPCGAuthoring
 {
+	static bool AppendGraphBodyReadRequests(UPCGGraph& Graph, const FString& AssetPath,
+		const TSharedPtr<FJsonObject>& Document, TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError);
 	namespace
 	{
 		UE::UAI::Contract::FDiagnostic NativeFailure(const TCHAR* Code, const TCHAR* Reason,
@@ -189,21 +194,42 @@ namespace UeAgentPCGAuthoring
 				return UeAgentAuthoringState::EReadOutcome::Unavailable;
 			}
 			const FString AssetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
-			TSharedPtr<FJsonObject> Document;
-			if (!BuildGraphDocument(*Graph, Document, OutError, AssetPath))
-			{
-				return UeAgentAuthoringState::EReadOutcome::Failed;
-			}
-
 			TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
 			if (Request.SemanticId == GraphSemanticId)
 			{
+				TSharedPtr<FJsonObject> Document;
+				if (!BuildGraphDocument(*Graph, Document, OutError, AssetPath))
+					return UeAgentAuthoringState::EReadOutcome::Failed;
 				State->SetStringField(TEXT("asset_path"), AssetPath);
 				State->SetStringField(TEXT("asset_kind"), TEXT("pcg_graph"));
 				TSharedRef<FJsonObject> GraphMetadata = MakeShared<FJsonObject>();
 				GraphMetadata->SetStringField(TEXT("name"), AssetPath);
 				GraphMetadata->SetStringField(TEXT("graph_kind"), TEXT("pcg_graph"));
 				State->SetObjectField(TEXT("graph"), GraphMetadata);
+				if (Request.bCaptureAuthoringProjection && Request.Context.Contains(TEXT("observed_graph_body")))
+				{
+					TArray<UeAgentAuthoringState::FReadRequest> Requests;
+					if (!AddReadRequest(GraphSemanticId, GraphIdentityModelId, TEXT("pcg_graph"),
+						{{TEXT("asset_path"), AssetPath}}, Graph, {}, Requests, OutError)
+						|| !AddReadRequest(ExportTargetSemanticId, GraphIdentityModelId, TEXT("pcg_graph"),
+							{{TEXT("asset_path"), AssetPath}}, Graph, {}, Requests, OutError)
+						|| !AppendGraphBodyReadRequests(*Graph, AssetPath, Document, Requests, OutError))
+						return UeAgentAuthoringState::EReadOutcome::Failed;
+					UeAgentAuthoringState::FCaptureResult Capture;
+					if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+					{
+						OutError = Capture.Diagnostic;
+						return UeAgentAuthoringState::EReadOutcome::Failed;
+					}
+					auto Resources = UE::UAI::HjsonWorkspace::MakeSemanticWorkspaceResourceTracker();
+					UE::UAI::HjsonWorkspace::FWorkspaceError Error;
+					if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(TEXT("ue.pcg_graph.asset"),
+						TEXT("llm_authoring"), Capture.Snapshot, Resources, OutValue.AuthoringProjection, Error))
+					{
+						OutError = Error.GetDiagnostic();
+						return UeAgentAuthoringState::EReadOutcome::Failed;
+					}
+				}
 			}
 			else if (Request.SemanticId == ExportTargetSemanticId)
 			{
@@ -212,23 +238,18 @@ namespace UeAgentPCGAuthoring
 			}
 			else if (Request.SemanticId == ExportNodeSemanticId)
 			{
-				const TSharedPtr<FJsonObject>* Nodes = nullptr;
-				const TSharedPtr<FJsonObject>* Node = nullptr;
 				const FString NodeId = Request.TargetIdentity.GetSelector(TEXT("node_id"));
-				if (!Document->TryGetObjectField(TEXT("nodes"), Nodes) || !Nodes || !Nodes->IsValid()
-					|| !(*Nodes)->TryGetObjectField(NodeId, Node) || !Node || !Node->IsValid())
+				UPCGNode* Node = UeAgentPCG::BuildExportNodeMapById(Graph).FindRef(NodeId);
+				const UPCGNode* BoundNode = Cast<UPCGNode>(Request.RootObject);
+				if (!Node || (BoundNode && Node != BoundNode))
 				{
-					const bool bNodesAvailable = Nodes && Nodes->IsValid();
 					OutError = NativeFailure(TEXT("pcg_export_node_target_missing"),
-						bNodesAvailable ? TEXT("The exported graph does not contain the requested PCG node object.")
-							: TEXT("The exported graph does not contain a nodes object."),
-						bNodesAvailable ? TEXT("nodes.") + NodeId : TEXT("nodes"),
-						bNodesAvailable ? (*Nodes)->TryGetField(NodeId) : Document->TryGetField(TEXT("nodes")),
-						TEXT("a PCG node object in the exported nodes map"), AssetPath);
+						TEXT("The native graph does not contain the requested PCG node binding."),
+						TEXT("nodes.") + NodeId, nullptr, TEXT("a node bound to this graph identity"), AssetPath);
 					OutError.SubjectId = NodeId;
 					return UeAgentAuthoringState::EReadOutcome::Failed;
 				}
-				State = CloneObject(*Node);
+				State = BuildNodeState(*Graph, *Node);
 				// Machine-side node identity is retained for the common resolver;
 				// the export projection removes this field from model-visible state.
 				State->SetStringField(
@@ -243,11 +264,7 @@ namespace UeAgentPCGAuthoring
 			{
 				OutValue.bEditable = true;
 				OutValue.DisplayName = TEXT("Parameters");
-				const TSharedPtr<FJsonObject>* Parameters = nullptr;
-				if (Document->TryGetObjectField(TEXT("parameters"), Parameters) && Parameters && Parameters->IsValid())
-				{
-					State = CloneObject(*Parameters);
-				}
+				State = CloneObject(UeAgentPCG::ExportParameterBagToJson(Graph->GetUserParametersStruct()));
 			}
 			else
 			{
@@ -421,6 +438,7 @@ namespace UeAgentPCGAuthoring
 			|| !AddReadRequest(ExportTargetSemanticId, GraphIdentityModelId, TEXT("pcg_graph"),
 			{ { TEXT("asset_path"), AssetPath } }, &Graph, {}, OutRequests, OutError)) return false;
 
+		OutRequests.Last().MarkExportTarget();
 		UeAgentAuthoringState::FEditablePropertyReadOptions RootOptions;
 		RootOptions.SemanticId = TEXT("core.property");
 		RootOptions.ExcludedProperties.Add(TEXT("UserParameters"));
@@ -429,6 +447,14 @@ namespace UeAgentPCGAuthoring
 
 		TSharedPtr<FJsonObject> Document;
 		if (!BuildGraphDocument(Graph, Document, OutError, AssetPath)) return false;
+		return AppendGraphBodyReadRequests(Graph, AssetPath, Document, OutRequests, OutError)
+			&& AppendNodePropertyRequests(Graph, AssetPath, OutRequests, OutError);
+	}
+
+	static bool AppendGraphBodyReadRequests(UPCGGraph& Graph, const FString& AssetPath,
+		const TSharedPtr<FJsonObject>& Document, TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
 		const TMap<FString, UPCGNode*> NodesById = UeAgentPCG::BuildExportNodeMapById(&Graph);
 		const TSharedPtr<FJsonObject>* Nodes = nullptr;
 		if (!Document->TryGetObjectField(TEXT("nodes"), Nodes) || !Nodes || !Nodes->IsValid())
@@ -474,8 +500,6 @@ namespace UeAgentPCGAuthoring
 			if (!AddPinRequests(Node->GetInputPins(), TEXT("input"))
 				|| !AddPinRequests(Node->GetOutputPins(), TEXT("output"))) return false;
 		}
-		if (!AppendNodePropertyRequests(Graph, AssetPath, OutRequests, OutError)) return false;
-
 		const TSharedPtr<FJsonObject>* Edges = nullptr;
 		if (Document->TryGetObjectField(TEXT("edges"), Edges) && Edges && Edges->IsValid())
 		{

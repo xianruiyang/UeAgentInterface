@@ -652,6 +652,7 @@ namespace UeAgentBlueprintAuthoring
 		for (const FStructuralEdit& Edit : StructuralEdits)
 			if (IsRemovedGraphBody(Edit.GetOwnerUnitId()))
 				return Fail(OutError, TEXT("blueprint_graph_remove_body_edit_conflict"), TEXT("A graph cannot be removed while its body is also being edited."), Edit.GetOwnerUnitId());
+		auto DeltaResources = MakeSemanticWorkspaceResourceTracker();
 		for (const FSemanticUnit& Unit : ProposedModel->GetUnits())
 		{
 			if (!Changed.Contains(Unit.GetUnitId())
@@ -660,6 +661,9 @@ namespace UeAgentBlueprintAuthoring
 			{
 				continue;
 			}
+			TSet<FString> ChangedCollections;
+			if (!TryCollectChangedUnitValueFields(CurrentModel ? CurrentModel->FindUnit(Unit.GetUnitId()) : nullptr,
+				Unit, DeltaResources, ChangedCollections, OutError, &ProposedModel.Get())) return false;
 			TSharedPtr<FJsonObject> Values;
 			if (!UnitValuesToObject(Unit, Values, OutError))
 			{
@@ -668,7 +672,7 @@ namespace UeAgentBlueprintAuthoring
 			for (const TCHAR* Field : {TEXT("variables"), TEXT("delegates")})
 			{
 				const TSharedPtr<FJsonObject>* Map = nullptr;
-				if (Values->TryGetObjectField(Field, Map) && Map && Map->IsValid())
+				if (ChangedCollections.Contains(Field) && Values->TryGetObjectField(Field, Map) && Map && Map->IsValid() && !(*Map)->Values.IsEmpty())
 				{
 					const auto Declarations = MakeShared<FJsonObject>();
 					for (const auto& Entry : (*Map)->Values)
@@ -685,7 +689,7 @@ namespace UeAgentBlueprintAuthoring
 				}
 			}
 			const TSharedPtr<FJsonObject>* InterfaceMap = nullptr;
-			if (Values->TryGetObjectField(TEXT("interfaces"), InterfaceMap)
+			if (ChangedCollections.Contains(TEXT("interfaces")) && Values->TryGetObjectField(TEXT("interfaces"), InterfaceMap)
 				&& InterfaceMap && InterfaceMap->IsValid())
 			{
 				for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
@@ -761,7 +765,7 @@ namespace UeAgentBlueprintAuthoring
 			}
 			GraphSpec->RemoveField(TEXT("graph_declaration_owned"));
 			if (Workspace)
-				if (const auto* Baseline = Workspace->GetBaselineUnits().Find(GraphUnit.GetUnitId()))
+				if (const auto* Baseline = Workspace->FindBaselineUnit(GraphUnit.GetUnitId()))
 				{
 					TSharedPtr<FJsonObject> OldValues;
 					if (!UnitValuesToObject(*Baseline, OldValues, OutError)) return false;
@@ -809,7 +813,7 @@ namespace UeAgentBlueprintAuthoring
 			const TSharedRef<FJsonObject> Nodes = MakeShared<FJsonObject>();
 			TSharedPtr<FJsonValue> NodeChanges = Values->TryGetField(TEXT("nodes"));
 			if (Workspace)
-				if (const auto* Baseline = Workspace->GetBaselineUnits().Find(GraphUnit.GetUnitId()))
+				if (const auto* Baseline = Workspace->FindBaselineUnit(GraphUnit.GetUnitId()))
 				{
 					TSharedPtr<FJsonObject> Changes;
 					if (!TryProjectGraphAuthoringNodeChanges(GraphUnit.GetUnitId(), Baseline->GetValues(),
@@ -1064,7 +1068,6 @@ namespace UeAgentBlueprintAuthoring
 
 		// Item state and its collection are two views of the same native identity.
 		// Merge only authored deltas; captured siblings must not undo collection edits.
-		auto DeltaResources = MakeSemanticWorkspaceResourceTracker();
 		for (const FSemanticUnit& Unit : ProposedModel->GetUnits())
 		{
 			const FString& Semantic = Unit.GetSemanticTypeRef();
@@ -1430,6 +1433,14 @@ OutError.SetFailure(MoveTemp(KeyError), Unit.GetUnitId());
 		}
 
 		OutProviderExtension = MakeShared<FJsonObject>();
+		for (const FString& Id : ChangedSemanticUnitIds) {
+			const FSemanticUnit* Unit = ProposedModel->FindUnit(Id);
+			if (!Unit || Unit->GetSemanticTypeRef() != ParentClassSemanticId) continue;
+			const auto* Value = Unit->GetValues().Find(TEXT("value"));
+			if (!Value || (*Value)->GetKind() != UE::UAI::StateSemantic::EUeAgentValueKind::String)
+				return Fail(OutError, TEXT("blueprint_parent_class_invalid"), TEXT("The parent class requires a class path."), Id, TEXT("/value"));
+			OutProviderExtension->SetStringField(TEXT("parent_class"), (*Value)->GetText());
+		}
 		if (!Graphs->Values.IsEmpty())
 		{
 			OutProviderExtension->SetObjectField(TEXT("graphs"), Graphs);

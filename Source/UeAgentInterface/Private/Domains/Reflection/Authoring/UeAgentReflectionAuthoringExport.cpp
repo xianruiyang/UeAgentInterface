@@ -80,7 +80,8 @@ namespace UeAgentReflectionAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ExportProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
+		UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport)
 	{
   auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
@@ -92,7 +93,7 @@ namespace UeAgentReflectionAuthoring
 			OutError)) return false;
 		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
 				Profile.TargetKind,
-				Profile.TypeId), ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
+				Profile.TypeId), ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult, PreparedExport);
 	}
 
 	bool ExportAssetFile(

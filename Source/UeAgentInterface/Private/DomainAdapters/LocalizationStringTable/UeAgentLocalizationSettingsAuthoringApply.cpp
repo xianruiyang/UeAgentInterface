@@ -120,7 +120,6 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 			TArray<FLocalizationTargetSettings> BeforeBacking;
 			TArray<int32> Changed;
 			TArray<TStrongObjectPtr<ULocalizationTarget>> BeforeObjects;
-			TArray<TArray<FString>> ScriptPaths;
 			TArray<int32> Removed;
 			TArray<FDurableArtifact> RemovalArtifacts;
 			TMap<FString, UeAgentAuthoringObjectApply::FPropertyIntent> SettingsIntents;
@@ -326,27 +325,9 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 					const auto* Before = Prepared->Before.FindByPredicate([&](const auto& Item) { return Item.Name.Equals(Value.Name, ESearchCase::CaseSensitive); });
 					if (!Before || !FLocalizationTargetSettings::StaticStruct()->CompareScriptStruct(&Value, Before, PPF_None)) Prepared->Changed.Add(Index);
 				}
-				Prepared->ScriptPaths.SetNum(Prepared->Proposed.Num());
-				TStrongObjectPtr<ULocalizationSettings> ShadowSettings(NewObject<ULocalizationSettings>(GetTransientPackage()));
-				TStrongObjectPtr<ULocalizationTargetSet> ShadowSet(NewObject<ULocalizationTargetSet>(ShadowSettings.Get()));
-				for (int32 Index : Prepared->Changed)
-				{
-					TStrongObjectPtr<ULocalizationTarget> ShadowTarget(NewObject<ULocalizationTarget>(ShadowSet.Get()));
-					ShadowTarget->Settings = Prepared->Proposed[Index];
-					Prepared->ScriptPaths[Index] = LocalizationConfigurationScript::GetConfigPaths(ShadowTarget.Get());
-					if (!Prepared->Before.ContainsByPredicate([&](const auto& Value) { return Value.Name.Equals(ShadowTarget->Settings.Name, ESearchCase::CaseSensitive); }))
-					{
-						const FString DataPath = LocalizationConfigurationScript::GetDataDirectory(ShadowTarget.Get());
-						if (FPaths::DirectoryExists(DataPath) || FPaths::FileExists(DataPath))
-							return Fail(Failure, LocalizationFailure(TEXT("localization_target_data_conflict"),
-								TEXT("The new localization target's data path already exists."), TEXT("/data_path"),
-								MakeShared<FJsonValueString>(DataPath), MakeShared<FJsonValueString>(TEXT("unused path"))));
-						for (const auto& Path : Prepared->ScriptPaths[Index])
-							if (FPaths::FileExists(Path) || FPaths::DirectoryExists(Path)) return Fail(Failure, LocalizationFailure(TEXT("localization_target_script_conflict"),
-								TEXT("The new localization target's script path already exists."), TEXT("/script_path"),
-								MakeShared<FJsonValueString>(Path), MakeShared<FJsonValueString>(TEXT("unused path"))));
-					}
-				}
+				// Native LocalizationCommandletTasks generates each requested script
+				// immediately before use. Settings edits publish only settings;
+				// removal still owns cleanup of an explicitly deleted target.
 				Out = MoveTemp(Prepared);
 				return true;
 			}
@@ -435,11 +416,6 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 				State = &static_cast<FPrepared&>(*Mutations[0]);
 				Artifacts.Reset();
 				Artifacts.Add({TEXT("localization.settings"), FPaths::ConvertRelativePathToFull(GetDefault<ULocalizationSettings>()->GetDefaultConfigFilename())});
-				for (int32 Index : State->Changed)
-				{
-					for (const FString& Path : State->ScriptPaths[Index])
-						Artifacts.Add({TEXT("localization.script.") + FString::FromInt(Artifacts.Num()), FPaths::ConvertRelativePathToFull(Path)});
-				}
 				Artifacts.Append(State->RemovalArtifacts);
 				return true;
 			}
@@ -458,39 +434,7 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 				UE::UAI::Contract::FDiagnostic Error;
 				if (!WriteLocalizationSettingsStage(State->Proposed, Artifacts[0].StagingPath, Error)) return Fail(Failure, Error);
 				Artifacts[0].bStagedExists = true;
-				int32 ArtifactIndex = 1;
-				for (int32 Index : State->Changed)
-				{
-					const auto* Target = ULocalizationSettings::GetGameTargetSet()->TargetObjects[Index].Get();
-					using namespace LocalizationConfigurationScript;
-					TArray<FLocalizationConfigurationScript> Scripts{
-						GenerateGatherTextConfigFile(Target), GenerateImportTextConfigFile(Target), GenerateExportTextConfigFile(Target),
-						GenerateImportDialogueScriptConfigFile(Target), GenerateExportDialogueScriptConfigFile(Target), GenerateImportDialogueConfigFile(Target),
-						GenerateCompileTextConfigFile(Target), GenerateWordCountReportConfigFile(Target)};
-					for (auto& Script : Scripts)
-					{
-						if (!Artifacts.IsValidIndex(ArtifactIndex))
-							return Fail(Failure, LocalizationFailure(TEXT("localization_script_stage_failed"),
-								TEXT("The generated localization script has no corresponding durable artifact."),
-								TEXT("/artifacts/") + FString::FromInt(ArtifactIndex), MakeShared<FJsonValueNumber>(Artifacts.Num()),
-								MakeShared<FJsonValueString>(TEXT("artifact index within the inventory"))));
-						if (!Script.Write(Artifacts[ArtifactIndex].StagingPath, false))
-						{
-							auto ScriptError = LocalizationCondition(TEXT("localization_script_stage_failed"),
-								TEXT("Unreal could not write the generated localization script to its staging file."),
-								TEXT("/artifacts/") + FString::FromInt(ArtifactIndex) + TEXT("/write_succeeded"), false);
-							ScriptError.Source.SourceFile = Artifacts[ArtifactIndex].StagingPath;
-							ScriptError.CandidateName = Target->Settings.Name;
-							return Fail(Failure, ScriptError);
-						}
-						Artifacts[ArtifactIndex++].bStagedExists = true;
-					}
-				}
-				return ArtifactIndex + State->RemovalArtifacts.Num() == Artifacts.Num()
-					|| Fail(Failure, LocalizationFailure(TEXT("localization_artifact_inventory_mismatch"),
-						TEXT("The staged script and removal counts do not match the durable artifact inventory."),
-						TEXT("/artifacts/count"), MakeShared<FJsonValueNumber>(Artifacts.Num()),
-						MakeShared<FJsonValueNumber>(ArtifactIndex + State->RemovalArtifacts.Num())));
+				return true;
 			}
 			bool FinalizeVerification(FOperationFailure& Failure) override
 			{
@@ -499,17 +443,21 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 				if (!State) return Fail(Failure, LocalizationCondition(TEXT("localization_verification_state_missing"),
 					TEXT("The prepared localization state required for persistent readback is unavailable."), TEXT("/prepared_state_present"), false));
 				const FString ConfigFile = GetDefault<ULocalizationSettings>()->GetDefaultConfigFilename();
-				if (!ReadLocalizationSettingsFile(ConfigFile, Readback, Error)) return Fail(Failure, Error);
-				if (!EqualLocalizationConfigValues(Readback, State->Proposed, Error))
+				const bool bRead = ReadLocalizationSettingsFile(ConfigFile, Readback, Error);
+				if (!bRead || !EqualLocalizationConfigValues(Readback, State->Proposed, Error))
 				{
 					Error.Source.SourceFile = ConfigFile;
 					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("localization_persistent_verification_failed"), Error, TEXT("localization_observation"));
 				}
-				if (!State->VerifySettings(Readback, Failure)) {
+				if (bRead && !State->VerifySettings(Readback, Failure)) {
 					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Failure.Diagnostic.Code, Failure.Diagnostic, TEXT("localization_observation"));
 					Failure = FOperationFailure();
 				}
-				return !FinalReadback || FinalReadback(Failure);
+				if (FinalReadback && !FinalReadback(Failure)) {
+					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Failure.Diagnostic.Code, Failure.Diagnostic, TEXT("localization_observation"));
+					Failure = FOperationFailure();
+				}
+				return true;
 			}
 		private:
 			bool CheckOriginalObjects(UE::UAI::Contract::FDiagnostic& Error) const

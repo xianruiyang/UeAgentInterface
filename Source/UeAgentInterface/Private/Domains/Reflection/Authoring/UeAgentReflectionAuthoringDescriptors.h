@@ -34,6 +34,8 @@ struct FProfile {
   FString GenerationInputSemanticId;
   FString GenerationInputField;
   FString GeneratedStateSemanticId;
+  TArray<FName> GenerationReadbackProperties;
+  FString GenerationDependencyProperty;
   FString InputContractId;
   FString WorkspaceContractId;
   FString ExportContractId;

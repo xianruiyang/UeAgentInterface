@@ -3,7 +3,6 @@
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
-#include "Core/HjsonWorkspace/SemanticModel/UeAgentUnifiedHjsonSemanticModel.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
@@ -56,7 +55,7 @@ namespace
 			TEXT("strict_v2:t09:current-design"));
 	}
 
-	static FUnifiedHjsonSemanticModelPtr MakeModel(FAutomationTestBase* Test)
+	static FAuthoringModelPtr MakeModel(FAutomationTestBase* Test)
 	{
 		const TArray<FString> Ids{
 			TEXT("target"), TEXT("property"), TEXT("member"),
@@ -97,32 +96,7 @@ namespace
 		{
 			return nullptr;
 		}
-		TMap<EUnifiedHjsonCompositionKind, TArray<FString>> Compositions{
-			{EUnifiedHjsonCompositionKind::Target, {Ids[0]}},
-			{EUnifiedHjsonCompositionKind::PropertySet, {Ids[1]}},
-			{EUnifiedHjsonCompositionKind::MemberSet, {Ids[2]}},
-			{EUnifiedHjsonCompositionKind::Structure, {Ids[3]}},
-			{EUnifiedHjsonCompositionKind::Item, {Ids[4]}},
-			{EUnifiedHjsonCompositionKind::Endpoint, {Ids[5]}},
-			{EUnifiedHjsonCompositionKind::Relation, {Ids[6]}},
-			{EUnifiedHjsonCompositionKind::Order, {Ids[7]}},
-			{EUnifiedHjsonCompositionKind::Layout, {Ids[8]}},
-			{EUnifiedHjsonCompositionKind::TemporalContract, {Ids[9]}},
-			{EUnifiedHjsonCompositionKind::SpatialContract, {Ids[10]}},
-			{EUnifiedHjsonCompositionKind::ExternalInput, {Ids[11]}},
-		};
-		FUeAgentResourceTracker ModelResources = MakeResources();
-		FUnifiedHjsonSemanticModelPtr Model;
-		Test->TestTrue(
-			TEXT("T09 fixture compiles the unified local-edit model"),
-			TryCreateUnifiedHjsonSemanticModel(
-				Core.ToSharedRef(),
-				EUnifiedHjsonAuthoringIntent::LocalEdit,
-				MoveTemp(Compositions),
-				ModelResources,
-				Model,
-				Error));
-		return Model;
+		return Core;
 	}
 
 	class FFixturePreflight final : public IImportInitializationPreflight
@@ -192,7 +166,6 @@ namespace
 
 	static FImportInitializationPlanningRequest Request(
 		const EImportSourceCarrier Carrier,
-		FUnifiedHjsonSemanticModelRef Model,
 		TArray<FImportChange> Changes = {
 			FImportChange(
 				TEXT("change:create-child"),
@@ -226,7 +199,6 @@ namespace
 	{
 		return FImportInitializationPlanningRequest(
 			Carrier,
-			MoveTemp(Model),
 			TEXT("/Game/StrictV2/T09/Fixture"),
 			FUeAgentStateRevision(TEXT("t09-target"), TEXT("g1"), 7),
 			TEXT("sha256:41536f1320056b89c09fbd26aa8038876a023f49a382f2c57de33e5405389379"),
@@ -496,7 +468,7 @@ namespace
 
 	static bool BuildSourcePlan(
 		FAutomationTestBase* Test,
-		FUnifiedHjsonSemanticModelPtr& OutModel,
+		FAuthoringModelPtr& OutModel,
 		FExportWorkspacePlanPtr& OutPlan,
 		FString& OutEmbedded)
 	{
@@ -508,7 +480,7 @@ namespace
 		FUeAgentResourceTracker Resources = MakeResources();
 		FWorkspaceError Error;
 		if (!TryBuildCompositionExportPlan(
-				OutModel->GetCoreModel(),
+				OutModel.ToSharedRef(),
 				{},
 				Resources,
 				OutPlan,
@@ -676,7 +648,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T09RealSourceCarrierTest::RunTest(
 	const FString& Parameters)
 {
-	FUnifiedHjsonSemanticModelPtr Model;
+	FAuthoringModelPtr Model;
 	FExportWorkspacePlanPtr Plan;
 	FString Embedded;
 	if (!BuildSourcePlan(this, Model, Plan, Embedded))
@@ -741,7 +713,7 @@ bool FUeAgentStrictV2T09RealSourceCarrierTest::RunTest(
 			SemanticFingerprints[0] == SemanticFingerprints[1]
 				&& SemanticFingerprints[0] == SemanticFingerprints[2]
 				&& SemanticFingerprints[0]
-					== Model->GetCoreModel()->GetSemanticFingerprint());
+					== Model->GetSemanticFingerprint());
 	}
 	return !HasAnyErrors();
 }
@@ -754,7 +726,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T09SourceBoundaryTest::RunTest(
 	const FString& Parameters)
 {
-	FUnifiedHjsonSemanticModelPtr Model;
+	FAuthoringModelPtr Model;
 	FExportWorkspacePlanPtr Plan;
 	FString Embedded;
 	if (!BuildSourcePlan(this, Model, Plan, Embedded))
@@ -959,11 +931,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T09CarrierEquivalenceTest::RunTest(const FString& Parameters)
 {
-	const FUnifiedHjsonSemanticModelPtr Model = MakeModel(this);
-	if (!Model.IsValid())
-	{
-		return false;
-	}
 	TArray<FString> Fingerprints;
 	for (const EImportSourceCarrier Carrier : {
 		EImportSourceCarrier::Directory,
@@ -977,7 +944,7 @@ bool FUeAgentStrictV2T09CarrierEquivalenceTest::RunTest(const FString& Parameter
 		const TSharedRef<FFixturePreflight> Preflight = MakeShared<FFixturePreflight>();
 		TestTrue(
 			TEXT("every carrier enters the same public planner"),
-			Plan(Request(Carrier, Model.ToSharedRef()), Preflight, Resources, Result, Error));
+			Plan(Request(Carrier), Preflight, Resources, Result, Error));
 		TestTrue(TEXT("carrier produces one immutable plan"), Result.IsValid());
 		if (Result.IsValid())
 		{
@@ -1008,11 +975,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T09PrewriteFailureTest::RunTest(const FString& Parameters)
 {
-	const FUnifiedHjsonSemanticModelPtr Model = MakeModel(this);
-	if (!Model.IsValid())
-	{
-		return false;
-	}
 	FWorkspaceError Error;
 	FImportInitializationPlanPtr Result;
 
@@ -1020,7 +982,7 @@ bool FUeAgentStrictV2T09PrewriteFailureTest::RunTest(const FString& Parameters)
 	Stale->bStaleRevision = true;
 	FUeAgentResourceTracker StaleResources = MakeResources();
 	TestFalse(TEXT("stale target fails before plan publication"),
-		Plan(Request(EImportSourceCarrier::Inline, Model.ToSharedRef()), Stale, StaleResources, Result, Error));
+		Plan(Request(EImportSourceCarrier::Inline), Stale, StaleResources, Result, Error));
 	TestEqual(TEXT("stale target has a typed conflict"), Error.GetCode(),
 		FString(TEXT("hjson_import_target_version_conflict")));
 	TestFalse(TEXT("stale failure publishes no plan"), Result.IsValid());
@@ -1030,7 +992,7 @@ bool FUeAgentStrictV2T09PrewriteFailureTest::RunTest(const FString& Parameters)
 	Remapped->bRemapCandidate = true;
 	FUeAgentResourceTracker CandidateResources = MakeResources();
 	TestFalse(TEXT("implicit candidate remapping is rejected"),
-		Plan(Request(EImportSourceCarrier::Inline, Model.ToSharedRef()), Remapped, CandidateResources, Result, Error));
+		Plan(Request(EImportSourceCarrier::Inline), Remapped, CandidateResources, Result, Error));
 	TestEqual(TEXT("candidate remapping has a typed failure"), Error.GetCode(),
 		FString(TEXT("hjson_import_candidate_identity_changed")));
 
@@ -1038,7 +1000,7 @@ bool FUeAgentStrictV2T09PrewriteFailureTest::RunTest(const FString& Parameters)
 	Unsupported->bUnsupported = true;
 	FUeAgentResourceTracker UnsupportedResources = MakeResources();
 	TestFalse(TEXT("unsupported explicit change fails closed"),
-		Plan(Request(EImportSourceCarrier::Inline, Model.ToSharedRef()), Unsupported, UnsupportedResources, Result, Error));
+		Plan(Request(EImportSourceCarrier::Inline), Unsupported, UnsupportedResources, Result, Error));
 	TestEqual(TEXT("provider failure remains typed"), Error.GetCode(),
 		FString(TEXT("fixture_change_unsupported")));
 
@@ -1046,7 +1008,7 @@ bool FUeAgentStrictV2T09PrewriteFailureTest::RunTest(const FString& Parameters)
 	Unauthorized->bUnauthorized = true;
 	FUeAgentResourceTracker AuthorizationResources = MakeResources();
 	TestFalse(TEXT("impact authorization is mandatory"),
-		Plan(Request(EImportSourceCarrier::Inline, Model.ToSharedRef()), Unauthorized, AuthorizationResources, Result, Error));
+		Plan(Request(EImportSourceCarrier::Inline), Unauthorized, AuthorizationResources, Result, Error));
 	TestEqual(TEXT("authorization failure remains typed"), Error.GetCode(),
 		FString(TEXT("fixture_unauthorized")));
 	return true;
@@ -1059,11 +1021,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T09InitializationGraphTest::RunTest(const FString& Parameters)
 {
-	const FUnifiedHjsonSemanticModelPtr Model = MakeModel(this);
-	if (!Model.IsValid())
-	{
-		return false;
-	}
 	TArray<FInitializationNode> DeepNodes;
 	TArray<FInitializationEdge> DeepEdges;
 	constexpr int32 Depth = 2048;
@@ -1090,7 +1047,6 @@ bool FUeAgentStrictV2T09InitializationGraphTest::RunTest(const FString& Paramete
 		Plan(
 			Request(
 				EImportSourceCarrier::Directory,
-				Model.ToSharedRef(),
 				{FImportChange(TEXT("change:deep"), EImportChangeKind::Create, TEXT("node:2047"))},
 				MoveTemp(DeepNodes),
 				MoveTemp(DeepEdges)),
@@ -1114,7 +1070,7 @@ bool FUeAgentStrictV2T09InitializationGraphTest::RunTest(const FString& Paramete
 	};
 	FUeAgentResourceTracker CycleResources = MakeResources();
 	TestFalse(TEXT("ownership cycles fail before any write"),
-		Plan(Request(EImportSourceCarrier::SingleFile, Model.ToSharedRef(),
+		Plan(Request(EImportSourceCarrier::SingleFile,
 			{FImportChange(TEXT("change:cycle"), EImportChangeKind::Create, TEXT("node:a"))},
 			CycleNodes, OwnershipCycle), MakeShared<FFixturePreflight>(), CycleResources, Result, Error));
 	TestEqual(TEXT("ownership cycle is precise"), Error.GetCode(),
@@ -1126,7 +1082,7 @@ bool FUeAgentStrictV2T09InitializationGraphTest::RunTest(const FString& Paramete
 	};
 	FUeAgentResourceTracker ReferenceResources = MakeResources();
 	TestTrue(TEXT("reference cycles are legal and deferred"),
-		Plan(Request(EImportSourceCarrier::MultiFile, Model.ToSharedRef(),
+		Plan(Request(EImportSourceCarrier::MultiFile,
 			{FImportChange(TEXT("change:refs"), EImportChangeKind::Connect, TEXT("node:a"))},
 			CycleNodes, ReferenceCycle), MakeShared<FFixturePreflight>(), ReferenceResources, Result, Error));
 	TestEqual(TEXT("both reference edges are retained"), Result->GetReferenceEdges().Num(), 2);

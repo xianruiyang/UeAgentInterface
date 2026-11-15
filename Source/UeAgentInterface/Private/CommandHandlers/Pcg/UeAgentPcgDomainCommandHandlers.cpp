@@ -90,7 +90,8 @@ namespace UE::UAI::CommandHandlers::Pcg
 		if (!DomainAdapters::Pcg::TryExecuteContentGraph(
 				Request.GetCommandId(), Request.GetTargetIdentity(),
 				Request.GetRootTypeIdentity(),
-				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
+				Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

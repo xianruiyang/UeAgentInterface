@@ -1068,8 +1068,9 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 				OutError.SetFailure(CaptureError, Target);
 				return false;
 			}
+			SelectRootPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
 			UeAgentAuthoringState::FCaptureResult Capture;
-			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+			if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
 			{
 				OutError.SetFailure(Capture.Diagnostic, Target);
 				return false;
@@ -1079,7 +1080,7 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 				MakeSemanticWorkspaceResourceTracker();
 			StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 			FAuthoringModelPtr Model;
-			if (!TryBuildCanonicalAuthoringCapture(
+			if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(),
 					TEXT("ue.anim_blueprint.asset"), TEXT("llm_authoring"),
 					Capture.Snapshot, Resources, CanonicalSnapshot, Model, OutError)
 				|| !CanonicalSnapshot.IsValid() || !Model.IsValid())
@@ -1105,9 +1106,7 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 			return TryCoordinateSemanticWorkspaceImport(
 				Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
 				CanonicalSnapshot.ToSharedRef(),
-				Contract::FUeAgentDescriptorIdentity(
-					TEXT("animation_blueprint.semantic_workspace"), 1,
-					Model->GetSemanticFingerprint()),
+				BuildSemanticWorkspaceImportDescriptor(TEXT("animation_blueprint.semantic_workspace"), *Model),
 				Blueprint->GetPathName(),
 				Resources,
 				{
@@ -1125,7 +1124,7 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 						return Native && UeAgentAnimationAuthoring::BuildAssetExportSnapshotReadRequests(*Profile, *Native, Requests, Error)
 							&& UeAgentBlueprintAuthoring::AppendReusableBlueprintExportSnapshotReadRequests(
 								*Native, Requests, Error, Native->GetOutermost()->GetName());
-					}},
+					}, {}, &UeAgentBlueprintAuthoring::ProjectObservedNodePinDefaults},
 				[AssetKind, TargetPackage, CurrentModel = Model.ToSharedRef(), &Blueprint, &Requests](
 					const FString& RequestId,
 					const FPreparedAuthoringImport& Prepared,
@@ -1136,6 +1135,8 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 					TArray<FString> BlueprintUnitIds;
 					FWorkspaceError ProjectionError;
 					TSharedPtr<FJsonObject> ClassSettingsDocument;
+					TSharedPtr<FJsonObject> BlueprintSurfaces = MakeShared<FJsonObject>();
+					if (!HasOnlyRootPropertyIntents(*Prepared.GetWorkspace())) {
 					for (const auto& Change : Prepared.GetChangeSetDraft().GetChanges())
 					{
 						if (Change.GetIdentity().GetSemanticId() !=
@@ -1260,7 +1261,6 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 						}
 						BlueprintUnitIds.Add(UnitId);
 					}
-					TSharedPtr<FJsonObject> BlueprintSurfaces;
 					if (!ProjectionError.GetCode().IsEmpty() ||
 						!UeAgentBlueprintAuthoring::TryProjectSemanticProviderExtension(Desired, BlueprintUnitIds,
 							Projection.PropertyChangesByUnitId, Projection.StructuralEdits, BlueprintSurfaces, ProjectionError,
@@ -1271,6 +1271,7 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 						OutOutcome.Diagnostic = ProjectionError.GetDiagnostic();
 						OutOutcome.Phase = TEXT("prepare");
 						return false;
+					}
 					}
 					UeAgentAnimationAuthoring::FAssetApplyRequest ApplyRequest;
 					ApplyRequest.Kind = AssetKind;
@@ -1723,7 +1724,8 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FPreparedWorkspaceExport* PreparedExport)
 		{
 			FString WorkspacePath;
 			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
@@ -1751,7 +1753,7 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 			}
 			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
 			FString ExportError;
-			if (!UeAgentAnimationAuthoring::ExportAssetWorkspace(*Profile, *Blueprint, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			if (!UeAgentAnimationAuthoring::ExportAssetWorkspace(*Profile, *Blueprint, WorkspacePath, TEXT("llm_authoring"), ExportResult, PreparedExport))
 			{
 				OutError.SetFailure(ExportResult.Diagnostic, Target);
 				return false;
@@ -1767,7 +1769,8 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -1805,7 +1808,7 @@ namespace UE::UAI::DomainAdapters::AnimationBlueprint
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
 			bOutReadOnly = true;
-			return ReturnResult(TryExport(Target, Params, OutPayloadJson, OutError));
+			return ReturnResult(TryExport(Target, Params, OutPayloadJson, OutError, PreparedExport));
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{

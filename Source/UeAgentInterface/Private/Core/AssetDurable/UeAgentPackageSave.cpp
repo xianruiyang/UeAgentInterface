@@ -6,6 +6,7 @@
 #include "Engine/World.h"
 #include "LevelUtils.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "HAL/FileManager.h"
 #include "Logging/LogMacros.h"
 #include "Misc/PackageName.h"
@@ -18,7 +19,7 @@
 
 namespace UE::UAI::AssetDurable
 {
-	void RefreshPublishedPackageFiles(const TArray<FString>& Filenames)
+	static void RefreshPackageFiles(const TArray<FString>& Filenames, bool bPublishSavedRows)
 	{
 		TArray<FString> PackageFiles;
 		for (const FString& Filename : Filenames)
@@ -30,10 +31,28 @@ namespace UE::UAI::AssetDurable
 				&& FPackageName::TryConvertFilenameToLongPackageName(Filename, PackageName))
 				PackageFiles.AddUnique(FPaths::ConvertRelativePathToFull(Filename));
 		}
-		// ScanModifiedAssetFiles removes old registry rows when a file vanished,
-		// and discovers new package files without waiting for a directory watcher.
-		if (!PackageFiles.IsEmpty()) FAssetRegistryModule::GetRegistry().ScanModifiedAssetFiles(PackageFiles);
+		if (PackageFiles.IsEmpty()) return;
+		auto& Registry = FAssetRegistryModule::GetRegistry();
+		TArray<FAssetData> PublishedAssets;
+		if (bPublishSavedRows)
+		{
+			for (const FString& PackageFile : PackageFiles)
+			{
+				if (!IFileManager::Get().FileExists(*PackageFile)) continue;
+				// The verified final package, including a restored before image, is authoritative.
+				// A rescan alone retains overlapping tags supplied by a previously loaded asset.
+				IAssetRegistry::FLoadPackageRegistryData Saved;
+				Registry.LoadPackageRegistryData(PackageFile, Saved);
+				PublishedAssets.Append(MoveTemp(Saved.Data));
+			}
+		}
+		if (!PublishedAssets.IsEmpty()) Registry.AssetsSaved(MoveTemp(PublishedAssets));
+		// Preserve native discovery, dependency scanning, and removal of vanished rows.
+		Registry.ScanModifiedAssetFiles(PackageFiles);
 	}
+
+	void RefreshPublishedPackageFiles(const TArray<FString>& Filenames) { RefreshPackageFiles(Filenames, true); }
+	void RescanPackageFiles(const TArray<FString>& Filenames) { RefreshPackageFiles(Filenames, false); }
 
 	void ReleaseLoadedPackageFileForReplacement(const FString& Filename)
 	{

@@ -6,6 +6,7 @@
 #include "Templates/SharedPointer.h"
 
 class UObject;
+namespace UeAgentLevelAuthoring { struct FLevelPartitionReadScope; }
 
 namespace UE::UAI::DomainAdapters::ContentGraphRead
 {
@@ -115,6 +116,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 	struct UEAGENTINTERFACE_API FUeAgentContentGraphCapture
 	{
 		UObject* Owner = nullptr;
+		TSharedPtr<const UeAgentLevelAuthoring::FLevelPartitionReadScope> NativeReadScope;
 		FString DomainId;
 		FString Revision;
 		TOptional<UE::UAI::StateSemantic::FUeAgentStateRevision>
@@ -141,6 +143,29 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				FUeAgentExecutionContextRef& Context,
 			FUeAgentContentGraphCapture& OutCapture,
 			FUeAgentContentGraphReadError& OutError) = 0;
+		// A property-only query can resolve public selectors from topology before
+		// reading values. Other domains retain their existing complete capture.
+		virtual bool TryCapturePropertyTopology(
+			const UE::UAI::Discovery::FUeAgentCandidateBinding& Target,
+			const UE::UAI::ContextResource::FUeAgentExecutionContextRef& Context,
+			FUeAgentContentGraphCapture& OutCapture, bool& bDeferredProperties,
+			FUeAgentContentGraphReadError& OutError)
+		{
+			bDeferredProperties = false;
+			return TryCapture(Target, Context, OutCapture, OutError);
+		}
+		virtual bool TryCaptureSelectedProperties(FUeAgentContentGraphCapture& Capture,
+			const TSet<FString>& Owners, const TSet<FString>& Fields,
+			FUeAgentContentGraphReadError& OutError) { return true; }
+		// Item rows consume native topology/state, including their geometry,
+		// rather than every ordinary property value. Other domains keep capture.
+		virtual bool TryCaptureItemTopology(
+			const UE::UAI::Discovery::FUeAgentCandidateBinding& Target,
+			const UE::UAI::ContextResource::FUeAgentExecutionContextRef& Context,
+			FUeAgentContentGraphCapture& OutCapture, FUeAgentContentGraphReadError& OutError, bool bIncludeGeometry = true)
+		{
+			return TryCapture(Target, Context, OutCapture, OutError);
+		}
 
 		// Requested separately so ordinary authoring reads do not run native diagnostics.
 		virtual bool TryCaptureDiagnostics(

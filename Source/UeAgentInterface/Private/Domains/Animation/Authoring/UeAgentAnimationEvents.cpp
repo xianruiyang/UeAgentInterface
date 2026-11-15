@@ -13,6 +13,7 @@
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringJsonFields.h"
+#include "Utilities/AuthoringCore/UeAgentNativeNormalizationIntent.h"
 #include "Utilities/AuthoringObjectApply/UeAgentAuthoringObjectApply.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Utilities/AuthoringCore/UeAgentTimelineValueJson.h"
@@ -500,6 +501,8 @@ bool ApplyAnimationEvents(UAnimSequenceBase& Asset, const FJsonObject& Document,
     }
   }
   if (const auto Value = Document.TryGetField(TEXT("notifies"))) {
+    const bool bRecordArguments = UeAgentNativeNormalizationIntent::IsValueRecording();
+    TArray<TSharedPtr<FJsonValue>> NotifyArguments;
     TArray<HjsonWorkspace::FOrderedStructuredItemBinding> Items;
     if (!Bind(Value, Asset.Notifies.Num(), Items, Error)) {
       UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, TEXT("/notifies")); return false;
@@ -518,12 +521,19 @@ bool ApplyAnimationEvents(UAnimSequenceBase& Asset, const FJsonObject& Document,
             TEXT("/notifies/") + FString::FromInt(Notifies.Num())); return false;
       }
       const auto RowObject = Json->AsObject();
+      TSharedPtr<FJsonObject> Arguments;
+      if (bRecordArguments) {
+        Arguments = Item.CapturedIndex == INDEX_NONE ? MakeShared<FJsonObject>() : Row(Item.CapturedIndex, Error);
+        if (!Arguments) return false;
+      }
       if (const auto Settings = RowObject->TryGetField(TEXT("settings"))) {
         UeAgentAuthoringState::FStateSnapshot Snapshot;
         TSharedPtr<FJsonObject> Properties;
         TArray<TSharedPtr<FJsonValue>> Descriptors;
         if (!ReadNotify(Asset, Notify, Snapshot, Properties, Error)) return false;
-        if (!UeAgentDetailsAuthoringService::DecodeReadableProperties(Snapshot, Settings, Descriptors, Error)) {
+        TSharedPtr<FJsonObject> BoundSettings;
+        if (!UeAgentDetailsAuthoringService::DecodeReadableProperties(Snapshot, Settings, Descriptors, Error,
+            bRecordArguments ? &BoundSettings : nullptr)) {
           UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error,
               TEXT("/notifies/") + FString::FromInt(Notifies.Num()) + TEXT("/settings")); return false;
         }
@@ -555,6 +565,7 @@ bool ApplyAnimationEvents(UAnimSequenceBase& Asset, const FJsonObject& Document,
           UeAgentDetailsAuthoringService::LocateReadablePropertyFailure(Error, Settings,
               TEXT("/notifies/") + FString::FromInt(Notifies.Num()) + TEXT("/settings")); return false;
         }
+        if (Arguments) Arguments->SetObjectField(TEXT("settings"), BoundSettings);
       }
       double Time = Notify.GetTime(), Duration = Notify.GetDuration();
       const bool bNewNotify = Notify.Notify && Notify.Notify != PreviousNotify;
@@ -610,6 +621,12 @@ bool ApplyAnimationEvents(UAnimSequenceBase& Asset, const FJsonObject& Document,
         else Error.SourceKind = TEXT("native_result");
         return false;
       }
+      if (Arguments) {
+        if (RowObject->HasField(TEXT("time"))) Arguments->SetNumberField(TEXT("time"), Time);
+        if (RowObject->HasField(TEXT("duration"))) Arguments->SetNumberField(TEXT("duration"), Duration);
+        if (RowObject->HasField(TEXT("track_index"))) Arguments->SetNumberField(TEXT("track_index"), Notify.TrackIndex);
+        NotifyArguments.Add(MakeShared<FJsonValueObject>(Arguments));
+      }
       // Montage structure edits have already updated native linkable elements.
       // Captured times in an otherwise unchanged row must not undo that update.
       const FAnimNotifyEvent* Captured = CapturedNotifies && CapturedNotifies->IsValidIndex(Item.CapturedIndex)
@@ -629,6 +646,10 @@ bool ApplyAnimationEvents(UAnimSequenceBase& Asset, const FJsonObject& Document,
       else if (bNewState) Notify.NotifyStateClass->OnAnimNotifyCreatedInEditor(Notify);
       Notifies.Add(MoveTemp(Notify));
       NotifySources.Add(Item.CapturedIndex);
+    }
+    if (bRecordArguments) {
+      const auto Source = MakeShared<FJsonValueArray>(NotifyArguments);
+      if (!UeAgentNativeNormalizationIntent::RecordValue(TEXT("/notifies"), Source, Source, Error)) return false;
     }
     bChanged = true;
   }

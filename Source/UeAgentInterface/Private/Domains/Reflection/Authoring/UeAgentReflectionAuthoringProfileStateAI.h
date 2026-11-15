@@ -26,6 +26,8 @@ namespace UeAgentReflectionAuthoring
 			UObject& Asset,
 			TSharedPtr<FJsonValue>& OutValue,
 			UE::UAI::Contract::FDiagnostic& OutError);
+		bool Read(const FProfile& Profile, UObject& Asset, TSharedPtr<FJsonValue>& OutValue,
+			UE::UAI::Contract::FDiagnostic& OutError, TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure);
 		UEAGENTINTERFACE_API bool Apply(
 			const FProfile& Profile,
 			UObject& Asset,

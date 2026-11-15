@@ -22,7 +22,8 @@ namespace UE::UAI::CommandHandlers::AnimationCurve
 				Request.GetCanonicalParamsJson(),
 				Payload,
 				bReadOnly,
-				OutError))
+				OutError,
+				Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

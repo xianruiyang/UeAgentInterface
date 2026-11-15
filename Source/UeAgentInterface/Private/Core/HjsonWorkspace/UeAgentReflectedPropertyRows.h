@@ -34,6 +34,11 @@ namespace UE::UAI::HjsonWorkspace
 		const TArray<FReadablePropertySchema>& Schema,
 		TArray<FResolvedReadableProperty>& OutRows,
 		StateSemantic::FUeAgentStateSemanticError& OutError);
+	/** One row of the same type/value/optional-definition contract, without a category wrapper. */
+	UEAGENTINTERFACE_API bool TryReadReadablePropertyRow(
+		const StateSemantic::FUeAgentCanonicalValue& Descriptor, const FReadablePropertySchema& Schema,
+		StateSemantic::FUeAgentCanonicalValuePtr& OutValue,
+		StateSemantic::FUeAgentStateSemanticError& OutError, const FString& Path);
 	UEAGENTINTERFACE_API bool TryAddReadablePropertyRow(
 		const TSharedRef<FJsonObject>& Categories, const FReadablePropertySchema& Schema,
 		const TSharedPtr<FJsonValue>& Value);

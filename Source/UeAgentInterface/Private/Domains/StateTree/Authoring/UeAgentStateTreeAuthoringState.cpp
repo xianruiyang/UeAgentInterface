@@ -20,6 +20,7 @@
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
 #include "UObject/UnrealType.h"
+#include "UObject/Package.h"
 
 namespace UeAgentStateTreeAuthoring
 {
@@ -375,6 +376,12 @@ namespace UeAgentStateTreeAuthoring
 
 	bool ReadTreeDocument(UStateTree& Tree, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		return ReadTreeDocument(Tree, OutValue, OutError, nullptr);
+	}
+
+	bool ReadTreeDocument(UStateTree& Tree, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError,
+		TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
+	{
 		OutValue.Reset();
 		OutError.Reset();
 		const auto Document = MakeShared<FJsonObject>();
@@ -385,9 +392,10 @@ namespace UeAgentStateTreeAuthoring
 		if (Data)
 		{
 			TArray<UeAgentAuthoringState::FReadRequest> Requests;
-			if (!AppendStructuralReadRequests(*Data, Tree.GetPathName(), Requests, OutError)) return false;
-			// The durable document is not the editable projection: retain nested native identities.
-			for (auto& Request : Requests) Request.Limits.StructFieldFilter = nullptr;
+			const FString AssetPath = OutStructure ? Tree.GetOutermost()->GetName() : Tree.GetPathName();
+			if (!AppendStructuralReadRequests(*Data, AssetPath, Requests, OutError)) return false;
+			for (auto& Request : Requests)
+				if (Request.SemanticId == ItemPropertySemanticId) Request.Limits.bApplyAuthoringStructFieldPolicy = false;
 			UeAgentAuthoringState::FCaptureResult Capture;
 			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
 			{
@@ -399,6 +407,8 @@ namespace UeAgentStateTreeAuthoring
 				if (Entry.SemanticId == ItemSemanticId)
 					Items->SetField(Entry.TargetIdentity.GetSelector(TEXT("node_id")), UeAgentAuthoringState::CloneCanonicalValue(Entry.Value));
 			TMap<FString, TArray<UeAgentAuthoringState::FStateEntry>> Properties;
+			UeAgentDetailsAuthoringService::FProjectionPolicy Checkpoint;
+			Checkpoint.bRequireEditable = false;
 			for (const auto& Entry : Entries)
 				if (Entry.SemanticId == ItemPropertySemanticId)
 					Properties.FindOrAdd(Entry.TargetIdentity.GetSelector(TEXT("node_id"))).Add(Entry);
@@ -416,10 +426,12 @@ namespace UeAgentStateTreeAuthoring
 					return false;
 				}
 				TSharedPtr<FJsonObject> PropertyDocument;
-				if (!UeAgentDetailsAuthoringService::BuildPropertiesDocument(Pair.Value, {}, PropertyDocument, OutError)) return false;
+				if (!UeAgentDetailsAuthoringService::BuildPropertiesDocument(Pair.Value, Checkpoint, PropertyDocument, OutError)) return false;
 				(*Item)->SetObjectField(TEXT("properties"), PropertyDocument);
 			}
+			if (OutStructure) OutStructure->Emplace(MoveTemp(Capture.Snapshot));
 		}
+		else if (OutStructure) OutStructure->Emplace();
 		Document->SetObjectField(TEXT("items"), Items);
 		OutValue = MakeShared<FJsonValueObject>(Document);
 		return true;

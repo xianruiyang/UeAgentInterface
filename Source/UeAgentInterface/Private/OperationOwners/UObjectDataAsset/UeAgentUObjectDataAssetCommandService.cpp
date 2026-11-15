@@ -1,4 +1,5 @@
 #include "OperationOwners/UObjectDataAsset/UeAgentUObjectDataAssetCommandService.h"
+#include "Core/HjsonWorkspace/UeAgentWorkspaceRefresh.h"
 
 #include "Dom/JsonValue.h"
 
@@ -20,7 +21,6 @@
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonImportInitialization.h"
-#include "Core/HjsonWorkspace/SemanticModel/UeAgentUnifiedHjsonSemanticModel.h"
 #include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
@@ -222,93 +222,6 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 		FUeAgentResourceTracker MakeResources()
 		{
 			return FUeAgentResourceTracker();
-		}
-
-		FSemanticUnit Unit(
-			FString UnitId,
-			const ESemanticUnitKind Kind,
-			FString Owner,
-			FString Role)
-		{
-			return FSemanticUnit(
-				MoveTemp(UnitId),
-				Kind,
-				MoveTemp(Owner),
-				TEXT("uai.uobject_dataasset.recursive.semantic/1"),
-				MoveTemp(Role),
-				FString(),
-				{},
-				{},
-				{},
-				FString(),
-				FString(),
-				{},
-				{TEXT("state"), TEXT("minimal_create"), TEXT("local_edit")},
-				TEXT("strict_v2:t13:current-design"));
-		}
-
-		bool TryBuildSemanticModel(
-			FUnifiedHjsonSemanticModelPtr& OutModel,
-			FWorkspaceError& OutError)
-		{
-			const TArray<FString> Ids{
-				TEXT("target"), TEXT("property"), TEXT("member"),
-				TEXT("structure"), TEXT("item"), TEXT("endpoint"),
-				TEXT("relation"), TEXT("order"), TEXT("layout"),
-				TEXT("temporal"), TEXT("spatial"), TEXT("external"),
-			};
-			TArray<FSemanticUnit> Units{
-				Unit(Ids[0], ESemanticUnitKind::TargetState, FString(), TEXT("target")),
-				Unit(Ids[1], ESemanticUnitKind::PropertySet, Ids[0], TEXT("property_set")),
-				Unit(Ids[2], ESemanticUnitKind::EntityState, Ids[0], TEXT("member")),
-				Unit(Ids[3], ESemanticUnitKind::StructureState, Ids[0], TEXT("structure")),
-				Unit(Ids[4], ESemanticUnitKind::ItemState, Ids[3], TEXT("item")),
-				Unit(Ids[5], ESemanticUnitKind::EntityState, Ids[4], TEXT("endpoint")),
-				Unit(Ids[6], ESemanticUnitKind::RelationSet, Ids[3], TEXT("relation")),
-				Unit(Ids[7], ESemanticUnitKind::OrderingState, Ids[3], TEXT("order")),
-				Unit(Ids[8], ESemanticUnitKind::LayoutState, Ids[3], TEXT("layout")),
-				Unit(Ids[9], ESemanticUnitKind::PropertySet, Ids[0], TEXT("temporal_contract")),
-				Unit(Ids[10], ESemanticUnitKind::PropertySet, Ids[0], TEXT("spatial_contract")),
-				Unit(Ids[11], ESemanticUnitKind::ExternalPayloadState, Ids[0], TEXT("external_input")),
-			};
-			FUeAgentResourceTracker CoreResources = MakeResources();
-			FAuthoringModelPtr Core;
-			if (!TryCompileAuthoringModel(
-					TEXT("uai.uobject_dataasset.recursive.hjson"),
-					1,
-					TEXT("unified"),
-					TEXT("strict-v2-r25"),
-					MoveTemp(Units),
-					{Ids[0]},
-					CoreResources,
-					Core,
-					OutError)
-				|| !Core.IsValid())
-			{
-				return false;
-			}
-			TMap<EUnifiedHjsonCompositionKind, TArray<FString>> Compositions{
-				{EUnifiedHjsonCompositionKind::Target, {Ids[0]}},
-				{EUnifiedHjsonCompositionKind::PropertySet, {Ids[1]}},
-				{EUnifiedHjsonCompositionKind::MemberSet, {Ids[2]}},
-				{EUnifiedHjsonCompositionKind::Structure, {Ids[3]}},
-				{EUnifiedHjsonCompositionKind::Item, {Ids[4]}},
-				{EUnifiedHjsonCompositionKind::Endpoint, {Ids[5]}},
-				{EUnifiedHjsonCompositionKind::Relation, {Ids[6]}},
-				{EUnifiedHjsonCompositionKind::Order, {Ids[7]}},
-				{EUnifiedHjsonCompositionKind::Layout, {Ids[8]}},
-				{EUnifiedHjsonCompositionKind::TemporalContract, {Ids[9]}},
-				{EUnifiedHjsonCompositionKind::SpatialContract, {Ids[10]}},
-				{EUnifiedHjsonCompositionKind::ExternalInput, {Ids[11]}},
-			};
-			FUeAgentResourceTracker ModelResources = MakeResources();
-			return TryCreateUnifiedHjsonSemanticModel(
-				Core.ToSharedRef(),
-				EUnifiedHjsonAuthoringIntent::MinimalCreate,
-				MoveTemp(Compositions),
-				ModelResources,
-				OutModel,
-				OutError);
 		}
 
 		struct FNodeValues final
@@ -908,14 +821,6 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 				}
 			}
 
-			FUnifiedHjsonSemanticModelPtr Model;
-			if (!TryBuildSemanticModel(Model, WorkspaceError)
-				|| !Model.IsValid())
-			{
-				return Fail(OutError, WorkspaceError.HasErrors() ? WorkspaceError.GetDiagnostic()
-					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("uobject_dataasset_semantic_model_failed"),
-						TEXT("The data asset input could not be converted into a semantic model."), TEXT("command_execute")));
-			}
 
 			TArray<FImportChange> Changes;
 			TArray<FInitializationNode> InitializationNodes;
@@ -955,7 +860,6 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 
 			const FImportInitializationPlanningRequest PlanningRequest(
 				OutPrepared.SourceCarrier,
-				Model.ToSharedRef(),
 				OutPrepared.Target,
 				FUeAgentStateRevision(TEXT("uobject-dataasset"), TEXT("absent"), 0),
 				OutPrepared.SemanticFingerprint,
@@ -1823,7 +1727,8 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 					TEXT("reflection_profile_registered"), false, true, Asset.GetPathName()), ReflectionProfileId);
 				FWorkspaceError WorkspaceError;
 				if (!Composition::HjsonImport::TryExportReflectionRootWorkspace(
-					*Profile, Asset.GetPathName(), WorkspacePath, OutResponse.PayloadJson, WorkspaceError))
+					*Profile, Asset.GetPathName(), WorkspacePath, OutResponse.PayloadJson, WorkspaceError,
+					Request.WorkspaceExportPreparation.Get()))
 					return FailWithTerminalFacts(OutError, WorkspaceError.GetDiagnostic());
 				OutResponse.bReadOnly = true;
 				return true;
@@ -1899,6 +1804,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 				FUeAgentResourceTracker Resources =
 					MakeSemanticWorkspaceResourceTracker();
 				FResolvedContentGraphImportSourcePtr ResolvedSource;
+				FResolvedSemanticWorkspacePtr ValidatedWorkspace;
 				FWorkspaceError WorkspaceError;
 				FString SourceKind;
 				const bool bHasSourceKind =
@@ -1917,7 +1823,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 						bHasExpectedRevision ? ExpectedRevision : FString(),
 						Resources,
 						ResolvedSource,
-						WorkspaceError)
+						WorkspaceError, ValidatedWorkspace)
 					: TryLoadContentGraphImportSource(
 						*SourceObject,
 						Target,
@@ -1931,10 +1837,13 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 				}
 				if (ResolvedSource->IsSemanticWorkspaceDirectory())
 				{
-					FResolvedSemanticWorkspacePtr Workspace;
-					if (!TryLoadHjsonImportSource(FWorkspaceSource::Directory(ResolvedSource->GetSourceUnit()),
-						ESemanticWorkspaceMode::State, Resources, Workspace, WorkspaceError)
-						|| !Registry.TryResolveWorkspaceRootType(Workspace->GetModel().Get(), Target, RootTypeIdentity, WorkspaceError))
+					// Consume the model that just proved this normalized envelope,
+					// rather than rereading the directory solely to select its route.
+					if ((!ValidatedWorkspace.IsValid() && !TryLoadHjsonImportSource(
+						FWorkspaceSource::Directory(ResolvedSource->GetSourceUnit()),
+						ESemanticWorkspaceMode::State, Resources, ValidatedWorkspace, WorkspaceError))
+						|| !ValidatedWorkspace.IsValid()
+						|| !Registry.TryResolveWorkspaceRootType(ValidatedWorkspace->GetModel().Get(), Target, RootTypeIdentity, WorkspaceError))
 						return FailWithTerminalFacts(OutError, WorkspaceError.GetDiagnostic());
 					if (RootTypeIdentity.IsEmpty())
 					{
@@ -2255,6 +2164,8 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 					+ Request.GetCanonicalParamsJson());
 				DomainRequest.CanonicalParamsJson =
 					Request.GetCanonicalParamsJson();
+				DomainRequest.WorkspaceExportPreparation = Request.GetWorkspaceExportPreparation();
+				DomainRequest.WorkspaceProfileId = Request.GetWorkspaceProfileId();
 				FUeAgentUObjectDataAssetCommandResponse DomainResponse;
 				FUeAgentUObjectDataAssetCommandError DomainError;
 				FProductionService Service;
@@ -2543,17 +2454,27 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 						{{TEXT("state_entry_count"), Snapshot->GetEntries().Num()}},
 						*Resources,
 						Plan,
-						WorkspaceError)
+						WorkspaceError, Request.WorkspaceExportPreparation.Get())
 					|| !Plan.IsValid())
 				{
 					return FailWithTerminalFacts(OutError, WorkspaceError.GetDiagnostic());
 				}
 				FArtifactPublishReceipt Receipt;
 				FArtifactPublishError PublishError;
+				if (Request.WorkspaceExportPreparation && Request.WorkspaceExportPreparation->bPrepareOnly) {
+					Request.WorkspaceExportPreparation->Plan = Plan;
+					Request.WorkspaceExportPreparation->PublisherOwnerId = Request.WorkspaceExportPreparation->SourcePublisherOwnerId.IsEmpty()
+						? TEXT("content_graph.export_workspace") : Request.WorkspaceExportPreparation->SourcePublisherOwnerId;
+					OutResponse.PayloadJson = TEXT("{\"status\":\"prepared\"}");
+					OutResponse.bReadOnly = true;
+					return true;
+				}
+				const FString Publisher = Request.WorkspaceExportPreparation && !Request.WorkspaceExportPreparation->SourcePublisherOwnerId.IsEmpty()
+					? Request.WorkspaceExportPreparation->SourcePublisherOwnerId : FString(TEXT("content_graph.export_workspace"));
+				FArtifactPublishRequest PublishRequest(Plan.ToSharedRef(), WorkspacePath, Publisher);
+				ConfigureWorkspacePublication(Request.WorkspaceExportPreparation.Get(), PublishRequest);
 				if (!TryPublishExportPlan(
-						FArtifactPublishRequest(
-							Plan.ToSharedRef(), WorkspacePath,
-							TEXT("content_graph.export_workspace")),
+						PublishRequest,
 						*Resources,
 						Receipt,
 						PublishError))

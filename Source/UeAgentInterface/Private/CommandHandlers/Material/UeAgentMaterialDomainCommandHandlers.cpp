@@ -100,7 +100,7 @@ namespace UE::UAI::CommandHandlers::Material
 		if (!DomainAdapters::Material::TryExecuteContentGraph(
 				Request.GetCommandId(), Request.GetTargetIdentity(),
 				Request.GetRootTypeIdentity(),
-				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError, Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

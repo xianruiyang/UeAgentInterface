@@ -53,9 +53,12 @@ namespace UeAgentBehaviorTreeAuthoring
 
 	// Read the native graph without creating, reconstructing or compiling it.
 	UEAGENTINTERFACE_API bool CaptureGraph(const UBehaviorTree& Tree, FGraphCapture& OutCapture, UE::UAI::Contract::FDiagnostic& OutError);
+	bool CaptureGraph(const UBehaviorTree& Tree, FGraphCapture& OutCapture, UE::UAI::Contract::FDiagnostic& OutError,
+		bool bDeferExportedProperties);
 	bool CaptureGraphContents(const UEdGraph& Graph, FGraphContents& OutCapture, UE::UAI::Contract::FDiagnostic& OutError);
 	bool CaptureNode(const UEdGraphNode& Node, FNodeCapture& OutCapture, UE::UAI::Contract::FDiagnostic& OutError);
 	const UObject* GetNodePropertyObject(const UEdGraphNode& Node);
+	const UObject* GetExportedNodePropertyObject(const UEdGraphNode& Node);
 	// One authored binding, with the native Root editor projection kept in sync.
 	void BindBlackboard(UBehaviorTree& Tree, UBlackboardData* Blackboard);
 

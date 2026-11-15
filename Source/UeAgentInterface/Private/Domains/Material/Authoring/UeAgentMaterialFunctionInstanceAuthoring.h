@@ -4,12 +4,13 @@
 #include "CoreMinimal.h"
 class UMaterialFunctionInstance;
 class FJsonValue;
-namespace UeAgentMaterialAuthoring { struct FInstanceParameterEdit; }
+namespace UeAgentMaterialAuthoring { struct FInstanceParameterEdit; struct FInstanceParameterDefault; }
 
 namespace UeAgentMaterialAuthoring::FunctionInstance
 {
 bool Read(UMaterialFunctionInstance& Asset, TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& Error,
-    TArray<TSharedPtr<FJsonValue>>* Definitions = nullptr);
+    TArray<TSharedPtr<FJsonValue>>* Definitions = nullptr,
+    TArray<FInstanceParameterDefault>* Defaults = nullptr);
 bool Apply(UMaterialFunctionInstance& Asset, const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& Error,
     TArray<FInstanceParameterEdit>* OutIntent = nullptr);
 bool VerifyParameters(UMaterialFunctionInstance& Asset, const TArray<FInstanceParameterEdit>& Intent, UE::UAI::Contract::FDiagnostic& Error);

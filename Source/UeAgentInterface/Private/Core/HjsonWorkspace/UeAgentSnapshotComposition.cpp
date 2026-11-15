@@ -109,7 +109,7 @@ namespace UE::UAI::HjsonWorkspace
 		TMap<FString, int64> Telemetry,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FExportWorkspacePlanPtr& OutPlan,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError, FPreparedWorkspaceExport* ExportSettings)
 	{
 		OutPlan.Reset();
 		FAuthoringModelPtr Model;
@@ -122,6 +122,9 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return false;
 		}
+		const FCompositionSnapshotBinding Binding{Request.GetSnapshot()->GetSnapshotId(),
+			Request.GetSnapshot()->GetRevision(), Request.GetSnapshot()->GetProvenance().GetEvidenceId()};
+		if (!TryPrepareCompositionExportState(Request.GetTargetKind(), *Model, Binding, Resources, ExportSettings, OutError)) return false;
 		return TryBuildCompositionExportPlan(
 			Model.ToSharedRef(),
 			{
@@ -133,6 +136,6 @@ namespace UE::UAI::HjsonWorkspace
 			MoveTemp(Telemetry),
 			Resources,
 			OutPlan,
-			OutError, Request.GetTargetKind());
+			OutError, Request.GetTargetKind(), ExportSettings);
 	}
 }

@@ -191,6 +191,13 @@ namespace UeAgentReflectionAuthoring::ProfileStateSequenceStateTree
 		bool& bOutAuthoringVisible,
 		UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		return Read(Profile, Asset, SemanticAssetPath, OutValue, bOutAuthoringVisible, OutError, nullptr);
+	}
+
+	bool Read(const FProfile& Profile, UObject& Asset, const FString& SemanticAssetPath, TSharedPtr<FJsonValue>& OutValue,
+		bool& bOutAuthoringVisible, UE::UAI::Contract::FDiagnostic& OutError,
+		TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
+	{
 		OutValue.Reset();
 		bOutAuthoringVisible = true;
 		OutError.Reset();
@@ -204,7 +211,7 @@ namespace UeAgentReflectionAuthoring::ProfileStateSequenceStateTree
 		{
 			UStateTree* Tree = Cast<UStateTree>(&Asset);
 			if (!Tree) { OutError = ProfileState::TargetFailure(TEXT("state_tree_asset_type_invalid"), Asset, *UStateTree::StaticClass()); return false; }
-			return UeAgentStateTreeAuthoring::ReadTreeDocument(*Tree, OutValue, OutError);
+			return UeAgentStateTreeAuthoring::ReadTreeDocument(*Tree, OutValue, OutError, OutStructure);
 		}
 		default:
 			return FailUnsupported(Profile, OutError);

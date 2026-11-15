@@ -18,6 +18,8 @@ namespace UeAgentSmartObjectAuthoring
 	// Frozen native document; public authoring uses the composition projection instead.
 	UEAGENTINTERFACE_API bool ReadDefinitionDocument(const USmartObjectDefinition& Definition,
 		TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError);
+	bool ReadDefinitionDocument(const USmartObjectDefinition& Definition, TSharedPtr<FJsonValue>& OutValue,
+		UE::UAI::Contract::FDiagnostic& OutError, TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure);
 	// The caller must reconstruct structure before replaying captured properties.
 	UEAGENTINTERFACE_API bool ApplyDefinitionDocumentProperties(USmartObjectDefinition& Definition,
 		const TSharedPtr<FJsonValue>& Document, UE::UAI::Contract::FDiagnostic& OutError, UPackage* TextIdentityPackage = nullptr);

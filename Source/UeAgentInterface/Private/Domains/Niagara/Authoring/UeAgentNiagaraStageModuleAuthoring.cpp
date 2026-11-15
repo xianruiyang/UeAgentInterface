@@ -1163,6 +1163,11 @@ namespace UeAgentNiagaraStageModuleAuthoring
 		}
 		else if (UNiagaraScript* Script = Cast<UNiagaraScript>(&Asset))
 		{
+			// Standalone function and dynamic-input outputs have native graphs but
+			// no authorable Parameter Map stack. Their root remains observable.
+			if (Script->GetUsage() == ENiagaraScriptUsage::Function
+				|| Script->GetUsage() == ENiagaraScriptUsage::DynamicInput)
+				return true;
 			AppendStagesFromSource(
 				Asset,
 				nullptr,

@@ -1,9 +1,13 @@
 #include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
+#include "Core/HjsonWorkspace/UeAgentWorkspacePublication.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonDiagnostic.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonValidatedHeader.h"
 
 #include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
 #include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
+#include "Core/HjsonWorkspace/UeAgentCommittedWorkspaceExport.h"
+#include "Core/HjsonWorkspace/UeAgentWorkspaceFileProof.h"
+#include "Core/ArtifactPublisher/UeAgentArtifactPublisher.h"
 #include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -383,7 +387,10 @@ namespace UE::UAI::HjsonWorkspace
 			FSourceVersionSnapshot& OutSnapshot,
 			FWorkspaceError& OutError)
 		{
-			const int64 Size = IFileManager::Get().FileSize(*File);
+			// One native stat supplies the same size/last-write pair. This does not
+			// prove content or namespace continuity; reparse and fences stay separate.
+			const FFileStatData Stat = FPlatformFileManager::Get().GetPlatformFile().GetStatData(*File);
+			const int64 Size = Stat.bIsValid ? Stat.FileSize : IFileManager::Get().FileSize(*File);
 			if (Size < 0)
 			{
 				return Fail(
@@ -394,7 +401,7 @@ namespace UE::UAI::HjsonWorkspace
 			OutSnapshot.Files.Add({
 				File,
 				Size,
-				IFileManager::Get().GetTimeStamp(*File).GetTicks(),
+				(Stat.bIsValid ? Stat.ModificationTime : IFileManager::Get().GetTimeStamp(*File)).GetTicks(),
 			});
 			return true;
 		}
@@ -404,6 +411,7 @@ namespace UE::UAI::HjsonWorkspace
 			FSourceVersionSnapshot& OutSnapshot,
 			FWorkspaceError& OutError)
 		{
+			const double Started = FPlatformTime::Seconds();
 			const FString Root = NormalizedFullPath(SourcePath, true);
 			if (!IFileManager::Get().DirectoryExists(*Root))
 			{
@@ -420,6 +428,12 @@ namespace UE::UAI::HjsonWorkspace
 					Root, TEXT("/source/path"), MakeShared<FJsonValueString>(Root));
 			}
 			TArray<FString> Files;
+			// Legacy directory documents use this namespace observation. Semantic
+			// imports validate their actual consumed files through the resolver.
+			TUniquePtr<FWorkspaceReadPathScope> PathScope = MakeUnique<FWorkspaceReadPathScope>(Root);
+			if (PathScope && PathScope->IsRejected())
+				return Fail(OutError, TEXT("workspace_reparse_point_rejected"), TEXT("The workspace root is no longer an ordinary directory."), Root);
+			const bool bRelativeObservation = PathScope && PathScope->IsAvailable();
 			IFileManager::Get().FindFilesRecursive(
 				Files,
 				*Root,
@@ -440,14 +454,38 @@ namespace UE::UAI::HjsonWorkspace
 						TEXT("workspace_path_escape"), TEXT("A discovered source file is outside the workspace directory."),
 						File);
 				}
-				if (!RejectReparseAncestors(Root, File, OutError)
+				if (bRelativeObservation)
+				{
+					if (!PathScope->Observe(File, [&](void* Handle, int64 Size, int64 Ticks) {
+						OutSnapshot.Files.Add({File, Size, Ticks}); return true;
+					})) {
+						// Preserve the existing reparse diagnostic, but never retry a
+						// rejected relative read through an absolute-path content open.
+						if (!RejectReparseAncestors(Root, File, OutError)) return false;
+						return Fail(OutError, TEXT("workspace_source_version_changed"),
+							TEXT("A source file changed or could not be observed through its current ordinary path."), File);
+					}
+				}
+				else if (!RejectReparseAncestors(Root, File, OutError)
 					|| !AddFileStamp(File, OutSnapshot, OutError))
 				{
 					return false;
 				}
 			}
+			if (bRelativeObservation && !PathScope->IsCurrent())
+				return Fail(OutError, TEXT("workspace_source_version_changed"), TEXT("The workspace root binding changed during source observation."), Root);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=source_namespace_snapshot files=%d seconds=%.6f relative=%s source_acceptance=%s current_handles_reused=%d current_handles_opened=%d"),
+				OutSnapshot.Files.Num(), FPlatformTime::Seconds() - Started,
+				bRelativeObservation ? TEXT("true") : TEXT("false"), TEXT("false"),
+				PathScope->GetReusedCurrentHandles(), PathScope->GetOpenedCurrentHandles());
 			return true;
 		}
+
+		struct FDeferredSemanticDirectoryRead
+		{
+			FString Root;
+			FString ClassifiedManifestHash;
+		};
 
 		bool CaptureSourceVersion(
 			const FWorkspaceSource& Source,
@@ -623,7 +661,7 @@ namespace UE::UAI::HjsonWorkspace
 			const double ParseStarted = FPlatformTime::Seconds();
 			FString ProvenSchema;
 			TMap<EUeAgentResourceDimension, int64> ProvenCharges;
-			if (TryReuseParsedHjsonRootString(ManifestContentHash, TEXT("workspace_schema"), ProvenSchema, ProvenCharges)
+			if (TryReuseHjsonRootString(ManifestContentHash, TEXT("workspace_schema"), ProvenSchema, &ProvenCharges)
 				&& ProvenSchema.Equals(GetSemanticWorkspaceSchemaId(), ESearchCase::CaseSensitive))
 			{
 				FUeAgentResourceChargeError Error;
@@ -662,8 +700,18 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return false;
 			}
-			if (Schema == GetSemanticWorkspaceSchemaId())
+			if (IsSupportedSemanticWorkspaceSchema(Schema))
 			{
+				if (IsGenerationWorkspaceSchema(Schema)) {
+					FString State, Generation;
+					if (!RequiredString(Root, TEXT("publication_state"), State, OutError)
+						|| !RequiredString(Root, TEXT("publication_generation"), Generation, OutError)) return false;
+					if (State != TEXT("committed") || Generation.IsEmpty()) {
+						OutError.SetSourceFailure(TEXT("workspace_publication_busy"),
+							TEXT("The workspace has no complete committed generation. Retry after publication or recover its transaction."), ManifestPath);
+						return false;
+					}
+				}
 				bOutSemanticWorkspace = true;
 				{
 					TMap<EUeAgentResourceDimension, int64> ParseCharges;
@@ -805,7 +853,8 @@ namespace UE::UAI::HjsonWorkspace
 			const FString& ExpectedTargetIdentity,
 			FUeAgentResourceTracker& Resources,
 			FResolvedContentGraphImportSourcePtr& OutSource,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			TOptional<FDeferredSemanticDirectoryRead>* DeferredSemanticRead = nullptr)
 		{
 			const FString Root = NormalizedFullPath(SourcePath, true);
 			if (!FPaths::IsRelative(SourcePath) && !IFileManager::Get().DirectoryExists(*Root))
@@ -827,11 +876,6 @@ namespace UE::UAI::HjsonWorkspace
 					OutError,
 					TEXT("content_graph_workspace_manifest_missing"), TEXT("The directory has no workspace metadata; export the workspace before importing it."),
 					ManifestPath);
-			}
-			FSourceVersionSnapshot Before;
-			if (!CaptureDirectory(Root, Before, OutError))
-			{
-				return false;
 			}
 			FString ManifestText;
 			TArray<uint8> ManifestBytes;
@@ -865,14 +909,11 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			if (bSemanticWorkspace)
 			{
-				FSourceVersionSnapshot After;
-				if (!CaptureDirectory(Root, After, OutError)) return false;
-				if (!(Before == After))
+				if (DeferredSemanticRead)
 				{
-					return Fail(
-						OutError,
-						TEXT("workspace_source_version_changed"), TEXT("Workspace source files changed while they were being loaded."),
-						Root);
+					// This header supplied the target/schema classification. The later
+					// semantic read consumes its exact content beside its other inputs.
+					DeferredSemanticRead->Emplace(FDeferredSemanticDirectoryRead{Root, Sha256Text(ManifestText)});
 				}
 				OutSource = MakeShared<FResolvedContentGraphImportSource>(
 					EWorkspaceSourceKind::Directory,
@@ -886,105 +927,9 @@ namespace UE::UAI::HjsonWorkspace
 					true);
 				return true;
 			}
-			TSet<FString> DeclaredIdentities;
-			TArray<FContentGraphImportDocument> Documents;
-			FString FingerprintMaterial = Sha256(ManifestBytes);
-			for (const TPair<FString, FString>& Declared : DeclaredFiles)
-			{
-				const FString FullPath = NormalizedFullPath(
-					FPaths::Combine(Root, Declared.Key),
-					false);
-				if (!IsWithinRoot(Root, FullPath))
-					return Fail(OutError, TEXT("workspace_path_escape"), TEXT("A declared source file resolves outside the workspace directory."), FullPath);
-				if (!RejectReparseAncestors(Root, FullPath, OutError))
-				{
-					return false;
-				}
-				FString Document;
-				TArray<uint8> Bytes;
-				if (!TryReadUtf8File(
-						FullPath,
-						Resources,
-						Document,
-						Bytes,
-						OutError))
-				{
-					return false;
-				}
-				const FString ActualHash = Sha256(Bytes);
-				if (ActualHash != Declared.Value)
-				{
-					return FailEvidence(
-						OutError,
-						TEXT("content_graph_workspace_digest_mismatch"), TEXT("The source document content does not match its recorded workspace digest."),
-						FullPath, Declared.Value, ActualHash);
-				}
-				DeclaredIdentities.Add(Declared.Key.ToLower());
-				FingerprintMaterial += TEXT("|") + Declared.Key
-					+ TEXT("|") + ActualHash;
-				Documents.Emplace(Declared.Key, MoveTemp(Document), ActualHash);
-			}
-			TArray<FString> ActualFiles;
-			IFileManager::Get().FindFilesRecursive(
-				ActualFiles,
-				*Root,
-				TEXT("*.hjson"),
-				true,
-				false);
-			for (FString Actual : ActualFiles)
-			{
-				Actual = NormalizedFullPath(Actual, false);
-				FString Relative = Actual;
-				FString RelativeRoot = Root;
-				if (!RelativeRoot.EndsWith(TEXT("/")))
-				{
-					RelativeRoot += TEXT("/");
-				}
-				if (!FPaths::MakePathRelativeTo(Relative, *RelativeRoot))
-				{
-					return Fail(OutError, TEXT("workspace_path_escape"), TEXT("A source file cannot be resolved relative to the workspace directory."), Actual);
-				}
-				FPaths::NormalizeFilename(Relative);
-				if (!Relative.Equals(
-						ContentGraphWorkspaceManifest,
-						ESearchCase::IgnoreCase)
-					&& !DeclaredIdentities.Contains(Relative.ToLower()))
-				{
-					return Fail(
-						OutError,
-						TEXT("content_graph_workspace_file_undeclared"), TEXT("An HJSON file is present but is not declared by the workspace."),
-						Actual);
-				}
-			}
-			FSourceVersionSnapshot After;
-			if (!CaptureDirectory(Root, After, OutError)) return false;
-			if (!(Before == After))
-			{
-				return Fail(
-					OutError,
-					TEXT("workspace_source_version_changed"), TEXT("Workspace source files changed while they were being loaded."),
-					Root);
-			}
-			FString SemanticFingerprint;
-			if (!TryBuildSemanticFingerprint(
-					Documents,
-					EntryFile,
-					Resources,
-					SemanticFingerprint,
-					OutError, Root))
-			{
-				return false;
-			}
-			OutSource = MakeShared<FResolvedContentGraphImportSource>(
-				EWorkspaceSourceKind::Directory,
-				Root,
-				ExpectedTargetIdentity,
-				MoveTemp(BaseRevision),
-				MoveTemp(EntryFile),
-				Sha256Text(FingerprintMaterial),
-				MoveTemp(SemanticFingerprint),
-				MoveTemp(Documents));
-			return true;
+			return FailWorkspaceDataflowHandoff(OutError, TEXT("source.directory_classification"),
+				TEXT("direct semantic workspace header"), ManifestPath, TEXT("legacy content-graph directory"),
+				GetDirectWorkspaceSchemaId(), TEXT("the explicit initial/full publication writer"));
 		}
 
 		bool TryLoadSingleFileSource(
@@ -1225,13 +1170,15 @@ namespace UE::UAI::HjsonWorkspace
 		return Schema;
 	}
 
-	bool TryLoadContentGraphImportSource(
+	static bool TryLoadContentGraphImportSourceInternal(
 		const TSharedPtr<FJsonObject>& SourceObject,
 		const FString& ExpectedTargetIdentity,
 		FUeAgentResourceTracker& Resources,
 		FResolvedContentGraphImportSourcePtr& OutSource,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		TOptional<FDeferredSemanticDirectoryRead>* DeferredSemanticRead)
 	{
+		if (DeferredSemanticRead) DeferredSemanticRead->Reset();
 		OutSource.Reset();
 		OutError.Reset();
 		if (!SourceObject.IsValid())
@@ -1340,7 +1287,30 @@ namespace UE::UAI::HjsonWorkspace
 					ExpectedTargetIdentity,
 					Resources,
 					OutSource,
-					OutError);
+					OutError, DeferredSemanticRead);
+	}
+
+	bool TryLoadContentGraphImportSource(const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity, FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutSource, FWorkspaceError& OutError)
+	{
+		return TryLoadContentGraphImportSourceInternal(SourceObject, ExpectedTargetIdentity,
+			Resources, OutSource, OutError, nullptr);
+	}
+
+	static bool TryLoadSemanticSourceWithInputs(const FWorkspaceSource& Source,
+		ESemanticWorkspaceMode ExpectedMode, FUeAgentResourceTracker& Resources,
+		FResolvedSemanticWorkspacePtr& OutWorkspace, FWorkspaceError& OutError,
+		TOptional<FDeferredSemanticDirectoryRead>* DeferredSemanticRead, bool bStopUnchangedImport = false);
+
+	static bool RejectEmptyWorkspaceImport(const FResolvedSemanticWorkspace& Workspace, FWorkspaceError& OutError)
+	{
+		if (!Workspace.GetEditedUnitIds().IsSet() || !Workspace.GetEditedUnitIds()->IsEmpty()
+			|| !Workspace.GetStructuralEdits().IsEmpty()) return false;
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=source_no_explicit_changes native_capture=false current_model=false"));
+		OutError.SetFailure(Contract::FDiagnostic::Failure(TEXT("hjson_import_no_explicit_changes"),
+			TEXT("The workspace contains no explicit property or structural change; omitted and unchanged values preserve the current state."), TEXT("hjson_import")));
+		return true;
 	}
 
 	bool TryRecoverContentGraphImportMachineContext(
@@ -1359,12 +1329,13 @@ namespace UE::UAI::HjsonWorkspace
 		OutAuthorizationId.Reset();
 		OutError.Reset();
 
-		if (!TryLoadContentGraphImportSource(
+		TOptional<FDeferredSemanticDirectoryRead> DeferredSemanticRead;
+		if (!TryLoadContentGraphImportSourceInternal(
 			SourceObject,
 			ExpectedTargetIdentity,
 			Resources,
 			OutResolvedSource,
-			OutError)
+			OutError, &DeferredSemanticRead)
 			|| !OutResolvedSource.IsValid())
 		{
 			return false;
@@ -1382,13 +1353,13 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			const FString WorkspaceRoot = OutResolvedSource->GetSourceUnit();
 			FResolvedSemanticWorkspacePtr SemanticWorkspace;
-			if (!TryLoadHjsonImportSource(
+			if (!TryLoadSemanticSourceWithInputs(
 					FWorkspaceSource::Directory(
 						WorkspaceRoot),
 					ESemanticWorkspaceMode::State,
 					Resources,
 					SemanticWorkspace,
-					OutError)
+					OutError, &DeferredSemanticRead, true)
 				|| !SemanticWorkspace.IsValid())
 			{
 				return false;
@@ -1449,7 +1420,22 @@ namespace UE::UAI::HjsonWorkspace
 		FResolvedContentGraphImportSourcePtr& OutSource,
 		FWorkspaceError& OutError)
 	{
+		FResolvedSemanticWorkspacePtr SemanticWorkspace;
+		return TryLoadNormalizedContentGraphImportSource(SourceObject, ExpectedTargetIdentity,
+			ExpectedRevision, Resources, OutSource, OutError, SemanticWorkspace);
+	}
+
+	bool TryLoadNormalizedContentGraphImportSource(
+		const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity,
+		const FString& ExpectedRevision,
+		FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutSource,
+		FWorkspaceError& OutError,
+		FResolvedSemanticWorkspacePtr& OutSemanticWorkspace)
+	{
 		OutSource.Reset();
+		OutSemanticWorkspace.Reset();
 		OutError.Reset();
 		if (!SourceObject.IsValid())
 			return Fail(OutError, TEXT("content_graph_normalized_source_invalid"), TEXT("The prepared import source object is missing."), ExpectedTargetIdentity);
@@ -1496,39 +1482,47 @@ namespace UE::UAI::HjsonWorkspace
 					TEXT("content_graph_normalized_base_revision_mismatch"), TEXT("The prepared workspace target revision differs from the authorized import revision."),
 					WorkspaceRoot, ExpectedRevision, BaseRevision);
 			}
-			const TSharedRef<FJsonObject> DirectorySource =
-				MakeShared<FJsonObject>();
-			DirectorySource->SetStringField(TEXT("kind"), TEXT("directory"));
-			DirectorySource->SetStringField(TEXT("path"), WorkspaceRoot);
-			FResolvedContentGraphImportSourcePtr ReloadedSource;
-			if (!TryLoadContentGraphImportSource(
-					DirectorySource,
-					ExpectedTargetIdentity,
-					Resources,
-					ReloadedSource,
-					OutError)
-				|| !ReloadedSource.IsValid()
-				|| !ReloadedSource->IsSemanticWorkspaceDirectory())
-			{
-				if (OutError.GetCode().IsEmpty())
+			FResolvedSemanticWorkspacePtr SemanticWorkspace = GetAcceptedSemanticWorkspace(WorkspaceRoot);
+			if (SemanticWorkspace) {
+				// Recovery's successful result is not permission to skip the later
+				// domain-entry fence. Recheck its exact namespace and consumed bytes,
+				// but do not parse/resolve/assemble the identical source again.
+				if (!ValidateAcceptedSemanticWorkspace(WorkspaceRoot, Resources, OutError)) return false;
+			} else {
+				const TSharedRef<FJsonObject> DirectorySource =
+					MakeShared<FJsonObject>();
+				DirectorySource->SetStringField(TEXT("kind"), TEXT("directory"));
+				DirectorySource->SetStringField(TEXT("path"), WorkspaceRoot);
+				FResolvedContentGraphImportSourcePtr ReloadedSource;
+				TOptional<FDeferredSemanticDirectoryRead> DeferredSemanticRead;
+				if (!TryLoadContentGraphImportSourceInternal(
+						DirectorySource,
+						ExpectedTargetIdentity,
+						Resources,
+						ReloadedSource,
+						OutError, &DeferredSemanticRead)
+					|| !ReloadedSource.IsValid()
+					|| !ReloadedSource->IsSemanticWorkspaceDirectory())
 				{
-					OutError.SetSourceFailure(
-						TEXT("content_graph_normalized_source_invalid"),
-						TEXT("The reloaded source is not a semantic workspace directory."),
-						WorkspaceRoot);
+					if (OutError.GetCode().IsEmpty())
+					{
+						OutError.SetSourceFailure(
+							TEXT("content_graph_normalized_source_invalid"),
+							TEXT("The reloaded source is not a semantic workspace directory."),
+							WorkspaceRoot);
+					}
+					return false;
 				}
-				return false;
-			}
-			FResolvedSemanticWorkspacePtr SemanticWorkspace;
-			if (!TryLoadHjsonImportSource(
-					FWorkspaceSource::Directory(WorkspaceRoot),
-					ESemanticWorkspaceMode::State,
-					Resources,
-					SemanticWorkspace,
-					OutError)
-				|| !SemanticWorkspace.IsValid())
-			{
-				return false;
+				if (!TryLoadSemanticSourceWithInputs(
+						FWorkspaceSource::Directory(WorkspaceRoot),
+						ESemanticWorkspaceMode::State,
+						Resources,
+						SemanticWorkspace,
+						OutError, &DeferredSemanticRead)
+					|| !SemanticWorkspace.IsValid())
+				{
+					return false;
+				}
 			}
 			if (SemanticWorkspace->GetModel()->GetBaseRevision() != BaseRevision)
 			{
@@ -1548,6 +1542,13 @@ namespace UE::UAI::HjsonWorkspace
 				return FailEvidence(OutError, TEXT("content_graph_normalized_source_fingerprint_mismatch"),
 					TEXT("The workspace semantic content changed after import preparation."), WorkspaceRoot,
 					ExpectedSemanticFingerprint, SemanticWorkspace->GetModel()->GetSemanticFingerprint());
+			// This is the accepted authored delta, not a native capture cache hint.
+			// An empty delta cannot acquire work by observing unrelated UE state.
+			// Pending committed export is consumed by its own publication path.
+			auto Unconsumed = SemanticWorkspace.ToSharedRef();
+			if (!TryResolveUnconsumedAuthoring(WorkspaceRoot, Unconsumed, Resources, Unconsumed, OutError)) return false;
+			SemanticWorkspace = Unconsumed;
+			if (RejectEmptyWorkspaceImport(*SemanticWorkspace, OutError)) return false;
 			OutSource = MakeShared<FResolvedContentGraphImportSource>(
 				EWorkspaceSourceKind::Directory,
 				WorkspaceRoot,
@@ -1558,6 +1559,7 @@ namespace UE::UAI::HjsonWorkspace
 				ExpectedSemanticFingerprint,
 				TArray<FContentGraphImportDocument>(),
 				true);
+			OutSemanticWorkspace = MoveTemp(SemanticWorkspace);
 			return true;
 		}
 		if (Kind != TEXT("resolved"))
@@ -1713,40 +1715,92 @@ namespace UE::UAI::HjsonWorkspace
 		return true;
 	}
 
-	bool TryLoadHjsonImportSource(
+	static bool TryLoadSemanticSourceWithInputs(
 		const FWorkspaceSource& Source,
 		const ESemanticWorkspaceMode ExpectedMode,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FResolvedSemanticWorkspacePtr& OutWorkspace,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		TOptional<FDeferredSemanticDirectoryRead>* DeferredSemanticRead,
+		bool bStopUnchangedImport)
 	{
+		ClearAcceptedSemanticWorkspace();
 		OutWorkspace.Reset();
 		OutError.Reset();
 		FSourceVersionSnapshot Before;
-		if (!CaptureSourceVersion(Source, Before, OutError))
+		const bool bClassified = DeferredSemanticRead && DeferredSemanticRead->IsSet();
+		const bool bScopedDirectory = Source.GetKind() == EWorkspaceSourceKind::Directory && HasSemanticWorkspaceReadScope();
+		if (Source.GetKind() == EWorkspaceSourceKind::Directory && ExpectedMode == ESemanticWorkspaceMode::State && !bScopedDirectory)
+			return FailWorkspaceDataflowHandoff(OutError, TEXT("source.load"), TEXT("request read scope"), Source.GetPath(),
+				TEXT("unscoped directory input"), TEXT("one synchronous directory source scope"),
+				TEXT("HJSON public import/export request entry"));
+		if (bScopedDirectory) UE::UAI::ArtifactPublisher::ReleaseCachedArtifactFileObservations(Source.GetPath());
+		FString ClassifiedManifestHash;
+		if (bClassified)
+		{
+			if (Source.GetKind() != EWorkspaceSourceKind::Directory
+				|| !DeferredSemanticRead->GetValue().Root.Equals(NormalizedFullPath(Source.GetPath(), true), ESearchCase::CaseSensitive))
+				return Fail(OutError, TEXT("workspace_source_version_changed"),
+					TEXT("The classified source does not match the semantic source directory."), Source.GetPath());
+			ClassifiedManifestHash = MoveTemp(DeferredSemanticRead->GetValue().ClassifiedManifestHash);
+			DeferredSemanticRead->Reset();
+		}
+		if (!bScopedDirectory && !CaptureSourceVersion(Source, Before, OutError))
 		{
 			return false;
 		}
+		TSharedPtr<const FResolvedWorkspaceSourceProof> UnchangedImportProof;
 		if (!TryResolveEditedSemanticWorkspace(
 				Source,
 				ExpectedMode,
 				Resources,
 				OutWorkspace,
-				OutError)
+				OutError, bStopUnchangedImport ? &UnchangedImportProof : nullptr)
 			|| !OutWorkspace.IsValid())
 		{
 			OutWorkspace.Reset();
+			if (UnchangedImportProof && OutError.GetCode() == TEXT("hjson_import_no_explicit_changes")) {
+				// No native or workspace write will occur. The parser's accepted
+				// observation suffices; a second complete namespace fence protects
+				// no publication and cannot turn a legitimate no-op into an error.
+				UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=source_no_explicit_changes native_capture=false current_model=false source_model=false publication_fence=not_needed"));
+			}
 			return false;
 		}
 		FSourceVersionSnapshot After;
 		FWorkspaceError VersionError;
-		if (!CaptureSourceVersion(Source, After, VersionError))
+		TSharedPtr<const FResolvedWorkspaceSourceProof> SourceProof;
+		// A caller without a synchronous semantic read scope keeps the old path.
+		// For the scoped import, the same exact input proof is also consumed later
+		// by publication; this check is before any native application.
+		if (Source.GetKind() == EWorkspaceSourceKind::Directory && HasSemanticWorkspaceReadScope()
+			&& !TryGetResolvedWorkspaceSourceProof(Source.GetPath(), SourceProof, VersionError)) {
+			OutWorkspace.Reset(); OutError = MoveTemp(VersionError); return false;
+		}
+		const FString ClassifiedManifest = Source.GetKind() == EWorkspaceSourceKind::Directory
+			? FPaths::Combine(NormalizedFullPath(Source.GetPath(), true), ContentGraphWorkspaceManifest) : FString();
+		if (SourceProof && !ClassifiedManifestHash.IsEmpty()
+			&& !SourceProof->HasObservedContent(ClassifiedManifest, ClassifiedManifestHash)) {
+			OutWorkspace.Reset();
+			return Fail(OutError, TEXT("workspace_source_version_changed"),
+				TEXT("The workspace classification changed before its semantic input was read."), ClassifiedManifest);
+		}
+		if (!SourceProof && !ClassifiedManifestHash.IsEmpty()) {
+			FString CurrentHeader;
+			if (!RejectReparseAncestors(NormalizedFullPath(Source.GetPath(), true), ClassifiedManifest, OutError)) { OutWorkspace.Reset(); return false; }
+			if (!FFileHelper::LoadFileToString(CurrentHeader, *ClassifiedManifest) || Sha256Text(CurrentHeader) != ClassifiedManifestHash) {
+				OutWorkspace.Reset(); return Fail(OutError, TEXT("workspace_source_version_changed"),
+					TEXT("The workspace classification changed before its semantic input was read."), ClassifiedManifest);
+			}
+		}
+		const bool bCaptured = SourceProof ? SourceProof->ValidateAll(VersionError) : CaptureSourceVersion(Source, After, VersionError);
+		if (!bCaptured)
 		{
 			OutWorkspace.Reset();
 			OutError = MoveTemp(VersionError);
 			return false;
 		}
-		if (!(Before == After))
+		if (!SourceProof && !(Before == After))
 		{
 			OutWorkspace.Reset();
 			OutError.SetSourceFailure(
@@ -1754,6 +1808,32 @@ namespace UE::UAI::HjsonWorkspace
 				TEXT("Workspace source files changed while the import was being resolved."), Source.GetPath());
 			return false;
 		}
+		FHjsonOperationCheckpoint AcceptanceCheckpoint;
+		if (Source.GetKind() == EWorkspaceSourceKind::Directory && SourceProof) {
+			AcceptanceCheckpoint = [Proof = SourceProof](const FString&, FWorkspaceError& Error) { return Proof->ValidateAll(Error); };
+		}
+		AcceptResolvedSemanticWorkspace(OutWorkspace, MoveTemp(AcceptanceCheckpoint));
+		UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=source_input_fence classified_header=%s directory_snapshot=%s success=true"),
+			bClassified ? TEXT("true") : TEXT("false"), SourceProof ? TEXT("false") : TEXT("true"));
+		if (bStopUnchangedImport && RejectEmptyWorkspaceImport(*OutWorkspace, OutError)) return false;
 		return true;
+	}
+
+	bool TryLoadHjsonImportSource(const FWorkspaceSource& Source, ESemanticWorkspaceMode ExpectedMode,
+		FUeAgentResourceTracker& Resources, FResolvedSemanticWorkspacePtr& OutWorkspace, FWorkspaceError& OutError)
+	{
+		return TryLoadSemanticSourceWithInputs(Source, ExpectedMode, Resources, OutWorkspace, OutError, nullptr);
+	}
+	bool TryLoadContentGraphImportWorkspace(const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity, FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutSource, FResolvedSemanticWorkspacePtr& OutWorkspace,
+		FWorkspaceError& OutError)
+	{
+		OutWorkspace.Reset();
+		TOptional<FDeferredSemanticDirectoryRead> Deferred;
+		if (!TryLoadContentGraphImportSourceInternal(SourceObject, ExpectedTargetIdentity, Resources, OutSource, OutError, &Deferred)) return false;
+		return !OutSource->IsSemanticWorkspaceDirectory()
+			|| TryLoadSemanticSourceWithInputs(FWorkspaceSource::Directory(OutSource->GetSourceUnit()),
+				ESemanticWorkspaceMode::State, Resources, OutWorkspace, OutError, &Deferred);
 	}
 }

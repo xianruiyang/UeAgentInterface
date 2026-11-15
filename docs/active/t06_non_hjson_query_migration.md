@@ -58,11 +58,36 @@ The production service composes the audited Asset/Project, World, ContentGraphRe
 
 Content-graph reads use one staged owner. `content_graph.structure` discovers readable graph/container names without expanding nodes, relations, properties, or diagnostics. `content_graph.items` selects current items with `items`/`item_kinds` and requests their exposed top-level keys with `fields`. Dynamic `pin_interface` is omitted by default and returned only when explicitly requested for selected nodes. `content_graph.compound` is the explicit multi-facet batch form, not the default discovery call.
 
+TextureGraph node titles are projected through the same native-identity ordered
+alias allocator as HJSON. Two nodes with the same title have distinct public
+names such as `IfThenElse` and `IfThenElse#2`; use the returned name in `owners`
+or `items`. Query projection does not rename native nodes or change their
+authoring identity. Genuine unresolved/ambiguous names still fail explicitly.
+
+For a known Level property, pass the current public `owners` and requested
+`fields` to `content_graph.properties`. The existing hierarchy selector resolves
+Actor/Component owners before the native snapshot captures those fields; it does
+not first materialize every reflected value in the Level. `content_graph.items`
+uses the same native topology owner, retaining public identity and requested
+geometry without materializing unrequested ordinary property values. The
+original composition identity/order and readable alias allocator supply names
+directly; the query does not build an authoring Model or JSON aggregate for them.
+Partitioned worlds retain loaded Actor references through the last selected
+getter. Their complete namespace loading does not require complete property
+capture; those references are released before pure result projection.
+
 Requested properties report their current values, including inherited/class-default
 values; a value equal to its default is not an absent property. `include_presence`
 adds authored-presence information when requested. The legacy `include_defaults`
 input remains accepted for compatibility and does not select an overrides-only
-view or change which fields are captured.
+view or change which fields are captured. An explicit true value now reports
+`content_graph_legacy_defaults_option` as a warning and still returns the same
+current values. The content-graph business projections do not expose the generic
+projection defaults/details/provenance metadata. Explicit true options report
+`content_graph_metadata_projection_unavailable` warnings and preserve successful
+current-value queries; no unused metadata projection is made for those options.
+Actual authoring consumers retain their required type, definition and presence
+capture; the query-specific path does not normalize unused authoring descriptors.
 
 Field projection checks the entire selected item set before producing entries.
 Incompatible fields are reported by item kind and actual field contract, with

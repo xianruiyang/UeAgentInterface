@@ -1,7 +1,10 @@
 #include "QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h"
+#include "QueryOwners/AiBehavior/UeAgentStateTreeFunctionMenu.h"
+#include "QueryOwners/AiBehavior/UeAgentSmartObjectMenu.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 #include "AIGraphTypes.h"
 #include "AIGraphSchema.h"
@@ -57,6 +60,7 @@
 #include "StateTreePropertyFunctionBase.h"
 #include "StateTreeEditorData.h"
 #include "StateTreeEditorModule.h"
+#include "StateTreeState.h"
 #include "StateTreeNodeClassCache.h"
 #include "StateTreeSchema.h"
 #include "QueryOwners/AiBehavior/UeAgentBehaviorTreeHeadlessSchema.h"
@@ -158,7 +162,7 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		{
 			auto Diagnostic = CandidateDiagnostic(Code, Target.GetPathName(), Reason);
 			auto Actual = MakeShared<FJsonObject>();
-			Actual->SetBoolField(TEXT("parent_present"), Context.Parent != nullptr);
+			Actual->SetBoolField(TEXT("parent_present"), Context.Parent != nullptr || !Context.ParentAlias.IsEmpty() || Context.StateTreeParentId.IsValid());
 			Actual->SetBoolField(TEXT("graph_present"), Context.Graph != nullptr);
 			Actual->SetStringField(TEXT("attachment_kind"), Context.AttachmentKind);
 			if (Context.Parent) Actual->SetStringField(TEXT("parent_type"), Context.Parent->GetClass()->GetName());
@@ -813,18 +817,94 @@ namespace UE::UAI::QueryOwners::AiBehavior
 			return true;
 		}
 
-		bool TryBuildStateTreeCatalog(UStateTree& Target, FNativeAiActionCatalog& Catalog,
-			FAiBehaviorCandidateQueryError& Error, const FAiBehaviorCandidateContext& Context)
+		bool ResolvePlacementOwner(UObject& Target, const FAiBehaviorCandidateContext& Context,
+			const FUeAgentContentGraphCapture* Observed, FGuid& Id, FAiBehaviorCandidateQueryError& Error,
+			bool* bSmartObjectRoot = nullptr)
 		{
-			if (Context.Graph || Context.Parent || !Context.AttachmentKind.IsEmpty())
+			Id = Context.StateTreeParentId;
+			if (Id.IsValid()) return true;
+			FUeAgentContentGraphCapture Local;
+			if (!Observed)
+			{
+				FUeAgentContentGraphReadError Detail;
+				if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(Target, Local, Detail))
+					return ForwardDiagnostic(Error, MoveTemp(Detail));
+				Observed = &Local;
+			}
+			for (const auto& Item : Observed->Items)
+			{
+				const FString* Alias = Item.SemanticIdentity.Selectors.Find(TEXT("public_name"));
+				if (!Alias || !Alias->Equals(Context.ParentAlias, ESearchCase::CaseSensitive)) continue;
+				if (bSmartObjectRoot && Item.ItemId == TEXT("root")) { *bSmartObjectRoot = true; return true; }
+				if (FGuid::Parse(Item.ItemId, Id)) return true;
+			}
+			return ForwardDiagnostic(Error, ContextFailure(TEXT("ai_behavior_candidate_attachment_context_invalid"), Target, Context,
+				TEXT("The exported parent does not identify an existing native placement owner."), TEXT("current parent alias")));
+		}
+
+		bool ResolveStateTreeNodeMenu(UStateTree& Target, const UStateTreeEditorData& Data,
+			const FAiBehaviorCandidateContext& Context, const FUeAgentContentGraphCapture* Observed,
+			FString& Family, FAiBehaviorCandidateQueryError& Error)
+		{
+			const FString& Placement = Context.AttachmentKind;
+			auto Reject = [&]() {
+				return ForwardDiagnostic(Error, ContextFailure(TEXT("ai_behavior_candidate_attachment_context_invalid"), Target,
+					Context, TEXT("The placement is unavailable on this StateTree owner under its current schema."),
+					TEXT("a visible StateTree node placement and its current owner")));
+			};
+			if (Placement == TEXT("global_task") || Placement == TEXT("evaluator")) {
+				if (!Context.ParentAlias.IsEmpty() || Context.StateTreeParentId.IsValid()
+					|| (Placement == TEXT("evaluator") && !Data.Schema->AllowEvaluators())) return Reject();
+				Family = Placement == TEXT("global_task") ? TEXT("state_tree_task") : TEXT("state_tree_evaluator");
+				return true;
+			}
+			FGuid ParentId;
+			if (!ResolvePlacementOwner(Target, Context, Observed, ParentId, Error)) return false;
+			if (Placement == TEXT("transition_condition")) {
+				bool Found = false;
+				Data.VisitHierarchy([&](UStateTreeState& State, UStateTreeState*) {
+					Found = State.Transitions.ContainsByPredicate([&](const auto& Transition) { return Transition.ID == ParentId; });
+					return Found ? EStateTreeVisitor::Break : EStateTreeVisitor::Continue;
+				});
+				if (!Found) return Reject();
+				Family = TEXT("state_tree_condition"); return true;
+			}
+			const UStateTreeState* State = Data.GetStateByID(ParentId);
+			if (!State) return Reject();
+			if (Placement == TEXT("enter_condition") && Data.Schema->AllowEnterConditions()) Family = TEXT("state_tree_condition");
+			else if (Placement == TEXT("consideration") && Data.Schema->AllowUtilityConsiderations()) Family = TEXT("state_tree_consideration");
+			else if ((Placement == TEXT("task") || Placement == TEXT("single_task"))
+				&& (State->Type == EStateTreeStateType::State || State->Type == EStateTreeStateType::Subtree)
+				&& (Placement == TEXT("task")) == Data.Schema->AllowMultipleTasks()) Family = TEXT("state_tree_task");
+			else return Reject();
+			return true;
+		}
+
+		bool TryBuildStateTreeCatalog(UStateTree& Target, FNativeAiActionCatalog& Catalog,
+			FAiBehaviorCandidateQueryError& Error, const FAiBehaviorCandidateContext& Context,
+			const FUeAgentContentGraphCapture* Observed = nullptr, bool bDiscover = false)
+		{
+			if (Context.Graph || Context.Parent)
 				return ForwardDiagnostic(Error, ContextFailure(TEXT("ai_behavior_candidate_attachment_context_invalid"), Target, Context,
 					TEXT("StateTree candidate discovery does not accept graph or attachment context."), TEXT("empty graph, parent and attachment context")));
-			const auto* Data = Cast<UStateTreeEditorData>(Target.EditorData);
+			auto* Data = Cast<UStateTreeEditorData>(Target.EditorData);
 			if (!Data || !Data->Schema) return ForwardDiagnostic(Error, MissingNative(TEXT("state_tree_candidate_schema_missing"), Target.GetPathName(),
 				!Data ? TEXT("The target StateTree has no StateTree editor data.") : TEXT("The target StateTree editor data has no schema."),
 				TEXT("StateTree editor data with a schema")));
+			FString SelectedFamily;
+			const bool bFunctionMenu = Context.AttachmentKind == TEXT("property_function");
+			if ((ENGINE_MAJOR_VERSION != 5 || ENGINE_MINOR_VERSION != 6)
+				&& (bFunctionMenu || (bDiscover && Context.AttachmentKind.IsEmpty())))
+				return ForwardDiagnostic(Error, CandidateCatalogIncomplete(
+					TEXT("The field-specific StateTree function picker has been matched against UE 5.6."), Target.GetPathName()));
+			if (bFunctionMenu) SelectedFamily = TEXT("state_tree_property_function");
+			else if (!Context.AttachmentKind.IsEmpty()) {
+				if (!IsStateTreeNodePlacement(Context.AttachmentKind))
+					return ForwardDiagnostic(Error, CandidateCatalogIncomplete(TEXT("This StateTree placement requires a native menu context outside the node-type picker."), Target.GetPathName()));
+				if (!ResolveStateTreeNodeMenu(Target, *Data, Context, Observed, SelectedFamily, Error)) return false;
+			}
 			const auto Cache = FStateTreeEditorModule::GetModule().GetNodeClassCache();
-			auto Add = [&](const FString& Name, const FString& Kind, const UStruct* Type) {
+			auto Add = [&](const FString& Name, const FString& Kind, const UStruct* Type, const FString& Output = FString()) {
 				auto& Candidate = Catalog.Entries.AddDefaulted_GetRef().Candidate;
 				Candidate.Name = Name;
 				Candidate.Label = Type ? Type->GetDisplayNameText().ToString() : Name;
@@ -842,25 +922,57 @@ namespace UE::UAI::QueryOwners::AiBehavior
 				Candidate.WriteSupport = TEXT("supported");
 				Candidate.SupportReason = TEXT("native_class_cache_and_schema");
 				if (Candidate.bSupported) Candidate.SupportedOperations = {TEXT("create")};
-				return SetCandidateIdentity(TEXT("state_tree_native"), Kind + TEXT("|") + Candidate.PayloadType, Candidate, Error);
+				FString Signature = Kind + TEXT("|") + Candidate.PayloadType;
+				if (!Output.IsEmpty())
+				{
+					Candidate.SelectionFields.Add(TEXT("output"), Output);
+					Signature += TEXT("|") + Output;
+				}
+				return SetCandidateIdentity(TEXT("state_tree_native"), Signature, Candidate, Error);
 			};
-			if (!Add(TEXT("State"), TEXT("state_tree_state"), nullptr)
-				|| !Add(TEXT("Transition"), TEXT("state_tree_transition"), nullptr)
+			const bool bHasState = !Data->SubTrees.IsEmpty();
+			bool bHasTransition = false;
+			if (bDiscover && SelectedFamily.IsEmpty() && !Data->Schema->AllowEnterConditions())
+				Data->VisitHierarchy([&](UStateTreeState& State, UStateTreeState*) {
+					bHasTransition = !State.Transitions.IsEmpty();
+					return bHasTransition ? EStateTreeVisitor::Break : EStateTreeVisitor::Continue;
+				});
+			if (SelectedFamily.IsEmpty() && (!Add(TEXT("State"), TEXT("state_tree_state"), nullptr)
+				|| ((!bDiscover || bHasState) && !Add(TEXT("Transition"), TEXT("state_tree_transition"), nullptr))
 				|| !Add(TEXT("Binding"), TEXT("state_tree_binding"), nullptr)
-				|| !Add(TEXT("Color"), TEXT("state_tree_color"), nullptr)) return false;
+				|| !Add(TEXT("Color"), TEXT("state_tree_color"), nullptr))) return false;
+			if (bFunctionMenu || (bDiscover && SelectedFamily.IsEmpty()))
+			{
+				FGuid Owner;
+				if (bFunctionMenu && !ResolvePlacementOwner(Target, Context, Observed, Owner, Error)) return false;
+				if (bFunctionMenu && (!Owner.IsValid() || Context.TargetPath.IsEmpty()))
+					return ForwardDiagnostic(Error, ContextFailure(TEXT("ai_behavior_candidate_target_field_invalid"), Target, Context,
+						TEXT("Property function discovery requires an existing binding target item and target_path."), TEXT("exported parent and target_path")));
+				TMap<const UScriptStruct*, TSet<FString>> Options;
+				FString Reason;
+				if (!VisitStateTreeFunctionMenu(*Data, Owner, Context.TargetPath,
+					[&](const UScriptStruct& Function, const FString& Output) { Options.FindOrAdd(&Function).Add(Output); }, Reason))
+					return ForwardDiagnostic(Error, ContextFailure(TEXT("ai_behavior_candidate_target_field_invalid"), Target, Context, Reason, TEXT("a current receiving field")));
+				for (const auto& Option : Options)
+					for (const FString& Output : Option.Value)
+						if ((Context.FunctionOutput.IsEmpty() || Context.FunctionOutput == Output)
+							&& !Add(Option.Key->GetDisplayNameText().ToString(), TEXT("state_tree_property_function"), Option.Key, Output)) return false;
+			}
 			struct FNodeFamily { UScriptStruct* Struct; UClass* Class; const TCHAR* Kind; bool Allowed; };
 			const FNodeFamily Families[] = {
 				{FStateTreeTaskBase::StaticStruct(), UStateTreeTaskBlueprintBase::StaticClass(), TEXT("state_tree_task"), true},
-				{FStateTreeConditionBase::StaticStruct(), UStateTreeConditionBlueprintBase::StaticClass(), TEXT("state_tree_condition"), true},
+				{FStateTreeConditionBase::StaticStruct(), UStateTreeConditionBlueprintBase::StaticClass(), TEXT("state_tree_condition"),
+					!bDiscover || !SelectedFamily.IsEmpty() || (bHasState && Data->Schema->AllowEnterConditions()) || bHasTransition},
 				{FStateTreeEvaluatorBase::StaticStruct(), UStateTreeEvaluatorBlueprintBase::StaticClass(), TEXT("state_tree_evaluator"), Data->Schema->AllowEvaluators()},
-				{FStateTreeConsiderationBase::StaticStruct(), UStateTreeConsiderationBlueprintBase::StaticClass(), TEXT("state_tree_consideration"), Data->Schema->AllowUtilityConsiderations()},
-				{FStateTreePropertyFunctionBase::StaticStruct(), nullptr, TEXT("state_tree_property_function"), true}
+				{FStateTreeConsiderationBase::StaticStruct(), UStateTreeConsiderationBlueprintBase::StaticClass(), TEXT("state_tree_consideration"),
+					Data->Schema->AllowUtilityConsiderations() && (!bDiscover || bHasState)},
+				{FStateTreePropertyFunctionBase::StaticStruct(), nullptr, TEXT("state_tree_property_function"), !bDiscover && !bFunctionMenu}
 			};
 			for (const auto& Family : Families)
 			{
-				if (!Family.Allowed) continue;
+				if (!Family.Allowed || (!SelectedFamily.IsEmpty() && SelectedFamily != Family.Kind)) continue;
 				TArray<TSharedPtr<FStateTreeNodeClassData>> Types;
-				Cache->GetStructs(Family.Struct, Types);
+				Cache->GetScripStructs(Family.Struct, Types);
 				if (Family.Class)
 				{
 					TArray<TSharedPtr<FStateTreeNodeClassData>> Classes;
@@ -870,20 +982,15 @@ namespace UE::UAI::QueryOwners::AiBehavior
 				for (const auto& Entry : Types)
 				{
 					UStruct* Type = Entry->GetStruct(true);
-					if (!Type || Type == Family.Struct || Type == Family.Class || Type->HasMetaData(TEXT("Hidden"))
-						|| Type->HasMetaData(TEXT("Deprecated"))) continue;
+					if (!Type || Type == Family.Struct || Type == Family.Class || Type->HasMetaData(TEXT("Hidden"))) continue;
 					if (const auto* Class = Cast<UClass>(Type))
 					{
-						if (Class->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists)
+						if (Class->HasAnyClassFlags(CLASS_Abstract | CLASS_Hidden | CLASS_HideDropDown)
 							|| !Data->Schema->IsClassAllowed(Class)) continue;
 					}
 					else if (const auto* Struct = Cast<UScriptStruct>(Type))
 					{
-						if (Struct == FStateTreeBlueprintTaskWrapper::StaticStruct()
-							|| Struct == FStateTreeBlueprintConditionWrapper::StaticStruct()
-							|| Struct == FStateTreeBlueprintEvaluatorWrapper::StaticStruct()
-							|| Struct == FStateTreeBlueprintConsiderationWrapper::StaticStruct()
-							|| !Data->Schema->IsStructAllowed(Struct)) continue;
+						if (!Data->Schema->IsStructAllowed(Struct)) continue;
 					}
 					if (!Add(FName::NameToDisplayString(Type->GetName(), false), Family.Kind, Type)) return false;
 				}
@@ -893,50 +1000,94 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		}
 
 		bool TryBuildSmartObjectCatalog(USmartObjectDefinition& Target, FNativeAiActionCatalog& Catalog,
-			FAiBehaviorCandidateQueryError& Error, const FAiBehaviorCandidateContext& Context)
+			FAiBehaviorCandidateQueryError& Error, const FAiBehaviorCandidateContext& Context,
+			const FUeAgentContentGraphCapture* Observed)
 		{
-			if (Context.Graph || Context.Parent || !Context.AttachmentKind.IsEmpty())
+			if (Context.Graph || Context.Parent)
 				return ForwardDiagnostic(Error, ContextFailure(TEXT("ai_behavior_candidate_attachment_context_invalid"), Target, Context,
-					TEXT("SmartObject candidate discovery does not accept graph or attachment context."), TEXT("empty graph, parent and attachment context")));
-			auto Add = [&](const FString& Name, const TCHAR* Kind, const UStruct* Type) {
+					TEXT("SmartObject placements belong to the definition or one of its slots."), TEXT("definition or slot")));
+			const FString& Kind = Context.AttachmentKind;
+			const bool bAll = Kind.IsEmpty();
+			if ((ENGINE_MAJOR_VERSION != 5 || ENGINE_MINOR_VERSION != 6) && Context.bTargetMenu
+				&& (bAll || Kind == TEXT("definition_data") || Kind == TEXT("behavior")))
+				return ForwardDiagnostic(Error, CandidateCatalogIncomplete(
+					TEXT("The SmartObject data and inline behavior picker rules have been matched against UE 5.6."), Target.GetPathName()));
+			bool bRoot = Context.ParentAlias.IsEmpty() || Context.ParentAlias == TEXT("root");
+			FGuid Id;
+			if (!bRoot && !ResolvePlacementOwner(Target, Context, Observed, Id, Error, &bRoot)) return false;
+			const bool bSlot = !bRoot;
+			if ((!bAll && Kind != TEXT("definition_data") && Kind != TEXT("behavior") && Kind != TEXT("slot") && Kind != TEXT("binding"))
+				|| (bSlot && Kind != TEXT("definition_data") && Kind != TEXT("behavior")))
+				return ForwardDiagnostic(Error, ContextFailure(TEXT("ai_behavior_candidate_attachment_context_invalid"), Target, Context,
+					TEXT("This creation placement is unavailable on the requested SmartObject owner."), TEXT("slot, binding, definition_data or behavior")));
+			if (bSlot)
+			{
+				int32 SlotIndex = INDEX_NONE, DataIndex = INDEX_NONE;
+				if (!Target.FindSlotAndDefinitionDataIndexByID(Id, SlotIndex, DataIndex) || SlotIndex == INDEX_NONE || DataIndex != INDEX_NONE)
+					return ForwardDiagnostic(Error, ContextFailure(TEXT("ai_behavior_candidate_attachment_context_invalid"), Target, Context,
+						TEXT("The selected parent is not a SmartObject slot."), TEXT("existing slot")));
+			}
+			auto Add = [&](const FString& Name, const TCHAR* Kind, const UStruct* Type, const FTopLevelAssetPath& Behavior = FTopLevelAssetPath()) {
 				auto& Candidate = Catalog.Entries.AddDefaulted_GetRef().Candidate;
 				Candidate.Name = Name; Candidate.Label = Name; Candidate.Kind = Kind;
 				Candidate.ActionKind = TEXT("smart_object_native_structure");
 				if (Type && Type->IsChildOf(FSmartObjectSlotAnnotation::StaticStruct())) Candidate.RequiredContext = TEXT("parent:slot");
-				Candidate.PayloadType = Type ? Type->GetPathName() : FString();
+				Candidate.PayloadType = Type ? Type->GetPathName() : Behavior.ToString();
 				Candidate.SelectionFields.Add(TEXT("kind"), Kind);
-				if (Type)
+				if (Type || !Behavior.IsNull())
 				{
-					Candidate.SelectionFields.Add(TEXT("type"), Type->GetName());
-					Candidate.SelectionFields.Add(TEXT("type_source"), MakeReadableDiscoveryPath(Type->GetPathName()));
+					Candidate.SelectionFields.Add(TEXT("type"), Type ? Type->GetName() : Behavior.GetAssetName().ToString());
+					Candidate.SelectionFields.Add(TEXT("type_source"), MakeReadableDiscoveryPath(Candidate.PayloadType));
 				}
 				Candidate.bSupported = true; Candidate.WriteSupport = TEXT("supported");
-				Candidate.SupportReason = TEXT("smart_object_loaded_native_type_constraints");
+				Candidate.SupportReason = Kind == FString(TEXT("smart_object_behavior"))
+					? TEXT("inline_class_type_constraints; destination_element_picker_checked_on_create")
+					: TEXT("smart_object_native_placement");
 				Candidate.SupportedOperations = {TEXT("create")};
 				return SetCandidateIdentity(TEXT("smart_object_native"), Candidate.Kind + TEXT("|") + Candidate.PayloadType, Candidate, Error);
 			};
-			if (!Add(TEXT("Slot"), TEXT("smart_object_slot"), FSmartObjectSlotDefinition::StaticStruct())) return false;
-			if (!Add(TEXT("Binding"), TEXT("smart_object_binding"), FSmartObjectDefinitionPropertyBinding::StaticStruct())) return false;
-			for (TObjectIterator<UClass> It; It; ++It)
-				if (It->IsChildOf(USmartObjectBehaviorDefinition::StaticClass())
-					&& !It->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists)
-					&& It->GetPathName().StartsWith(TEXT("/Script/")))
-					if (!Add(It->GetDisplayNameText().ToString(), TEXT("smart_object_behavior"), *It)) return false;
-			for (TObjectIterator<UScriptStruct> It; It; ++It)
-				if (*It != FSmartObjectDefinitionData::StaticStruct() && It->IsChildOf(FSmartObjectDefinitionData::StaticStruct())
-					&& !It->HasMetaData(TEXT("Hidden")) && !It->HasMetaData(TEXT("Deprecated")) && !It->IsA<UUserDefinedStruct>())
-					if (!Add(It->GetDisplayNameText().ToString(), TEXT("smart_object_definition_data"), *It)) return false;
+			if ((bAll || Kind == TEXT("slot")) && !Add(TEXT("Slot"), TEXT("smart_object_slot"), FSmartObjectSlotDefinition::StaticStruct())) return false;
+			if ((bAll || Kind == TEXT("binding")) && !Add(TEXT("Binding"), TEXT("smart_object_binding"), FSmartObjectDefinitionPropertyBinding::StaticStruct())) return false;
+			if (bAll || Kind == TEXT("behavior"))
+			{
+				if (!ContentDiscovery::TryEnsureAssetDiscovery(Error)) return false;
+				bool bOk = true;
+				TSet<FTopLevelAssetPath> Added;
+				auto AddBehavior = [&](const FString& Name, const FTopLevelAssetPath& Path) {
+					if (!bOk || Added.Contains(Path)) return;
+					Added.Add(Path);
+					bOk = Add(Name, TEXT("smart_object_behavior"), nullptr, Path);
+				};
+				VisitSmartObjectBehaviorTypes(Target, bSlot, AddBehavior);
+				if (bAll && !bSlot && (!Context.bTargetMenu || Target.GetSlots().Num() != 0))
+					VisitSmartObjectBehaviorTypes(Target, true, AddBehavior);
+				if (!bOk) return false;
+			}
+			if (bAll || Kind == TEXT("definition_data"))
+			{
+				bool bOk = true;
+				TSet<UScriptStruct*> Added;
+				auto AddData = [&](UScriptStruct& Struct) {
+					if (!bOk || Added.Contains(&Struct)) return;
+					Added.Add(&Struct);
+					bOk = Add(Struct.GetDisplayNameText().ToString(), TEXT("smart_object_definition_data"), &Struct);
+				};
+				VisitSmartObjectDataMenu(Target, bSlot, AddData);
+				// Known-name import also resolves children authored under a newly created slot.
+				if (bAll && (!Context.bTargetMenu || Target.GetSlots().Num() != 0)) VisitSmartObjectDataMenu(Target, true, AddData);
+				if (!bOk) return false;
+			}
 			Catalog.Entries.Sort([](const auto& A, const auto& B) { return A.Candidate.Id < B.Candidate.Id; });
 			return true;
 		}
 
 		bool TryBuildNativeAiCatalog(UObject& Target, bool bRequireTargetGraph,
 			FNativeAiActionCatalog& Catalog, FAiBehaviorCandidateQueryError& Error,
-			const FAiBehaviorCandidateContext& Context)
+			const FAiBehaviorCandidateContext& Context, const FUeAgentContentGraphCapture* Observed = nullptr)
 		{
 			if (auto* Tree = Cast<UBehaviorTree>(&Target)) return TryBuildNativeBehaviorTreeCatalog(*Tree, bRequireTargetGraph, Catalog, Error, Context);
 			if (auto* Query = Cast<UEnvQuery>(&Target)) return TryBuildNativeEqsCatalog(*Query, bRequireTargetGraph, Catalog, Error, Context);
-			if (auto* Definition = Cast<USmartObjectDefinition>(&Target)) return TryBuildSmartObjectCatalog(*Definition, Catalog, Error, Context);
+			if (auto* Definition = Cast<USmartObjectDefinition>(&Target)) return TryBuildSmartObjectCatalog(*Definition, Catalog, Error, Context, Observed);
 			return ForwardDiagnostic(Error, TargetTypeFailure(Target, {TEXT("BehaviorTree"), TEXT("EnvQuery"), TEXT("SmartObjectDefinition")}));
 		}
 
@@ -984,7 +1135,13 @@ namespace UE::UAI::QueryOwners::AiBehavior
 			TArray<FNameSelectionEntry> Entries;
 			for (const FNativeAiActionEntry& Entry : Catalog.Entries)
 			{
-				Entries.Add({Entry.Candidate.Name, Entry.Candidate.Id, Entry.Candidate.SelectionFields});
+				FString NameToResolve = Entry.Candidate.Name;
+				// Older HJSON uses the reflected function's readable type name.
+				if (Entry.Candidate.Kind == TEXT("state_tree_property_function"))
+					if (const FString* Type = Entry.Candidate.SelectionFields.Find(TEXT("type")))
+						if (CleanName == FName::NameToDisplayString(*Type, false) || CleanName == Entry.Candidate.Label)
+							NameToResolve = CleanName;
+				Entries.Add({NameToResolve, Entry.Candidate.Id, Entry.Candidate.SelectionFields});
 			}
 			int32 ResolvedIndex = INDEX_NONE;
 			UE::UAI::Contract::FDiagnostic ResolveError;
@@ -1125,7 +1282,7 @@ namespace UE::UAI::QueryOwners::AiBehavior
 
 		bool ReadTargetRevision(
 			UObject& Target,
-			FString& OutRevision,
+			FString& OutRevision, FUeAgentContentGraphCapture& Capture,
 			FAiBehaviorCandidateQueryError& OutError)
 		{
 			if (Target.GetOutermost() == GetTransientPackage())
@@ -1133,7 +1290,6 @@ namespace UE::UAI::QueryOwners::AiBehavior
 				OutRevision = Sha256(TEXT("transient|") + Target.GetClass()->GetPathName());
 				return true;
 			}
-			FUeAgentContentGraphCapture Capture;
 			FUeAgentContentGraphReadError ReadError;
 			const bool bCaptured = FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
 				Target, Capture, ReadError);
@@ -1155,6 +1311,13 @@ namespace UE::UAI::QueryOwners::AiBehavior
 			return true;
 		}
 	}
+
+bool IsStateTreeNodePlacement(const FString& Placement)
+{
+	return Placement == TEXT("task") || Placement == TEXT("single_task") || Placement == TEXT("global_task")
+		|| Placement == TEXT("enter_condition") || Placement == TEXT("transition_condition")
+		|| Placement == TEXT("consideration") || Placement == TEXT("evaluator");
+}
 
 	bool TryQueryAiBehaviorCandidates(
 		UObject& Target,
@@ -1181,24 +1344,19 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		}
 
 		OutResult.Target = Target.GetPathName();
-		if (!ReadTargetRevision(Target, OutResult.TargetRevision, OutError)) return false;
+		FUeAgentContentGraphCapture Observed;
+		if (!ReadTargetRevision(Target, OutResult.TargetRevision, Observed, OutError)) return false;
 
 		if (Target.IsA<UBehaviorTree>() || Target.IsA<UEnvQuery>() || Target.IsA<UStateTree>() || Target.IsA<USmartObjectDefinition>())
 		{
 			FNativeAiActionCatalog Catalog;
 			const bool Built = Target.IsA<UStateTree>()
-				? TryBuildStateTreeCatalog(*CastChecked<UStateTree>(&Target), Catalog, OutError, Context)
-				: TryBuildNativeAiCatalog(Target, false, Catalog, OutError, Context);
+				? TryBuildStateTreeCatalog(*CastChecked<UStateTree>(&Target), Catalog, OutError, Context, &Observed, true)
+			: TryBuildNativeAiCatalog(Target, false, Catalog, OutError, Context, &Observed);
 			if (!Built)
 			{
 				return false;
 			}
-			if (Target.IsA<USmartObjectDefinition>())
-				OutResult.CatalogDiagnostic = CandidateCatalogIncomplete(
-					TEXT("SmartObject discovery enumerates fixed slot/binding entries and loaded native behavior/data types; it does not cover the complete native creation menu."), OutResult.Target);
-			else if (Target.IsA<UStateTree>())
-				OutResult.CatalogDiagnostic = CandidateCatalogIncomplete(
-					TEXT("StateTree discovery enumerates schema class-cache types and fixed structural entries; complete native creation-menu coverage is unavailable."), OutResult.Target);
 			OutResult.GraphName = Catalog.EditorGraph
 				? Catalog.EditorGraph->GetName() : FString();
 			TArray<int32> MatchedIndices;
@@ -1210,6 +1368,12 @@ namespace UE::UAI::QueryOwners::AiBehavior
 				}
 			}
 			OutResult.TotalMatches = MatchedIndices.Num();
+			if (Target.IsA<USmartObjectDefinition>() && (Context.AttachmentKind.IsEmpty() || Context.AttachmentKind == TEXT("behavior"))
+				&& (Query.TrimStartAndEnd().IsEmpty() || MatchedIndices.ContainsByPredicate([&](int32 I) {
+					return Catalog.Entries[I].Candidate.Kind == TEXT("smart_object_behavior");
+				})))
+				OutResult.CatalogDiagnostic = CandidateCatalogIncomplete(
+					TEXT("The matching behavior class picker for the next element needs that element's actual Details restrictions. Read-only append discovery has no such element handle."), OutResult.Target);
 			for (const int32 MatchedIndex : MatchedIndices)
 			{
 				OutResult.Candidates.Add(Catalog.Entries[MatchedIndex].Candidate);
@@ -1283,7 +1447,8 @@ namespace UE::UAI::QueryOwners::AiBehavior
 			FNativeAiActionCatalog Catalog;
 			FNativeAiActionEntry* Entry = nullptr;
 			const bool Built = Target.IsA<UStateTree>()
-				? TryBuildStateTreeCatalog(*CastChecked<UStateTree>(&Target), Catalog, OutError, Context)
+				? TryBuildStateTreeCatalog(*CastChecked<UStateTree>(&Target), Catalog, OutError, Context, nullptr,
+					Context.bTargetMenu || (Context.AttachmentKind.IsEmpty() && Select.Contains(TEXT("output"))))
 				: TryBuildNativeAiCatalog(Target, false, Catalog, OutError, Context);
 			if (!Built) return false;
 			if (!TrySelectNativeAiAction(

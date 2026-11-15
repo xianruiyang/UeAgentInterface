@@ -5,6 +5,7 @@
 #include "HAL/CriticalSection.h"
 #include "Templates/Function.h"
 #include "Templates/SharedPointer.h"
+#include <initializer_list>
 
 namespace UE::UAI::ContextResource
 {
@@ -56,6 +57,9 @@ namespace UE::UAI::ContextResource
 		bool TryChargeMany(
 			const TMap<EUeAgentResourceDimension, int64>& Amounts,
 			FUeAgentResourceChargeError& OutError);
+		bool TryChargeMany(
+			std::initializer_list<TPair<EUeAgentResourceDimension, int64>> Amounts,
+			FUeAgentResourceChargeError& OutError);
 		const FString& GetPath() const;
 
 	private:
@@ -67,6 +71,8 @@ namespace UE::UAI::ContextResource
 	{
 	public:
 		FUeAgentResourceTracker();
+		explicit FUeAgentResourceTracker(bool bInCollectUsage);
+		bool CollectsUsage() const { return bCollectUsage; }
 		FUeAgentResourceTracker(const FUeAgentResourceTracker&) = delete;
 		FUeAgentResourceTracker& operator=(const FUeAgentResourceTracker&) = delete;
 
@@ -80,8 +86,15 @@ namespace UE::UAI::ContextResource
 			const TMap<EUeAgentResourceDimension, int64>& Amounts,
 			const FString& Path,
 			FUeAgentResourceChargeError& OutError);
+		/** Fixed requests do not need a temporary heap map. Duplicate dimensions
+		 * retain TMap initializer semantics: first position, last supplied value. */
+		bool TryChargeMany(
+			std::initializer_list<TPair<EUeAgentResourceDimension, int64>> Amounts,
+			const FString& Path,
+			FUeAgentResourceChargeError& OutError);
 		FUeAgentResourceUsage Snapshot() const;
 	private:
+		const bool bCollectUsage = true;
 		TMap<EUeAgentResourceDimension, int64> Values;
 		mutable FCriticalSection Mutex;
 	};

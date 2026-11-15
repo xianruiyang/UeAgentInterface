@@ -10,6 +10,7 @@
 #include "Core/ExecutionMutation/UeAgentLongRunningOperation.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringDurableTransaction.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaImagePolicy.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -348,12 +349,12 @@ namespace UE::UAI::Composition::LongRunningSession
 			return ResultObject(Request, Root);
 		}
 
-		FUeAgentOperationResult ReceiptResult(
-			const FUeAgentOperationRequest& Request,
+		TSharedRef<FJsonObject> ReceiptObject(
 			const FOperationRef& Ref,
 			const FLongRunningOperationReceipt& Receipt,
-			const FString& OverrideStatus = FString(),
-			const FLongRunningOperationSnapshot* Snapshot = nullptr)
+			const FString& OverrideStatus,
+			const FLongRunningOperationSnapshot* Snapshot,
+			FDiagnostic& OutError)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 			Root->SetStringField(TEXT("schema"), TEXT("uai.long_running.receipt.v1"));
@@ -374,9 +375,29 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				// The receipt owns the terminal diagnostic; the earlier snapshot only supplies the signal.
 				PayloadError.Append(Receipt.GetDiagnostic());
-				return Failure(Request, RuntimeFailure(TEXT("long_running_session_signal_encoding_failed"), Ref.OperationId, TEXT("The latest operation signal could not be encoded."), PayloadError));
+				OutError = RuntimeFailure(TEXT("long_running_session_signal_encoding_failed"), Ref.OperationId, TEXT("The latest operation signal could not be encoded."), PayloadError);
 			}
-			return ResultObject(Request, Root, Receipt.GetDiagnostic());
+			return Root;
+		}
+		FUeAgentOperationResult ReceiptResult(const FUeAgentOperationRequest& Request, const FOperationRef& Ref,
+			const FLongRunningOperationReceipt& Receipt, const FString& OverrideStatus = FString(),
+			const FLongRunningOperationSnapshot* Snapshot = nullptr)
+		{
+			FDiagnostic Error;
+			const auto Root = ReceiptObject(Ref, Receipt, OverrideStatus, Snapshot, Error);
+			return Error.IsEmpty() ? ResultObject(Request, Root, Receipt.GetDiagnostic()) : Failure(Request, MoveTemp(Error));
+		}
+		bool SealMetadataWire(const FLongRunningOperationSnapshot& Snapshot, const FLongRunningOperationReceipt* Receipt,
+			FString& SnapshotWire, FString& ReceiptWire)
+		{
+			FDiagnostic Error;
+			const auto SnapshotJson = SnapshotObject(Snapshot, Error);
+			if (!Error.IsEmpty() || !Json::TryCanonicalize(SnapshotJson, SnapshotWire, Error)) return false;
+			if (Receipt) {
+				const auto ReceiptJson = ReceiptObject(OperationRefFromSnapshot(Snapshot), *Receipt, FString(), &Snapshot, Error);
+				if (!Error.IsEmpty() || !Json::TryCanonicalize(ReceiptJson, ReceiptWire, Error)) return false;
+			}
+			return true;
 		}
 
 		bool TryReadOperationRef(
@@ -677,7 +698,7 @@ namespace UE::UAI::Composition::LongRunningSession
 			, PieRuntimeScenarioFactory(MoveTemp(InPieRuntimeScenarioFactory))
 			, Owner(
 				MakeShared<FRejectingDefaultPort, ESPMode::ThreadSafe>(),
-				[]() { return FPlatformTime::Seconds(); })
+				[]() { return FPlatformTime::Seconds(); }, SealMetadataWire)
 		{
 			for (const FUeAgentLongRunningSessionActivationProfile& Profile
 				: ActivationProfiles)
@@ -1256,6 +1277,18 @@ namespace UE::UAI::Composition::LongRunningSession
 				const auto Result = MakeShared<FJsonObject>();
 				Result->SetStringField(TEXT("schema"), TEXT("uai.long_running.discovery.v1"));
 				Result->SetArrayField(TEXT("operations"), Entries);
+				TArray<FString> JournalIds;
+				TArray<FDiagnostic> RecoveryWarnings;
+				UeAgentAuthoringWorkspaceTransaction::DiscoverAuthoringJournals(JournalIds, RecoveryWarnings);
+				TArray<TSharedPtr<FJsonValue>> Journals;
+				for (const auto& Id : JournalIds) {
+					const auto Item = MakeShared<FJsonObject>(); Item->SetStringField(TEXT("journal_id"), Id);
+					Journals.Add(MakeShared<FJsonValueObject>(Item));
+				}
+				Result->SetArrayField(TEXT("durable_journals"), Journals);
+				Result->SetNumberField(TEXT("recoverable_journal_count"), JournalIds.Num());
+				Result->SetBoolField(TEXT("no_action_replayed"), true);
+				if (!RecoveryWarnings.IsEmpty()) Result->SetArrayField(TEXT("warnings"), UE::UAI::Contract::ToPublicDiagnostics(RecoveryWarnings, true));
 				return ResultObject(Request, Result);
 			}
 			if (Profile.CommandId == TEXT("operation.recover"))
@@ -1263,8 +1296,16 @@ namespace UE::UAI::Composition::LongRunningSession
 				FString OriginalRequestId, CommandId;
 				Root->TryGetStringField(TEXT("request_id"), OriginalRequestId);
 				Root->TryGetStringField(TEXT("command_id"), CommandId);
-				return State->Owner.Recover(CallerContext.GetCallerId(), OriginalRequestId, CommandId, Snapshot, OwnerError)
-					? SnapshotResult(Request, Snapshot) : Failure(Request, OwnerError);
+				if (State->Owner.Recover(CallerContext.GetCallerId(), OriginalRequestId, CommandId, Snapshot, OwnerError))
+					return SnapshotResult(Request, Snapshot);
+				if (CommandId == TEXT("content_graph.import_workspace")) {
+					TSharedPtr<FJsonObject> Recovery;
+					FDiagnostic RecoveryError;
+					if (UeAgentAuthoringWorkspaceTransaction::TryRecoverDurableRequest(OriginalRequestId, Recovery, RecoveryError))
+						return ResultObject(Request, Recovery.ToSharedRef());
+					OwnerError.Append(RecoveryError);
+				}
+				return Failure(Request, OwnerError);
 			}
 			if (Profile.CommandId == TEXT("operation.takeover"))
 			{
@@ -1288,6 +1329,10 @@ namespace UE::UAI::Composition::LongRunningSession
 			}
 			if (Profile.CommandId == TEXT("operation.status"))
 			{
+				FString Wire;
+				if (State->Owner.TryCopyMetadata(Ref.OperationId, Ref.OwnerLeaseId, Ref.ServerSessionId, false, Wire, OwnerError))
+					return FUeAgentOperationResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), FUeAgentContractValue(MoveTemp(Wire)));
+				if (!OwnerError.IsEmpty()) return Failure(Request, OwnerError, Ref.OperationId);
 				return State->Owner.GetSnapshot(
 						Ref.OperationId,
 						Ref.OwnerLeaseId,
@@ -1360,6 +1405,10 @@ namespace UE::UAI::Composition::LongRunningSession
 			FLongRunningOperationReceipt Receipt;
 			if (Profile.CommandId == TEXT("operation.receipt"))
 			{
+				FString Wire;
+				if (State->Owner.TryCopyMetadata(Ref.OperationId, Ref.OwnerLeaseId, Ref.ServerSessionId, true, Wire, OwnerError))
+					return FUeAgentOperationResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), FUeAgentContractValue(MoveTemp(Wire)));
+				if (!OwnerError.IsEmpty()) return Failure(Request, OwnerError, Ref.OperationId);
 				if (!State->Owner.GetSnapshot(Ref.OperationId, Ref.OwnerLeaseId,
 					Ref.ServerSessionId, Snapshot, OwnerError))
 					return Failure(Request, OwnerError, Ref.OperationId);
@@ -1450,6 +1499,15 @@ namespace UE::UAI::Composition::LongRunningSession
 					ESPMode::ThreadSafe> InState)
 				: State(MoveTemp(InState))
 			{
+			}
+
+			TUniquePtr<IUeAgentOperationReadScope> TryBeginConcurrentRead(const FUeAgentOperationRequest& Request) override
+			{
+				const auto* Profile = State->FindProfile(Request.GetDescriptorIdentity());
+				if (!Profile || (Profile->CommandId != TEXT("operation.status") && Profile->CommandId != TEXT("operation.receipt"))) return {};
+				TSharedPtr<FJsonObject> Root; FDiagnostic Error; FOperationRef Ref;
+				if (!Json::TryParseObject(Request.GetPayload().GetJsonValue(), Root, Error) || !TryReadOperationRef(Root, Ref, Error)) return {};
+				return State->Owner.TryBeginMetadataRead(Ref.OperationId);
 			}
 
 			FUeAgentOperationResult Submit(

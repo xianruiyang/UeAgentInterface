@@ -616,8 +616,9 @@ namespace UeAgentDeformerAuthoring
 					: TEXT("Semantic apply requires a non-empty request identifier."), TargetPath);
 			return false;
 		}
-		const auto& Plan = Prepared.GetPreflightResult().GetPlan();
-		if (!Plan.IsValid()) { OutError = AuthoringFailure(TEXT("deformer_semantic_plan_missing"), TEXT("The prepared Deformer import has no execution plan."), TargetPath); return false; }
+		auto PlanningResources = UE::UAI::HjsonWorkspace::MakeSemanticWorkspaceResourceTracker();
+		UE::UAI::PlanningPreflight::FPlanningPreflightPlanPtr Plan;
+		if (!Prepared.TryGetExecutionPlan(PlanningResources, Plan, OutError)) return false;
 		FPropertyEdits InlineProperties;
 		if (!BuildEdit(Prepared.GetWorkspace()->GetModel().Get(), *Asset, Edit, InlineProperties,
 			Prepared.GetWorkspace(), OutError)) return false;

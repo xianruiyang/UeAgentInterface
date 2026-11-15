@@ -2,15 +2,21 @@
 
 ## Scope
 
-T09 establishes the side-effect-free planning and provider-resolution boundary between the unified HJSON semantic model and later domain execution. It proves common parsing output, explicit change semantics, prewrite validation, initialization-graph planning, unique domain-provider registration and resolution, resource failure, and cleanup behavior. It does not claim a public domain import or any real UE object creation; T13 and the domain tasks consume this plan through their registered native creation providers.
-
-The only import-planning direction is:
-
-`directory | single_file | inline -> TryLoadHjsonImportSource -> unified semantic model -> explicit change set -> preflight -> initialization graph -> exact provider -> exact impact authorization -> immutable plan`
+The production boundary is shared source parsing and typed explicit intent,
+necessary current facts/conflict handling, existing native operation, actual
+results/diagnostics, then related workspace publication. Ordinary properties do
+not require a complete source asset graph. The initialization planner consumes
+actual changes, nodes, references, target binding and authorization; it no longer
+requires a twelve-slot semantic wrapper or an unrelated model fingerprint.
+This module contract does not by itself claim every domain's runtime coverage.
 
 `TryLoadHjsonImportSource` is the common side-effect-free source boundary. A semantic `directory` fixes one normalized root and resolves its manifest units and recursively referenced content, including newly authored files. Unreferenced user files are not semantic inputs. Referenced paths, parsing and semantic types retain their existing validation. Legacy content-graph bundles retain their declared-file/digest contract. `single_file` and `inline` validate the embedded manifest and units through the same resolver. Multi-file content exists only inside a directory workspace; it is not a fourth public source variant or a separate business route.
 
-Once the three public carriers resolve to the same `FUnifiedHjsonSemanticModel`, they produce the same planning semantics. Full-state, minimal-create, and local-edit intent remains on that common model. Omitted fields, items, relations, order, and layout do not synthesize deletion; create, delete, replace, clear, reorder, connect, disconnect, set, null, restore-default, and remove are explicit change kinds.
+The carriers share source syntax, type and explicit-change semantics. Complete
+legacy/embedded structure views are resolved at their adapter boundary; an
+ordinary value-only directory import keeps admitted rows and a scoped merge
+instead of compiling another complete asset. Omission never synthesizes deletion;
+real creation, deletion and relationships follow their existing domain contracts.
 
 ## Prewrite contract
 
@@ -46,7 +52,8 @@ before original-file locations are attached. Existing precise native-file locati
 
 ## Successful directory import refresh
 
-After native apply and final readback succeed, the public source-custody coordinator
+After native apply/save succeeds, observation diagnostics do not roll it back.
+When sufficient actual delta evidence is available, the public source-custody coordinator
 calls the target's existing exporter. Level returns its freshly captured export
 plan through an internal request-local output, and the shared artifact publisher
 publishes it directly back to the source root once. There is no intermediate
@@ -62,7 +69,10 @@ normal type-based layout and updates the import baseline. The response includes
 `workspace_refresh.status=refreshed`; the caller can edit that directory again.
 `workspace_refresh.warnings` reports cleanup problems after successful publication;
 these warnings do not invalidate the refreshed workspace or request a repeat import.
-If refresh fails after asset commit, the command fails with
+If attribution remains incomplete, success reports `workspace_refresh.status=pending`,
+public warnings and `retry_import=false`; the consumer frontier is not advanced
+with an empty delta. The exact accepted source is recognized without native replay.
+Other refresh failures after asset commit report
 `content_graph_import_applied_workspace_refresh_failed`; its detail explicitly
 reports `asset_applied=true`, `retry_import=false` and recovery instructions.
 This does not relabel an applied asset operation as rolled back. Failed asset
@@ -77,6 +87,26 @@ Source preparation reuses managed paths from the same verified semantic resolve
 used for revision/fingerprint recovery; it does not parse the directory again
 only to collect refresh paths. This is request-local reuse, with the existing
 complete canonical export and publication behavior retained.
+The domain-entry source checkpoint may hand its accepted immutable semantic
+result to the immediately following shared preparation once, for the same root,
+mode and managed-edit policy. A mismatch uses the normal resolver. This does not
+replace the independent publication-time source checkpoint or resource charging.
+
+Durable consumer history keeps legacy completed receipts at their original
+active paths. Within one command, bounded strong path guards and current kernel
+read leases can reuse completed receipt bytes across sequence and stream
+selection. Active records, unsupported proofs and budget misses are actually
+read; each consumer still enumerates current names. Once the producer seals its
+plan and consumer state, the common refresh/publication handoff releases these
+optional history reads before the publisher acquires its complete read set.
+Later history consumers start fresh. No history migration, durable index or
+cross-process unchanged proof is implied.
+
+For generation publication, source validation borrows the already held current
+file guard when available, while retaining metadata, identity, byte-proof and
+root-binding checks. Missing guarded paths use the original real observation.
+The complete publication read/write set, source conflict checks and recovery
+semantics remain unchanged; v2 uses its original observation fallback.
 The domain interval includes its own planning, apply, native update, persistence
 and readback; it does not claim to separate those internal stages. The refresh
 export interval covers capture and plan preparation for Level; publication belongs

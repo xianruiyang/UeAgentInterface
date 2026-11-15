@@ -535,7 +535,7 @@ namespace UE::UAI::Composition::GraphCompound
 	bool FTextureGraphSemanticCompositeRequest::IsValid() const
 	{
 		return !TargetRef.TrimStartAndEnd().IsEmpty()
-			&& (!Nodes.IsEmpty() || !Parameters.IsEmpty() || !Links.IsEmpty() || !Settings.IsEmpty());
+			&& (!Nodes.IsEmpty() || !Parameters.IsEmpty() || !Links.IsEmpty() || !Settings.IsEmpty() || !ElementSettings.IsEmpty());
 	}
 
 	bool TryCreateAudioMediaGraphBindings(

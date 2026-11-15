@@ -6,6 +6,7 @@
 #include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Core/HjsonWorkspace/UeAgentReflectedPropertyRows.h"
+#include "Core/HjsonWorkspace/UeAgentKeyedItemAuthoringProjection.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 
@@ -85,7 +86,8 @@ namespace UeAgentDetailsAuthoringService
 		}
 
 		bool BuildReadableSchema(const UeAgentAuthoringState::FStateSnapshot& Snapshot,
-			TArray<UE::UAI::HjsonWorkspace::FReadablePropertySchema>& OutSchema, FDiagnostic& OutError)
+			TArray<UE::UAI::HjsonWorkspace::FReadablePropertySchema>& OutSchema,
+			TMap<int32, TSharedPtr<FJsonObject>>& OrderedOwnedSchemas, FDiagnostic& OutError)
 		{
 			using namespace UE::UAI::HjsonWorkspace;
 			using namespace UE::UAI::StateSemantic;
@@ -98,9 +100,50 @@ namespace UeAgentDetailsAuthoringService
 					Captured.ValueDefinition, Value, Definition)) continue;
 				FUeAgentCanonicalValuePtr Type;
 				if (!CanonicalJson::TryFromJsonValue(MakeShared<FJsonValueObject>(Captured.Type.ToJsonObject()), Resources, Type, OutError)) return false;
+				FString ElementKind;
+				if (Definition && Definition->Type == EJson::Object
+					&& Definition->AsObject()->TryGetStringField(TEXT("element_kind"), ElementKind) && ElementKind == TEXT("owned_object"))
+					OrderedOwnedSchemas.Add(OutSchema.Num(), Definition->AsObject());
 				OutSchema.Add({Captured.TargetIdentity.GetSelector(TEXT("property_path")),
 					ReadablePropertyCategory(Captured.CategoryPath), ReadablePropertyTypeName(*Type)});
 			}
+			return true;
+		}
+
+		bool BindReadableOwnedItems(const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Proposed,
+			const FJsonObject& Definition, UE::UAI::ContextResource::FUeAgentResourceTracker& Resources,
+			TSharedPtr<FJsonValue>& Value, FDiagnostic& Error)
+		{
+			using namespace UE::UAI::HjsonWorkspace;
+			using namespace UE::UAI::StateSemantic;
+			if (Value->Type != EJson::Array) return true;
+			const auto& Items = Value->AsArray();
+			const bool bNeedsBinding = Items.ContainsByPredicate([](const TSharedPtr<FJsonValue>& Item) {
+				const TSharedPtr<FJsonObject>* Owned = nullptr;
+				return Item && Item->Type == EJson::Object && Item->AsObject()->TryGetObjectField(TEXT("owned_object"), Owned)
+					&& !(*Owned)->HasField(TEXT("owner_relative_path")) && ((*Owned)->HasField(TEXT("instance")) || (*Owned)->HasField(TEXT("name")));
+			});
+			if (!bNeedsBinding) return true;
+
+			const TArray<TSharedPtr<FJsonValue>>* CapturedItems = nullptr;
+			if (!Definition.TryGetArrayField(TEXT("items"), CapturedItems)) {
+				Error = FDiagnostic::Failure(TEXT("hjson_owned_property_schema_missing"),
+					TEXT("The captured owned-item array has no item definitions."), TEXT("hjson_import"));
+				Error.SourceKind = TEXT("native_result");
+				return false;
+			}
+			FUeAgentCanonicalValuePtr Captured;
+			if (!CanonicalJson::TryFromJsonValue(MakeShared<FJsonValueArray>(*CapturedItems), Resources, Captured, Error)) return false;
+			FWorkspaceError Failure;
+			TArray<FOrderedOwnedItemBinding> Bindings;
+			if (!TryResolveOrderedOwnedItems(Proposed, *Captured, Resources, Bindings, Failure)) {
+				Error = Failure.GetDiagnostic();
+				return false;
+			}
+			TArray<TSharedPtr<FJsonValue>> Bound;
+			Bound.Reserve(Bindings.Num());
+			for (int32 Index = 0; Index < Bindings.Num(); ++Index) Bound.Add(Bindings[Index].BuildReadableApplyItem(Items[Index]));
+			Value = MakeShared<FJsonValueArray>(Bound);
 			return true;
 		}
 
@@ -294,10 +337,18 @@ namespace UeAgentDetailsAuthoringService
 	bool DecodeReadableProperties(const UeAgentAuthoringState::FStateSnapshot& Snapshot,
 		const TSharedPtr<FJsonValue>& Categories, TArray<TSharedPtr<FJsonValue>>& OutDescriptors, FDiagnostic& OutError)
 	{
+		return DecodeReadableProperties(Snapshot, Categories, OutDescriptors, OutError, nullptr);
+	}
+
+	bool DecodeReadableProperties(const UeAgentAuthoringState::FStateSnapshot& Snapshot,
+		const TSharedPtr<FJsonValue>& Categories, TArray<TSharedPtr<FJsonValue>>& OutDescriptors, FDiagnostic& OutError,
+		TSharedPtr<FJsonObject>* BoundRows)
+	{
 		using namespace UE::UAI::HjsonWorkspace;
 		using namespace UE::UAI::StateSemantic;
 		TArray<FReadablePropertySchema> Schema;
-		if (!BuildReadableSchema(Snapshot, Schema, OutError)) return false;
+		TMap<int32, TSharedPtr<FJsonObject>> OrderedOwnedSchemas;
+		if (!BuildReadableSchema(Snapshot, Schema, OrderedOwnedSchemas, OutError)) return false;
 		auto Resources = MakeSemanticWorkspaceResourceTracker();
 		FUeAgentCanonicalValuePtr Canonical;
 		if (!CanonicalJson::TryFromJsonValue(Categories, Resources, Canonical, OutError)) return false;
@@ -305,14 +356,25 @@ namespace UeAgentDetailsAuthoringService
 		FUeAgentStateSemanticError Error;
 		if (!TryReadReadablePropertyRows(*Canonical, Schema, Rows, Error))
 		{ OutError = Error; return false; }
+		if (BoundRows) *BoundRows = MakeShared<FJsonObject>();
 		for (const auto& Row : Rows)
 		{
 			const auto& Item = Schema[Row.SchemaIndex];
 			auto Descriptor = MakeShared<FJsonObject>();
 			Descriptor->SetStringField(TEXT("property_path"), Item.Name);
 			// Preserve the source value identity for deferred text identity edits.
-			Descriptor->SetField(TEXT("value"), Categories->AsObject()->GetObjectField(Item.Category)
-				->GetObjectField(Item.Name)->TryGetField(TEXT("value")));
+			const auto& Bound = Categories->AsObject()->GetObjectField(Item.Category)->GetObjectField(Item.Name);
+			auto Value = Bound->TryGetField(TEXT("value"));
+			if (const auto* Definition = OrderedOwnedSchemas.Find(Row.SchemaIndex))
+				if (!BindReadableOwnedItems(*Row.Value, **Definition, Resources, Value, OutError)) {
+					OutError.PropertyPath = Item.Name;
+					return false;
+				}
+			Descriptor->SetField(TEXT("value"), Value);
+			if (BoundRows) {
+				if (!(*BoundRows)->HasField(Item.Category)) (*BoundRows)->SetObjectField(Item.Category, MakeShared<FJsonObject>());
+				(*BoundRows)->GetObjectField(Item.Category)->SetObjectField(Item.Name, Bound);
+			}
 			OutDescriptors.Add(MakeShared<FJsonValueObject>(Descriptor));
 		}
 		return true;
@@ -385,12 +447,18 @@ namespace UeAgentDetailsAuthoringService
 		TSharedPtr<FJsonObject>& OutDocument,
 		FDiagnostic& OutError)
 	{
+		if (!CaptureObjectSnapshot(Object, Policy, OutSnapshot, OutError)) return false;
+		return BuildPropertiesDocument(
+			OutSnapshot.CopyEntries(), FProjectionPolicy(), OutDocument, OutError);
+	}
+
+	bool CaptureObjectSnapshot(const UObject* Object, const FCapturePolicy& Policy,
+		UeAgentAuthoringState::FStateSnapshot& OutSnapshot, FDiagnostic& OutError)
+	{
 		TArray<UeAgentAuthoringState::FReadRequest> Requests;
 		if (!UeAgentAuthoringState::AppendEditableObjectPropertyReadRequests(
 				Object, MakeReadOptions(Policy), Requests, OutError)) return false;
-		if (!CaptureRequests(Requests, OutSnapshot, OutError)) return false;
-		return BuildPropertiesDocument(
-			OutSnapshot.CopyEntries(), FProjectionPolicy(), OutDocument, OutError);
+		return CaptureRequests(Requests, OutSnapshot, OutError);
 	}
 
 	bool CaptureStructProperties(
@@ -403,13 +471,21 @@ namespace UeAgentDetailsAuthoringService
 		TSharedPtr<FJsonObject>& OutDocument,
 		FDiagnostic& OutError)
 	{
+		if (!CaptureStructSnapshot(StructType, StructData, RootOwnerPath, NotificationOwner,
+			Policy, OutSnapshot, OutError)) return false;
+		return BuildPropertiesDocument(
+			OutSnapshot.CopyEntries(), FProjectionPolicy(), OutDocument, OutError);
+	}
+
+	bool CaptureStructSnapshot(UStruct* StructType, const void* StructData, const FString& RootOwnerPath,
+		const UObject* NotificationOwner, const FCapturePolicy& Policy,
+		UeAgentAuthoringState::FStateSnapshot& OutSnapshot, FDiagnostic& OutError)
+	{
 		TArray<UeAgentAuthoringState::FReadRequest> Requests;
 		if (!UeAgentAuthoringState::AppendEditableStructPropertyReadRequests(
 				StructType, StructData, RootOwnerPath, NotificationOwner,
 				MakeReadOptions(Policy), Requests, OutError)) return false;
-		if (!CaptureRequests(Requests, OutSnapshot, OutError)) return false;
-		return BuildPropertiesDocument(
-			OutSnapshot.CopyEntries(), FProjectionPolicy(), OutDocument, OutError);
+		return CaptureRequests(Requests, OutSnapshot, OutError);
 	}
 
 	bool AppendStructPropertyReadRequests(

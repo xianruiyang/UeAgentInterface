@@ -19,6 +19,7 @@
 #include "SkinnedAssetCompiler.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UnrealType.h"
+#include "UObject/StructOnScope.h"
 
 namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 {
@@ -70,9 +71,45 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
                     Row.Key.IsNone() ? TEXT("nonempty row name") : TEXT("available row storage"));
             }
         }
-        Table.EmptyTable();
-        Table.RowStruct = RowStruct;
-        for (const auto& Row : Rows) Table.AddRow(Row.Key, Row.Value, RowStruct);
+        TSet<const uint8*> CurrentStorage;
+        for (const auto& Row : Table.GetRowMap()) CurrentStorage.Add(Row.Value);
+        TMap<FName, TSharedPtr<FStructOnScope>> AliasedStorage;
+        for (const auto& Row : Rows) if (CurrentStorage.Contains(Row.Value)) {
+            if (Table.GetRowStruct() != RowStruct) return Reject(TEXT("An incoming row aliases storage of a different native row structure."),
+                TEXT("row_struct"), MakeShared<FJsonValueString>(Table.GetRowStruct()->GetPathName()), RowStruct->GetPathName());
+            const uint8* const* SameRow = Table.GetRowMap().Find(Row.Key);
+            if (Table.GetRowStruct() == RowStruct && SameRow && *SameRow == Row.Value) continue;
+            auto Copy = MakeShared<FStructOnScope>(RowStruct);
+            RowStruct->CopyScriptStruct(Copy->GetStructMemory(), Row.Value);
+            AliasedStorage.Add(Row.Key, MoveTemp(Copy));
+        }
+        // Keep storage whose native row is already the selected value. The
+        // caller may hand back same-table views; EmptyTable would invalidate
+        // those views before AddRow consumed them.
+        if (Table.GetRowStruct() != RowStruct) {
+            Table.EmptyTable(); Table.RowStruct = RowStruct;
+        } else {
+            TArray<FName> Removed;
+            for (const auto& Row : Table.GetRowMap()) if (!Rows.Contains(Row.Key)) Removed.Add(Row.Key);
+            // The editor's row-list removal destroys the stored row and notifies
+            // the table without invoking a single-row fixup on the deleted name.
+            for (const FName Name : Removed) {
+                if (!FDataTableEditorUtils::RemoveRow(&Table, Name)) {
+                    const FString EscapedName = Name.ToString().Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+                    return Reject(TEXT("The native DataTable editor could not remove the selected row."),
+                        TEXT("rows/") + EscapedName, MakeShared<FJsonValueString>(Name.ToString()), TEXT("removable existing row"));
+                }
+            }
+        }
+        int32 Reused = 0;
+        for (const auto& Row : Rows) {
+            const auto* Copy = AliasedStorage.Find(Row.Key);
+            const uint8* Value = Copy ? (*Copy)->GetStructMemory() : Row.Value;
+            const uint8* const* Current = Table.GetRowMap().Find(Row.Key);
+            if (Current && (*Current == Value || RowStruct->CompareScriptStruct(*Current, Value, PPF_None))) { ++Reused; continue; }
+            Table.AddRow(Row.Key, Value, RowStruct);
+        }
+        UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=data_table_native_rows membership=%d reused=%d replaced=%d"), Rows.Num(), Reused, Rows.Num() - Reused);
         return true;
     }
 

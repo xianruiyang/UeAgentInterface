@@ -2,6 +2,7 @@
 
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringPackageReadback.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringDurableTransaction.h"
 #include "Utilities/AuthoringObjectApply/UeAgentTemplatePropertyPropagation.h"
 #include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
 #include "Core/AssetDurable/UeAgentPackageSave.h"
@@ -19,6 +20,8 @@
 #include "Engine/Blueprint.h"
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
+#include "Misc/ScopeExit.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Containers/UnrealString.h"
@@ -137,9 +140,7 @@ FString NormalizeAbsoluteFilename(FString Path) {
 }
 
 FString DurableJournalRoot() {
-  return NormalizeAbsoluteFilename(
-      FPaths::ProjectSavedDir() /
-      TEXT("UeAgentInterface/DurableTransactions"));
+  return NormalizeAbsoluteFilename(UeAgentAuthoringWorkspaceTransaction::GetDurableTransactionRoot());
 }
 
 bool ResolvePackageArtifactPaths(const FPackageDurablePlan &Plan,
@@ -432,6 +433,8 @@ public:
 } // namespace
 
 namespace UeAgentAuthoringOperationApply {
+
+FString GetAuthoringDurableJournalRoot() { return DurableJournalRoot(); }
 const TCHAR *FPreparedOperationMutation::BackendId =
     TEXT("uai.operation_apply.v1");
 
@@ -789,17 +792,16 @@ void FOperationTransactionBackend::CapturePackageDirtyStates(
   for (int32 Index = 0; Index < Packages.Num(); ++Index) {
     UPackage* Package = Packages[Index];
     UE::UAI::EditorResources::CollectOwnedPackages(Package, Packages);
-    const bool bAlreadyCaptured = PackageDirtySnapshots.ContainsByPredicate(
-        [Package](const FPackageDirtySnapshot &Snapshot) {
-          return Snapshot.Package.Get() == Package;
-        });
-    if (bAlreadyCaptured)
-      continue;
-    FPackageDirtySnapshot &Snapshot = PackageDirtySnapshots.AddDefaulted_GetRef();
-    Snapshot.Package = Package;
-    Snapshot.PackageName = Package->GetName();
-    Snapshot.bWasDirty = Package->IsDirty();
+    CapturePackageDirtyState(Package);
   }
+}
+
+void FOperationTransactionBackend::CapturePackageDirtyState(UPackage* Package) {
+  if (!Package || PackageDirtySnapshotIndex.Contains(Package->GetName())) return;
+  const int32 Index = PackageDirtySnapshots.Num();
+  FPackageDirtySnapshot& Snapshot = PackageDirtySnapshots.AddDefaulted_GetRef();
+  Snapshot.Package = Package; Snapshot.PackageName = Package->GetName(); Snapshot.bWasDirty = Package->IsDirty();
+  PackageDirtySnapshotIndex.Add(Snapshot.PackageName, Index);
 }
 
 void FOperationTransactionBackend::RestorePackageDirtyStates() {
@@ -850,6 +852,7 @@ bool FOperationTransactionBackend::BeginWorkspace(
   CapturedMutations.Reset();
   bNativeStateReleased = false;
   PackageDirtySnapshots.Reset();
+  PackageDirtySnapshotIndex.Reset();
   DurablePackagePlans.Reset();
   if (Options.bUseEditorTransaction) {
     const FText Description =
@@ -884,8 +887,10 @@ bool FOperationTransactionBackend::CaptureRollback(
       return false;
     }
     TArray<UeAgentAuthoringState::FReadRequest> Requests;
-    if (!Prepared->State->BuildBeforeReadRequests(Requests, OutFailure) ||
-        !CaptureRequests(Requests, Prepared->BeforeSnapshot, OutFailure))
+    if (!Prepared->State->BuildBeforeReadRequests(Requests, OutFailure)) return false;
+    for (auto& Request : Requests) Request.bCaptureAuthoringProjection =
+        UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer::HasActualStateConsumer();
+    if (!CaptureRequests(Requests, Prepared->BeforeSnapshot, OutFailure))
       return false;
     Prepared->BeforeSnapshot.ReleaseNativeValues();
     Prepared->bBeforeCaptured = true;
@@ -1018,12 +1023,23 @@ bool FOperationTransactionBackend::ReloadForReadback(FOperationFailure &OutFailu
 bool FOperationTransactionBackend::FinalizeVerification(FOperationFailure &OutFailure) {
   if (!RequiresPersistentReadback())
     return true;
+  TGuardValue<bool> PublishedObservation(bObservingPublishedState, true);
+  const auto ObservationWarning = [&]() {
+    UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer::MarkObservationPending();
+    UeAgentAuthoringDiagnostics::ReportConsistencyWarning(OutFailure.Diagnostic.Code,
+        OutFailure.Diagnostic, TEXT("persisted_state_observation"));
+    OutFailure = FOperationFailure();
+  };
+  const auto FinalObservation = [&]() {
+    if (!Options.FinalReadback(OutFailure)) ObservationWarning();
+    return true;
+  };
   if (CapturedMutations.IsEmpty())
-    return Options.FinalReadback(OutFailure);
+    return FinalObservation();
   if (Options.ObservePublishedReadback && !PublishedReadbackPackages.IsEmpty()) {
     TArray<FOperationReadback> Readbacks;
-    if (!BuildReadbackRequests(Readbacks, OutFailure)) return false;
-    if (Readbacks.Num() == AppliedMutations.Num()) {
+    if (!BuildReadbackRequests(Readbacks, OutFailure)) { ObservationWarning(); return FinalObservation(); }
+    {
       bool bVerified = false;
       const TOptional<bool> Observed = Options.ObservePublishedReadback(
           PublishedReadbackPackages, Readbacks,
@@ -1035,9 +1051,9 @@ bool FOperationTransactionBackend::FinalizeVerification(FOperationFailure &OutFa
         if (Observed.GetValue() && !bVerified) {
           SetFailure(OutFailure, TEXT("operation_persisted_observation_incomplete"),
               TEXT("The persisted observer returned without executing the operation readback."));
-          return false;
+          ObservationWarning(); return FinalObservation();
         }
-        if (!Observed.GetValue()) return false;
+        if (!Observed.GetValue()) { ObservationWarning(); return FinalObservation(); }
         for (auto* Prepared : CapturedMutations)
           Prepared->ExpectedSnapshot.ReleaseNativeValues();
         // The published artifacts/checkpoint now own both durable versions,
@@ -1057,14 +1073,14 @@ bool FOperationTransactionBackend::FinalizeVerification(FOperationFailure &OutFa
             }
           }
         }
-        return Options.FinalReadback(OutFailure);
+        return FinalObservation();
       }
     }
   }
   if (!UnloadForReadback(OutFailure) || !ReloadForReadback(OutFailure) ||
       !Verify(OutFailure))
-    return false;
-  return Options.FinalReadback(OutFailure);
+    ObservationWarning();
+  return FinalObservation();
 }
 
 bool FOperationTransactionBackend::PrepareCheckpointRestore(FOperationFailure &OutFailure) {
@@ -1114,36 +1130,38 @@ bool FOperationTransactionBackend::ApplyUnit(
   if (!Prepared->State->ApplyProposed(OutFailure))
     return false;
 
-  FUeAgentInterfaceLogger::Log(
-      TEXT("StructuredApply phase=expected_snapshot_begin target=%s"),
-      *Prepared->State->GetTargetKey());
-  TArray<UeAgentAuthoringState::FReadRequest> ExpectedRequests;
-  // This is a native persistence baseline, not the original authored intent.
-  // Providers verify their retained decoded intent before supplying these
-  // requests; actual readback must not replace that independent expectation.
-  if (!Prepared->State->BuildExpectedReadRequests(ExpectedRequests,
-                                                  OutFailure) ||
-      !CaptureRequests(ExpectedRequests, Prepared->ExpectedSnapshot,
-                       OutFailure)) {
-    UeAgentAuthoringDiagnostics::ReportConsistencyWarning(OutFailure.Diagnostic.Code,
-        OutFailure.Diagnostic, TEXT("expected_state_observation"));
-    OutFailure = FOperationFailure();
-  } else {
-    Prepared->bExpectedCaptured = true;
-  }
-
-  UE::UAI::Contract::FDiagnostic NormalizationError;
-  if (!UeAgentNativeNormalizationIntent::FinalizeValues(Prepared->ExpectedSnapshot, NormalizationError)) {
-    UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("native_normalization_readback_failed"),
-        NormalizationError, TEXT("expected_state_observation"));
-  }
-  FUeAgentInterfaceLogger::Log(
-      TEXT("StructuredApply phase=expected_snapshot_end target=%s requests=%d"),
-      *Prepared->State->GetTargetKey(), ExpectedRequests.Num());
+  const bool bExpectedAfterLifecycle = Prepared->State->CaptureExpectedAfterLifecycle();
+  const auto CaptureExpected = [&] {
+    FUeAgentInterfaceLogger::Log(
+        TEXT("StructuredApply phase=expected_snapshot_begin target=%s after_lifecycle=%s"),
+        *Prepared->State->GetTargetKey(), bExpectedAfterLifecycle ? TEXT("true") : TEXT("false"));
+    TArray<UeAgentAuthoringState::FReadRequest> ExpectedRequests;
+    // A persistence expectation compares native memory with independent disk
+    // readback. Property intent is frozen from decoded desired storage and is
+    // verified separately; neither observation replaces that authored intent.
+    if (!Prepared->State->BuildExpectedReadRequests(ExpectedRequests, OutFailure) ||
+        !CaptureRequests(ExpectedRequests, Prepared->ExpectedSnapshot, OutFailure)) {
+      UeAgentAuthoringDiagnostics::ReportConsistencyWarning(OutFailure.Diagnostic.Code,
+          OutFailure.Diagnostic, TEXT("expected_state_observation"));
+      OutFailure = FOperationFailure();
+    } else {
+      Prepared->bExpectedCaptured = true;
+    }
+    UE::UAI::Contract::FDiagnostic NormalizationError;
+    if (!UeAgentNativeNormalizationIntent::FinalizeValues(Prepared->ExpectedSnapshot, NormalizationError)) {
+      UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("native_normalization_readback_failed"),
+          NormalizationError, TEXT("expected_state_observation"));
+    }
+    FUeAgentInterfaceLogger::Log(
+        TEXT("StructuredApply phase=expected_snapshot_end target=%s requests=%d"),
+        *Prepared->State->GetTargetKey(), ExpectedRequests.Num());
+  };
+  if (!bExpectedAfterLifecycle) CaptureExpected();
   if (!Prepared->State->ApplyLifecycle(OutFailure))
     return false;
   Prepared->bLifecycleApplied = true;
   AppliedMutations.Add(Prepared);
+  if (bExpectedAfterLifecycle) CaptureExpected();
   return true;
 }
 
@@ -1242,7 +1260,7 @@ bool FOperationTransactionBackend::BuildDurableArtifactInventory(
         return false;
       }
       bool bAlreadyDeclared = false;
-      for (const auto &Existing : DurablePackagePlans) {
+      for (auto &Existing : DurablePackagePlans) {
         if (!Existing.PackageName.Equals(Plan.PackageName, ESearchCase::IgnoreCase))
           continue;
         if (Existing.ReadbackPolicy != Plan.ReadbackPolicy || Existing.BeforePresence != Plan.BeforePresence) {
@@ -1278,6 +1296,7 @@ bool FOperationTransactionBackend::BuildDurableArtifactInventory(
           DurablePackagePlans.Reset();
           return false;
         }
+        if (!Existing.CollectOwnedPackages && Plan.CollectOwnedPackages) Existing.CollectOwnedPackages = Plan.CollectOwnedPackages;
         bAlreadyDeclared = true;
         break;
       }
@@ -1295,7 +1314,14 @@ bool FOperationTransactionBackend::BuildDurableArtifactInventory(
   for (int32 Index = 0; Index < DurablePackagePlans.Num(); ++Index) {
     const auto Parent = DurablePackagePlans[Index];
     TArray<UPackage*> Owned;
-    UE::UAI::EditorResources::CollectOwnedPackages(Parent.Package.Get(), Owned);
+    if (Parent.CollectOwnedPackages) {
+      // Flags have an actual after-mutation consumer below. This metadata
+      // inventory does not serialize/backup every loaded external package.
+      TArray<UPackage*> Loaded;
+      UE::UAI::EditorResources::CollectOwnedPackages(Parent.Package.Get(), Loaded);
+      for (UPackage* Package : Loaded) CapturePackageDirtyState(Package);
+      Parent.CollectOwnedPackages(Parent.Package.Get(), Owned);
+    } else UE::UAI::EditorResources::CollectOwnedPackages(Parent.Package.Get(), Owned);
     for (UPackage* Package : Owned) {
       if (DurablePackagePlans.ContainsByPredicate([&](const auto& Plan) { return Plan.PackageName == Package->GetName(); })) continue;
       FPackageDurablePlan Plan;
@@ -1305,6 +1331,7 @@ bool FOperationTransactionBackend::BuildDurableArtifactInventory(
       Plan.TopLevelAsset = Package->FindAssetInPackage();
       Plan.OwningPackageName = Parent.PackageName;
       Plan.Intent = Parent.Intent;
+      Plan.CollectOwnedPackages = Parent.CollectOwnedPackages;
       DurablePackagePlans.Add(MoveTemp(Plan));
     }
   }
@@ -1321,6 +1348,9 @@ bool FOperationTransactionBackend::StageDurableArtifacts(
     TArray<UeAgentAuthoringWorkspaceTransaction::FDurableArtifact>
         &InOutArtifacts,
     FOperationFailure &OutFailure) {
+  const double Started = FPlatformTime::Seconds();
+  ON_SCOPE_EXIT { UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=durable_stage_after seconds=%.6f packages=%d"),
+      FPlatformTime::Seconds() - Started, DurablePackagePlans.Num()); };
   OutFailure = FOperationFailure();
   if (!bWorkspaceOpen || !Options.PackageStager.IsValid() ||
       DurablePackagePlans.IsEmpty()) {
@@ -1358,17 +1388,45 @@ bool FOperationTransactionBackend::CollectAdditionalDurableArtifacts(
   for (int32 Index = 0; Index < DurablePackagePlans.Num(); ++Index) {
     const auto Parent = DurablePackagePlans[Index];
     TArray<UPackage*> Owned;
-    UE::UAI::EditorResources::CollectOwnedPackages(Parent.Package.Get(), Owned);
+    TSet<UPackage*> NewlyDirtyOutsideScope;
+    if (Parent.CollectOwnedPackages) {
+      Parent.CollectOwnedPackages(Parent.Package.Get(), Owned);
+      TArray<UPackage*> Loaded;
+      UE::UAI::EditorResources::CollectOwnedPackages(Parent.Package.Get(), Loaded);
+      for (UPackage* Package : Loaded) {
+        const int32* Before = PackageDirtySnapshotIndex.Find(Package->GetName());
+        // A real newly dirty dependency is part of this operation, even if it
+        // is outside the originally selected actor package set. Pre-existing
+        // unrelated dirty state is not silently saved by a local edit.
+        if (Package->IsDirty() && (!Before || !PackageDirtySnapshots[*Before].bWasDirty)) {
+          if (!Owned.Contains(Package)) NewlyDirtyOutsideScope.Add(Package);
+          Owned.AddUnique(Package);
+        }
+      }
+    } else UE::UAI::EditorResources::CollectOwnedPackages(Parent.Package.Get(), Owned);
     for (UPackage* Package : Owned) {
       if (DurablePackagePlans.ContainsByPredicate([&](const auto& Plan) { return Plan.PackageName == Package->GetName(); })) continue;
       FPackageDurablePlan Plan;
       Plan.PlanId = Package->GetName(); Plan.PackageName = Package->GetName(); Plan.Package = Package;
       Plan.TopLevelAsset = Package->FindAssetInPackage(); Plan.OwningPackageName = Parent.PackageName;
       Plan.Intent = Parent.Intent;
+      Plan.CollectOwnedPackages = Parent.CollectOwnedPackages;
       // Existing loaded owned state was captured during preparation. A package
       // first allocated/loaded by this operation has only its disk before-image.
       Plan.BeforePresence = FPackageName::DoesPackageExist(Plan.PackageName)
           ? EPackageBeforePresence::Present : EPackageBeforePresence::Absent;
+      if (NewlyDirtyOutsideScope.Contains(Package) && Plan.BeforePresence == EPackageBeforePresence::Present) {
+        // This is observed expansion after native work, not a hypothetical
+        // callback gate. Persist/recover its real package; do not synthesize a
+        // full-world before or silently attribute its fields to this commit.
+        UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer::MarkObservationPending();
+        auto Notice = UE::UAI::Contract::FDiagnostic::Failure(TEXT("owned_package_observation_pending"),
+            TEXT("The edit dirtied an additional existing owned package outside the captured field scope. The package is included in the transaction, but its complete field difference is not attributed; synchronize explicitly without replaying the import."),
+            TEXT("native_observation"), Plan.PackageName);
+        Notice.Severity = UE::UAI::Contract::ESeverity::Warning; Notice.RetryImport = false;
+        Notice.RecoveryAction = TEXT("synchronize_incremental_or_full_without_replaying_import");
+        UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Notice);
+      }
       Added.Add(Plan); DurablePackagePlans.Add(MoveTemp(Plan));
     }
   }
@@ -1378,6 +1436,9 @@ bool FOperationTransactionBackend::CollectAdditionalDurableArtifacts(
 bool FOperationTransactionBackend::StageMemoryCheckpoint(
     TArray<UeAgentAuthoringWorkspaceTransaction::FDurableArtifact> &InOutArtifacts,
     FOperationFailure &OutFailure) {
+  const double Started = FPlatformTime::Seconds();
+  ON_SCOPE_EXIT { UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=durable_stage_before seconds=%.6f packages=%d"),
+      FPlatformTime::Seconds() - Started, DurablePackagePlans.Num()); };
   if (!bWorkspaceOpen || !Options.PackageStager.IsValid() || DurablePackagePlans.IsEmpty()) {
     SetFailure(OutFailure, TEXT("durable_package_stage_invalid"),
         !bWorkspaceOpen ? TEXT("The operation workspace is not open.")
@@ -1409,12 +1470,10 @@ bool FOperationTransactionBackend::BuildReadbackRequests(
     OutFailure = FOperationFailure();
   };
   for (FPreparedOperationMutation *Prepared : AppliedMutations) {
-    if (!Prepared || !Prepared->State.IsValid() ||
-        !Prepared->bExpectedCaptured) {
+    if (!Prepared || !Prepared->State.IsValid()) {
       SetFailure(OutFailure, TEXT("operation_expected_snapshot_missing"),
           !Prepared ? TEXT("The applied mutation is null.")
-          : !Prepared->State.IsValid() ? TEXT("The applied mutation has no operation state.")
-          : TEXT("The expected operation snapshot was not captured."));
+          : TEXT("The applied mutation has no operation state."));
       Warn();
       continue;
     }
@@ -1423,22 +1482,32 @@ bool FOperationTransactionBackend::BuildReadbackRequests(
     if (!Prepared->State->BuildActualReadRequests(ActualRequests, OutFailure))
       { Warn(); continue; }
     OutReadbacks.Add({Prepared->State->GetResolvedOperation(),
-        MoveTemp(ActualRequests), &Prepared->ExpectedSnapshot});
+        MoveTemp(ActualRequests), Prepared->bExpectedCaptured ? &Prepared->ExpectedSnapshot : nullptr,
+        Prepared->bBeforeCaptured ? &Prepared->BeforeSnapshot : nullptr});
   }
   return true;
 }
 
 bool FOperationTransactionBackend::VerifyReadbackRequests(
-    const TArray<FOperationReadback>& Readbacks, FOperationFailure& OutFailure) {
+    TArray<FOperationReadback>& Readbacks, FOperationFailure& OutFailure) {
   const auto Warn = [&]() {
     UeAgentAuthoringDiagnostics::ReportConsistencyWarning(OutFailure.Diagnostic.Code,
         OutFailure.Diagnostic, TEXT("operation_state_observation"));
     OutFailure = FOperationFailure();
   };
-  for (const FOperationReadback& Readback : Readbacks) {
+  for (FOperationReadback& Readback : Readbacks) {
     UeAgentAuthoringState::FStateSnapshot ActualSnapshot;
+    for (auto& Request : Readback.Requests) Request.bCaptureAuthoringProjection = bObservingPublishedState
+        && UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer::HasActualStateConsumer();
     if (!CaptureRequests(Readback.Requests, ActualSnapshot, OutFailure))
       { Warn(); continue; }
+
+    if (bObservingPublishedState && Readback.Before)
+      UeAgentAuthoringWorkspaceTransaction::FScopedDurableConsumer::ObserveActualState(*Readback.Before, ActualSnapshot);
+
+    // A missing expected observation already has its warning. It does not
+    // erase a real before/final pair needed by the committed consumer.
+    if (!Readback.Expected) continue;
 
     UeAgentAuthoringSemanticCompare::FComparisonReport Report;
     if (!UeAgentAuthoringSemanticCompare::CompareSnapshots(
@@ -1470,6 +1539,9 @@ bool FOperationTransactionBackend::RollbackUnit(
 
 bool FOperationTransactionBackend::EndWorkspace(bool bCommit,
                                                 FOperationFailure &OutFailure) {
+  const double Started = FPlatformTime::Seconds();
+  ON_SCOPE_EXIT { UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=operation_end_workspace seconds=%.6f commit=%s"),
+      FPlatformTime::Seconds() - Started, bCommit ? TEXT("true") : TEXT("false")); };
   OutFailure = FOperationFailure();
   if (!bWorkspaceOpen) {
     SetFailure(OutFailure, TEXT("operation_workspace_not_open"), TEXT("The operation workspace is not open."));
@@ -1504,6 +1576,7 @@ bool FOperationTransactionBackend::EndWorkspace(bool bCommit,
   if (!bNeedsDurableFinalization) {
     TemplatePropagation.Reset();
     PackageDirtySnapshots.Reset();
+    PackageDirtySnapshotIndex.Reset();
     DurablePackagePlans.Reset();
   }
   bAwaitingDurableFinalization = bNeedsDurableFinalization;
@@ -1512,6 +1585,9 @@ bool FOperationTransactionBackend::EndWorkspace(bool bCommit,
 }
 
 bool FOperationTransactionBackend::FinalizeDurableCommit(bool bCommitted, FOperationFailure& OutFailure) {
+  const double Started = FPlatformTime::Seconds();
+  ON_SCOPE_EXIT { UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=durable_commit_finalize seconds=%.6f committed=%s"),
+      FPlatformTime::Seconds() - Started, bCommitted ? TEXT("true") : TEXT("false")); };
   OutFailure = FOperationFailure();
   if (!bAwaitingDurableFinalization)
     return true;
@@ -1539,6 +1615,7 @@ bool FOperationTransactionBackend::FinalizeDurableCommit(bool bCommitted, FOpera
   }
   TemplatePropagation.Reset();
   PackageDirtySnapshots.Reset();
+  PackageDirtySnapshotIndex.Reset();
   DurablePackagePlans.Reset();
   bAwaitingDurableFinalization = false;
   return bRestored;

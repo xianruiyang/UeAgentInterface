@@ -24,17 +24,6 @@ namespace
 		TEXT("sha256:4fb13f6cd52d14c75096f9850a27356e8350c1955adda5e3bc9f588abc1488d1");
 	static const TCHAR* PlanFingerprint =
 		TEXT("sha256:17119ca1227d4676f1f179742cf43c677a381a6052883d1023cc4baa05d7c811");
-	static const TCHAR* InventorySemantic =
-		TEXT("sha256:41536f1320056b89c09fbd26aa8038876a023f49a382f2c57de33e5405389379");
-	static const TCHAR* ReferenceClosureSemantic =
-		TEXT("sha256:ac432558d81aade34196ea0ca5afc2547f324541ace1f3c403cbd4f6bbecf1d2");
-	static const TCHAR* ContentDigestsSemantic =
-		TEXT("sha256:ca6713a93916b93e01c1b5433a4545262d7ebf7185e347c076fd69bdf688fbff");
-	static const TCHAR* ContractSemantic =
-		TEXT("sha256:f6fa0253b0c8759bdccd17a99425bd6050947581c4df1e0f05c90206c0f8c607");
-	static const TCHAR* BusinessSemantic =
-		TEXT("sha256:2d649f413dd147499f95d2aefd94676c38f48b40e875bef1e56b0a9dfadccd64");
-
 	static TArray<uint8> Utf8(const FString& Text)
 	{
 		const FTCHARToUTF8 Converted(*Text);
@@ -48,16 +37,6 @@ namespace
 	static FUeAgentResourceTracker MakeTracker()
 	{
 		return FUeAgentResourceTracker();
-	}
-
-	static FExportSemanticSignature ExpectedSemantic()
-	{
-		return FExportSemanticSignature(
-			InventorySemantic,
-			ReferenceClosureSemantic,
-			ContentDigestsSemantic,
-			ContractSemantic,
-			BusinessSemantic);
 	}
 
 	static FString TestRoot(const FString& Leaf)
@@ -116,7 +95,6 @@ namespace
 		virtual bool TryCaptureWorkspace(
 			const FUeAgentStateRevision& Frozen,
 			FExportWorkspacePlanPtr& OutPlan,
-			FExportSemanticSignature& OutSemantic,
 			FArtifactPublishError& OutError) override
 		{
 			Steps.Add(TEXT("capture"));
@@ -136,37 +114,6 @@ namespace
 				MoveTemp(Files),
 				PlanFingerprint,
 				ObservedTokens);
-			OutSemantic = ExpectedSemantic();
-			return true;
-		}
-
-		virtual bool TryRebuildStagedWorkspace(
-			const FString& StagedWorkspacePath,
-			const EWorkspaceKind WorkspaceKind,
-			const FString& EntryFile,
-			FUeAgentResourceTracker& Resources,
-			FExportSemanticSignature& OutSemantic,
-			FArtifactPublishError& OutError) override
-		{
-			Steps.Add(TEXT("rebuild"));
-			if (WorkspaceKind != EWorkspaceKind::Directory
-				|| EntryFile != TEXT("asset.hjson")
-				|| !IFileManager::Get().FileExists(
-					*(StagedWorkspacePath / EntryFile)))
-			{
-				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("fixture_staging_invalid"), FString(), TEXT("artifact_publish"), FString(), StagedWorkspacePath);
-				return false;
-			}
-			OutSemantic = ExpectedSemantic();
-			if (bReturnSemanticMismatch)
-			{
-				OutSemantic = FExportSemanticSignature(
-					InventorySemantic,
-					ReferenceClosureSemantic,
-					ContentDigestsSemantic,
-					ContractSemantic,
-					TEXT("sha256:0000000000000000000000000000000000000000000000000000000000000000"));
-			}
 			return true;
 		}
 
@@ -182,7 +129,6 @@ namespace
 		}
 
 		TArray<FString> Steps;
-		bool bReturnSemanticMismatch = false;
 		bool bReturnChangedRevision = false;
 
 	private:
@@ -226,13 +172,13 @@ bool FUeAgentStrictV2T08VerifiedPipelineTest::RunTest(const FString& Parameters)
 	TestEqual(
 		TEXT("pipeline preserves the mandatory order"),
 		FString::Join(Source->Steps, TEXT(",")),
-		FString(TEXT("freeze,capture,rebuild,recheck")));
-	TestTrue(TEXT("semantic rebuild is recorded"), Receipt.WasSemanticWorkspaceVerified());
+		FString(TEXT("freeze,capture,recheck")));
+	TestFalse(TEXT("receipt does not claim an independent rebuild"), Receipt.WasSemanticWorkspaceVerified());
 	TestTrue(TEXT("target version recheck is recorded"), Receipt.WasTargetVersionRechecked());
 	TestEqual(
-		TEXT("business semantics are bound to the receipt"),
+		TEXT("retired semantic signature remains empty in the compatibility receipt"),
 		Receipt.GetSemanticVerificationFields().FindRef(TEXT("business_semantic")),
-		FString(BusinessSemantic));
+		FString());
 	TestTrue(
 		TEXT("complete workspace is atomically visible"),
 		IFileManager::Get().FileExists(*(Final / TEXT("asset.hjson"))));
@@ -242,29 +188,17 @@ bool FUeAgentStrictV2T08VerifiedPipelineTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentStrictV2T08SemanticAndVersionFailureTest,
-	"UAI.StrictV2.T08.HJSON.EXPORT.CORE.SemanticAndVersionFailure",
+	FUeAgentStrictV2T08VersionFailureTest,
+	"UAI.StrictV2.T08.HJSON.EXPORT.CORE.VersionFailure",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentStrictV2T08SemanticAndVersionFailureTest::RunTest(const FString& Parameters)
+bool FUeAgentStrictV2T08VersionFailureTest::RunTest(const FString& Parameters)
 {
 	const FString Root = TestRoot(TEXT("semantic_version_failure"));
 	const FString Final = Root / TEXT("final");
 	ResetRoot(Root);
 	FArtifactPublishReceipt Receipt;
 	FArtifactPublishError Error;
-
-	const TSharedRef<FFixtureSource> SemanticMismatch = MakeShared<FFixtureSource>();
-	SemanticMismatch->bReturnSemanticMismatch = true;
-	TestFalse(
-		TEXT("semantic mismatch blocks publication"),
-		Export(Final, SemanticMismatch, Receipt, Error));
-	TestEqual(
-		TEXT("semantic mismatch has a typed error"),
-		Error.Code,
-		FString(TEXT("artifact_semantic_mismatch")));
-	TestFalse(TEXT("semantic mismatch publishes no final"), IFileManager::Get().DirectoryExists(*Final));
-	TestFalse(TEXT("semantic mismatch cleans staging"), HasTransactionDebris(Root));
 
 	const TSharedRef<FFixtureSource> VersionConflict = MakeShared<FFixtureSource>();
 	VersionConflict->bReturnChangedRevision = true;

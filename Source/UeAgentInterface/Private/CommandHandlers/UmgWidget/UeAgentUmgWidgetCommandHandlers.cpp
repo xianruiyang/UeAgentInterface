@@ -103,7 +103,8 @@ namespace UE::UAI::CommandHandlers::UmgWidget
 		bool bReadOnly = false;
 		if (!DomainAdapters::UmgWidget::TryExecuteContentGraph(
 			Request.GetCommandId(), Request.GetTargetIdentity(),
-			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+			Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
+			Request.GetWorkspaceExportPreparation().Get()))
 		{
 			return false;
 		}

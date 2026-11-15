@@ -5,6 +5,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/ScopeRWLock.h"
+#include "String/ParseTokens.h"
 
 namespace UeAgentAuthoringIdentity
 {
@@ -17,28 +18,135 @@ namespace UeAgentAuthoringIdentity
 			return Value;
 		}
 
-		FString EscapeKeyPart(FString Value)
+		// Same serialized runs, but a validation consumer needs no owning key.
+		// FString::Equals first compares lengths, then the C-string prefix. Keep
+		// that original embedded-NUL behavior rather than inventing a new grammar.
+		struct FKeyComparison
 		{
-			Value.ReplaceInline(TEXT("%"), TEXT("%25"), ESearchCase::CaseSensitive);
-			Value.ReplaceInline(TEXT("|"), TEXT("%7C"), ESearchCase::CaseSensitive);
-			Value.ReplaceInline(TEXT("&"), TEXT("%26"), ESearchCase::CaseSensitive);
-			Value.ReplaceInline(TEXT("="), TEXT("%3D"), ESearchCase::CaseSensitive);
-			Value.ReplaceInline(TEXT("\r"), TEXT("%0D"), ESearchCase::CaseSensitive);
-			Value.ReplaceInline(TEXT("\n"), TEXT("%0A"), ESearchCase::CaseSensitive);
-			Value.ReplaceInline(TEXT("\t"), TEXT("%09"), ESearchCase::CaseSensitive);
-			return Value;
+			const FString& Expected;
+			int32 Written = 0;
+			bool bEqual = true, bTerminated = false;
+			void AppendRun(FStringView Value, bool bLowerCase, int32 NullIndex)
+			{
+				const int32 Begin = Written;
+				Written += Value.Len();
+				if (!bEqual || bTerminated || Value.IsEmpty()) return;
+				if (Begin > Expected.Len() || Value.Len() > Expected.Len() - Begin) { bEqual = false; return; }
+				if (!bLowerCase) {
+					bEqual = FCString::Strnicmp(Value.GetData(), *Expected + Begin, Value.Len()) == 0;
+					bTerminated = bEqual && NullIndex != INDEX_NONE;
+					return;
+				}
+				TCHAR Lower[128];
+				for (int32 Offset = 0; Offset < Value.Len(); Offset += UE_ARRAY_COUNT(Lower)) {
+					const int32 Count = FMath::Min<int32>(UE_ARRAY_COUNT(Lower), Value.Len() - Offset);
+					for (int32 Index = 0; Index < Count; ++Index) Lower[Index] = FChar::ToLower(Value[Offset + Index]);
+					if (FCString::Strnicmp(Lower, *Expected + Begin + Offset, Count) != 0) { bEqual = false; return; }
+					if (NullIndex >= Offset && NullIndex < Offset + Count) { bTerminated = true; return; }
+				}
+			}
+			void AppendChars(const TCHAR* Text, int32 Count) { AppendRun(FStringView(Text, Count), false, INDEX_NONE); }
+			void AppendChar(TCHAR Character) { if (Character) AppendChars(&Character, 1); }
+			bool Matches() const { return bEqual && Written == Expected.Len(); }
+		};
+
+		void AppendKeyRun(FString& Out, FStringView Value, bool bLowerCase, int32 = INDEX_NONE)
+		{
+			const int32 Begin = Out.Len();
+			Out.AppendChars(Value.GetData(), Value.Len());
+			if (bLowerCase)
+			{
+				TCHAR* Data = Out.GetCharArray().GetData();
+				for (int32 Index = Begin; Index < Out.Len(); ++Index) Data[Index] = FChar::ToLower(Data[Index]);
+			}
 		}
 
-		FString UnescapeKeyPart(FString Value)
+		void AppendKeyRun(FKeyComparison& Out, FStringView Value, bool bLowerCase, int32 NullIndex = INDEX_NONE)
 		{
-			Value.ReplaceInline(TEXT("%09"), TEXT("\t"), ESearchCase::IgnoreCase);
-			Value.ReplaceInline(TEXT("%0A"), TEXT("\n"), ESearchCase::IgnoreCase);
-			Value.ReplaceInline(TEXT("%0D"), TEXT("\r"), ESearchCase::IgnoreCase);
-			Value.ReplaceInline(TEXT("%3D"), TEXT("="), ESearchCase::IgnoreCase);
-			Value.ReplaceInline(TEXT("%26"), TEXT("&"), ESearchCase::IgnoreCase);
-			Value.ReplaceInline(TEXT("%7C"), TEXT("|"), ESearchCase::IgnoreCase);
-			Value.ReplaceInline(TEXT("%25"), TEXT("%"), ESearchCase::IgnoreCase);
-			return Value;
+			Out.AppendRun(Value, bLowerCase, NullIndex);
+		}
+
+		template<typename Destination>
+		void AppendEscapedKeyPart(Destination& Out, FStringView Value, bool bLowerCase = false)
+		{
+			int32 RunStart = 0, NullInputIndex = INDEX_NONE;
+			bool bReplaced = false;
+			for (int32 Index = 0; Index < Value.Len(); ++Index)
+			{
+				const TCHAR Character = Value[Index];
+				if (Character == TEXT('\0') && NullInputIndex == INDEX_NONE)
+				{
+					// Unequal-length ReplaceInline reconstructs through C strings.
+					// Keep that original NUL boundary, including a match after NUL.
+					if (bReplaced) { AppendKeyRun(Out, Value.Mid(RunStart, Index - RunStart), bLowerCase); return; }
+					NullInputIndex = Index;
+				}
+				const TCHAR* Escaped = nullptr;
+				switch (Character)
+				{
+				case TEXT('%'): Escaped = TEXT("%25"); break;
+				case TEXT('|'): Escaped = TEXT("%7C"); break;
+				case TEXT('&'): Escaped = TEXT("%26"); break;
+				case TEXT('='): Escaped = TEXT("%3D"); break;
+				case TEXT('\r'): Escaped = TEXT("%0D"); break;
+				case TEXT('\n'): Escaped = TEXT("%0A"); break;
+				case TEXT('\t'): Escaped = TEXT("%09"); break;
+				default: break;
+				}
+				if (!Escaped) continue;
+				if (NullInputIndex != INDEX_NONE) { AppendKeyRun(Out, Value.Mid(RunStart, NullInputIndex - RunStart), bLowerCase); return; }
+				AppendKeyRun(Out, Value.Mid(RunStart, Index - RunStart), bLowerCase);
+				Out.AppendChars(Escaped, 3);
+				RunStart = Index + 1;
+				bReplaced = true;
+			}
+			AppendKeyRun(Out, Value.Mid(RunStart), bLowerCase,
+				NullInputIndex == INDEX_NONE ? INDEX_NONE : NullInputIndex - RunStart);
+		}
+
+		FString UnescapeKeyPart(FStringView Value)
+		{
+			FString Result;
+			Result.Reserve(Value.Len());
+			int32 RunStart = 0, NullInputIndex = INDEX_NONE;
+			bool bReplaced = false;
+			for (int32 Index = 0; Index < Value.Len(); ++Index)
+			{
+				const TCHAR Character = Value[Index];
+				if (Character == TEXT('\0') && NullInputIndex == INDEX_NONE)
+				{
+					if (bReplaced) { AppendKeyRun(Result, Value.Mid(RunStart, Index - RunStart), false); return Result; }
+					NullInputIndex = Index;
+				}
+				TCHAR Decoded = TEXT('\0');
+				if (Character == TEXT('%') && Index + 2 < Value.Len())
+				{
+					const TCHAR High = FChar::ToUpper(Value[Index + 1]);
+					const TCHAR Low = FChar::ToUpper(Value[Index + 2]);
+					if (High == TEXT('0'))
+					{
+						if (Low == TEXT('9')) Decoded = TEXT('\t');
+						else if (Low == TEXT('A')) Decoded = TEXT('\n');
+						else if (Low == TEXT('D')) Decoded = TEXT('\r');
+					}
+					else if (High == TEXT('2'))
+					{
+						if (Low == TEXT('5')) Decoded = TEXT('%');
+						else if (Low == TEXT('6')) Decoded = TEXT('&');
+					}
+					else if (High == TEXT('3') && Low == TEXT('D')) Decoded = TEXT('=');
+					else if (High == TEXT('7') && Low == TEXT('C')) Decoded = TEXT('|');
+				}
+				if (Decoded == TEXT('\0')) continue;
+				if (NullInputIndex != INDEX_NONE) { AppendKeyRun(Result, Value.Mid(RunStart, NullInputIndex - RunStart), false); return Result; }
+				AppendKeyRun(Result, Value.Mid(RunStart, Index - RunStart), false);
+				Result.AppendChar(Decoded);
+				Index += 2;
+				RunStart = Index + 1;
+				bReplaced = true;
+			}
+			AppendKeyRun(Result, Value.Mid(RunStart), false);
+			return Result;
 		}
 
 		const FSelectorDescriptor* FindSelector(const FModelDescriptor& Model, const FString& SelectorName)
@@ -235,7 +343,9 @@ namespace UeAgentAuthoringIdentity
 
 	bool FCanonicalIdentity::IsValid() const
 	{
-		return GetValidationDiagnostic().IsEmpty();
+		// The diagnostic has no successful consumer. Keep its exact failure
+		// constructor for callers which actually report the missing field.
+		return !ModelId.IsEmpty() && !TargetKind.IsEmpty() && !KeyPattern.IsEmpty() && !CanonicalKey.IsEmpty();
 	}
 
 	FDiagnostic FCanonicalIdentity::GetValidationDiagnostic() const
@@ -291,11 +401,11 @@ namespace UeAgentAuthoringIdentity
 		FModelDescriptor Canonical = Normalize(Descriptor, OutError);
 		if (!OutError.IsEmpty() || !Validate(Canonical, OutError)) return false;
 		FWriteScopeLock Lock(RegistryLock);
-		if (const FModelDescriptor* Existing = Models.Find(Canonical.ModelId))
+		if (const FModelView* Existing = Models.Find(Canonical.ModelId))
 		{
 			OutError = IdentityFailure(TEXT("conflicting_identity_model"), TEXT("The identity model differs from its existing registration."), TEXT("contract"), Canonical.ModelId, FString());
 			OutError.SourceKind = TEXT("native_result");
-			if (!ModelsEqual(*Existing, Canonical, &OutError))
+			if (!ModelsEqual(**Existing, Canonical, &OutError))
 			{
 				return false;
 			}
@@ -303,7 +413,8 @@ namespace UeAgentAuthoringIdentity
 			OutError.Reset();
 			return true;
 		}
-		Models.Add(Canonical.ModelId, MoveTemp(Canonical));
+		const FString ModelId = Canonical.ModelId;
+		Models.Add(ModelId, MakeShared<FModelDescriptor, ESPMode::ThreadSafe>(MoveTemp(Canonical)));
 		OutResult = ERegistrationResult::Registered;
 		OutError.Reset();
 		return true;
@@ -311,8 +422,7 @@ namespace UeAgentAuthoringIdentity
 
 	bool FRegistry::FindModel(const FString& ModelId, FModelDescriptor& OutDescriptor) const
 	{
-		FReadScopeLock Lock(RegistryLock);
-		if (const FModelDescriptor* Found = Models.Find(NormalizeId(ModelId)))
+		if (const FModelView Found = FindModelView(ModelId))
 		{
 			OutDescriptor = *Found;
 			return true;
@@ -320,11 +430,19 @@ namespace UeAgentAuthoringIdentity
 		return false;
 	}
 
+	FModelView FRegistry::FindModelView(const FString& ModelId) const
+	{
+		FReadScopeLock Lock(RegistryLock);
+		if (const FModelView* Found = Models.Find(NormalizeId(ModelId))) return *Found;
+		return nullptr;
+	}
+
 	TArray<FModelDescriptor> FRegistry::ListModels() const
 	{
 		FReadScopeLock Lock(RegistryLock);
 		TArray<FModelDescriptor> Result;
-		Models.GenerateValueArray(Result);
+		Result.Reserve(Models.Num());
+		for (const auto& Pair : Models) Result.Add(*Pair.Value);
 		Result.Sort([](const FModelDescriptor& Left, const FModelDescriptor& Right) { return Left.ModelId < Right.ModelId; });
 		return Result;
 	}
@@ -445,24 +563,89 @@ namespace UeAgentAuthoringIdentity
 		return true;
 	}
 
-	bool BuildCanonicalIdentity(
+	// Const public inputs keep their original copy/normalization contract.
+	// The parser owns its decoded map and has no later reader, so that same
+	// normalization algorithm can transfer the strings at their last consumer.
+	static const FString& IdentitySelectorInput(const FString& Value) { return Value; }
+	static FString&& IdentitySelectorInput(FString& Value) { return MoveTemp(Value); }
+	static FString IdentitySelectorInput(FStringView Value) { return FString(Value); }
+
+	static void ReserveCanonicalKey(FString& Key, const FModelDescriptor& Model, const FString& TargetKind,
+		const FKeyPattern& Pattern, const TMap<FString, FString>& Selectors)
+	{
+		int32 Length = Model.ModelId.Len() + TargetKind.Len() + Pattern.PatternId.Len() + 3;
+		for (const FString& Name : Pattern.Selectors) Length += Name.Len() + Selectors.FindChecked(Name).Len() + 2;
+		Key.Reserve(Length);
+	}
+	static void ReserveCanonicalKey(FKeyComparison&, const FModelDescriptor&, const FString&,
+		const FKeyPattern&, const TMap<FString, FString>&) {}
+
+	template<typename Destination>
+	static void WriteCanonicalKey(Destination& Key, const FModelDescriptor& Model, const FString& TargetKind,
+		const FKeyPattern& Pattern, const TMap<FString, FString>& Selectors)
+	{
+		ReserveCanonicalKey(Key, Model, TargetKind, Pattern, Selectors);
+		AppendEscapedKeyPart(Key, Model.ModelId); Key.AppendChar(TEXT('|'));
+		AppendEscapedKeyPart(Key, TargetKind); Key.AppendChar(TEXT('|'));
+		AppendEscapedKeyPart(Key, Pattern.PatternId); Key.AppendChar(TEXT('|'));
+		for (int32 Index = 0; Index < Pattern.Selectors.Num(); ++Index) {
+			const FString& Name = Pattern.Selectors[Index];
+			const FSelectorDescriptor* Descriptor = FindSelector(Model, Name);
+			if (Index > 0) Key.AppendChar(TEXT('&'));
+			AppendEscapedKeyPart(Key, Name); Key.AppendChar(TEXT('='));
+			AppendEscapedKeyPart(Key, Selectors.FindChecked(Name), !Descriptor || !Descriptor->bCaseSensitive);
+		}
+	}
+
+	static bool FailNoncanonicalKey(const FString& Supplied, const FString& Expected, const FString& ModelId,
+		bool bPatternMatches, FDiagnostic& OutError)
+	{
+		OutError = IdentityFailure(TEXT("canonical_identity_key_noncanonical"),
+			!bPatternMatches ? TEXT("The canonical key names a different key pattern from the resolved selectors.")
+				: TEXT("The supplied identity key differs from its canonical representation."),
+			TEXT("target_identity"), ModelId, TEXT("canonical_key"));
+		OutError.ExpectedEvidence = DescriptorValue(Expected);
+		OutError.ActualEvidence = DescriptorValue(Supplied);
+		return false;
+	}
+
+	struct FKeyValidation
+	{
+		const FString& Supplied;
+		const FString& Pattern;
+		const FModelView& QueryModel;
+		FString& OutModelId;
+		FString& OutTargetKind;
+	};
+
+	struct FKeyGenerationComparison {
+		const FString& Expected;
+		bool& Matches;
+		FString& ActualOnMismatch;
+	};
+
+	template<typename SelectorMap>
+	static bool BuildCanonicalIdentityImpl(
 		const FString& ModelId,
 		const FString& TargetKind,
-		const TMap<FString, FString>& Selectors,
-		FCanonicalIdentity& OutIdentity,
+		SelectorMap& Selectors,
+		FCanonicalIdentity* OutIdentity,
 		FDiagnostic& OutError,
-		const FRegistry* Registry)
+		const FRegistry* Registry,
+		FKeyValidation* Validation = nullptr, FKeyGenerationComparison* GenerationComparison = nullptr)
 	{
-		OutIdentity = FCanonicalIdentity();
+		if (OutIdentity) *OutIdentity = FCanonicalIdentity();
 		const FRegistry& ResolvedRegistry = Registry ? *Registry : FRegistry::Get();
-		FModelDescriptor Model;
-		if (!ResolvedRegistry.FindModel(ModelId, Model))
+		const FModelView ModelView = Validation && NormalizeId(ModelId) == Validation->QueryModel->ModelId
+			? Validation->QueryModel : ResolvedRegistry.FindModelView(ModelId);
+		if (!ModelView)
 		{
 			OutError = IdentityFailure(TEXT("target_identity_model_unknown"), TEXT("The requested identity model is not registered."), TEXT("target_identity"), ModelId, TEXT("identity_model"));
 			OutError.ExpectedValue = DescriptorValue(FString(TEXT("registered identity model")));
 			OutError.ActualValue = DescriptorValue(ModelId);
 			return false;
 		}
+		const FModelDescriptor& Model = *ModelView;
 		const FString CanonicalTargetKind = NormalizeId(TargetKind);
 		if (CanonicalTargetKind.IsEmpty())
 		{
@@ -480,9 +663,9 @@ namespace UeAgentAuthoringIdentity
 		}
 
 		TMap<FString, FString> CanonicalSelectors;
-		for (const TPair<FString, FString>& Pair : Selectors)
+		for (auto& Pair : Selectors)
 		{
-			const FString SelectorName = NormalizeId(Pair.Key);
+			FString SelectorName = NormalizeId(IdentitySelectorInput(Pair.Key));
 			if (SelectorName.IsEmpty()) continue;
 			const FSelectorDescriptor* SelectorDescriptor = FindSelector(Model, SelectorName);
 			if (!SelectorDescriptor)
@@ -494,7 +677,7 @@ namespace UeAgentAuthoringIdentity
 			OutError.ActualValue = DescriptorValue(SelectorName);
 				return false;
 			}
-			FString SelectorValue = Pair.Value;
+			FString SelectorValue = IdentitySelectorInput(Pair.Value);
 			if (SelectorDescriptor->bTrimValue) SelectorValue.TrimStartAndEndInline();
 			if (SelectorValue.IsEmpty()) continue;
 			if (const FString* Existing = CanonicalSelectors.Find(SelectorName))
@@ -509,7 +692,7 @@ namespace UeAgentAuthoringIdentity
 				}
 				continue;
 			}
-			CanonicalSelectors.Add(SelectorName, MoveTemp(SelectorValue));
+			CanonicalSelectors.Add(MoveTemp(SelectorName), MoveTemp(SelectorValue));
 		}
 
 		const FKeyPattern* SelectedPattern = Model.KeyPatterns.FindByPredicate([&CanonicalSelectors](const FKeyPattern& KeyPattern)
@@ -536,36 +719,75 @@ namespace UeAgentAuthoringIdentity
 			return false;
 		}
 
-		FString Key = EscapeKeyPart(Model.ModelId) + TEXT("|")
-			+ EscapeKeyPart(CanonicalTargetKind) + TEXT("|")
-			+ EscapeKeyPart(SelectedPattern->PatternId) + TEXT("|");
-		for (int32 Index = 0; Index < SelectedPattern->Selectors.Num(); ++Index)
-		{
-			const FString& SelectorName = SelectedPattern->Selectors[Index];
-			const FSelectorDescriptor* SelectorDescriptor = FindSelector(Model, SelectorName);
-			FString KeyValue = CanonicalSelectors.FindChecked(SelectorName);
-			if (!SelectorDescriptor || !SelectorDescriptor->bCaseSensitive) KeyValue.ToLowerInline();
-			if (Index > 0) Key += TEXT("&");
-			Key += EscapeKeyPart(SelectorName) + TEXT("=") + EscapeKeyPart(KeyValue);
+		if (GenerationComparison) {
+			FKeyComparison Comparison{GenerationComparison->Expected};
+			WriteCanonicalKey(Comparison, Model, CanonicalTargetKind, *SelectedPattern, CanonicalSelectors);
+			GenerationComparison->Matches = Comparison.Matches();
+			if (!GenerationComparison->Matches)
+				WriteCanonicalKey(GenerationComparison->ActualOnMismatch, Model, CanonicalTargetKind, *SelectedPattern, CanonicalSelectors);
+		} else if (Validation) {
+			FKeyComparison Comparison{Validation->Supplied};
+			WriteCanonicalKey(Comparison, Model, CanonicalTargetKind, *SelectedPattern, CanonicalSelectors);
+			const bool bPatternMatches = SelectedPattern->PatternId.Equals(Validation->Pattern, ESearchCase::IgnoreCase);
+			if (!bPatternMatches || !Comparison.Matches()) {
+				FString Expected;
+				WriteCanonicalKey(Expected, Model, CanonicalTargetKind, *SelectedPattern, CanonicalSelectors);
+				return FailNoncanonicalKey(Validation->Supplied, Expected, Model.ModelId, bPatternMatches, OutError);
+			}
+			Validation->OutModelId = Model.ModelId;
+			Validation->OutTargetKind = CanonicalTargetKind;
+		} else {
+			FString Key;
+			WriteCanonicalKey(Key, Model, CanonicalTargetKind, *SelectedPattern, CanonicalSelectors);
+			OutIdentity->ModelId = Model.ModelId;
+			OutIdentity->TargetKind = CanonicalTargetKind;
+			OutIdentity->KeyPattern = SelectedPattern->PatternId;
+			OutIdentity->CanonicalKey = MoveTemp(Key);
+			OutIdentity->Selectors = MoveTemp(CanonicalSelectors);
 		}
-
-		OutIdentity.ModelId = Model.ModelId;
-		OutIdentity.TargetKind = CanonicalTargetKind;
-		OutIdentity.KeyPattern = SelectedPattern->PatternId;
-		OutIdentity.CanonicalKey = MoveTemp(Key);
-		OutIdentity.Selectors = MoveTemp(CanonicalSelectors);
 		OutError.Reset();
 		return true;
 	}
 
-	bool ParseCanonicalKey(
-		const FString& CanonicalKey,
-		FCanonicalIdentity& OutIdentity,
-		FDiagnostic& OutError,
-		const FRegistry* Registry)
+	bool BuildCanonicalIdentity(const FString& ModelId, const FString& TargetKind,
+		const TMap<FString, FString>& Selectors, FCanonicalIdentity& OutIdentity,
+		FDiagnostic& OutError, const FRegistry* Registry)
 	{
-		TArray<FString> Parts;
-		CanonicalKey.ParseIntoArray(Parts, TEXT("|"), false);
+		return BuildCanonicalIdentityImpl(ModelId, TargetKind, Selectors, &OutIdentity, OutError, Registry);
+	}
+
+	bool BuildCanonicalIdentityFromViews(const FString& ModelId, const FString& TargetKind,
+		TConstArrayView<TPair<FStringView, FStringView>> Selectors, FCanonicalIdentity& OutIdentity,
+		FDiagnostic& OutError, const FRegistry* Registry)
+	{
+		// A property caller can borrow an input from its output's old selector
+		// storage. Consume every view before replacing that owning destination.
+		FCanonicalIdentity Built;
+		const bool bBuilt = BuildCanonicalIdentityImpl(ModelId, TargetKind, Selectors, &Built, OutError, Registry);
+		OutIdentity = MoveTemp(Built); return bBuilt;
+	}
+
+	bool CompareCanonicalIdentityFromViews(const FString& ModelId, const FString& TargetKind,
+		TConstArrayView<TPair<FStringView, FStringView>> Selectors, const FString& ExpectedKey,
+		bool& OutMatches, FString& OutActualKey, FDiagnostic& OutError, const FRegistry* Registry)
+	{
+		bool bMatches = false; FString Actual;
+		FKeyGenerationComparison Comparison{ExpectedKey, bMatches, Actual};
+		const bool bBuilt = BuildCanonicalIdentityImpl(ModelId, TargetKind, Selectors, nullptr, OutError, Registry, nullptr, &Comparison);
+		OutMatches = bMatches; OutActualKey = MoveTemp(Actual); return bBuilt;
+	}
+
+	template<typename Consumer>
+	static bool ParseCanonicalKeyParts(
+		const FString& CanonicalKey,
+		FDiagnostic& OutError,
+		Consumer&& Consume)
+	{
+		TArray<FStringView, TInlineAllocator<4>> Parts;
+		// FString::ParseIntoArray uses this same Engine primitive. Retain its
+		// actual extents/empty-token rules without owning every split substring.
+		UE::String::ParseTokens(FStringView(CanonicalKey), FStringView(TEXT("|")),
+			[&](FStringView Part) { Parts.Add(Part); }, UE::String::EParseTokensOptions::IgnoreCase);
 		if (Parts.Num() != 4)
 		{
 			OutError = IdentityFailure(TEXT("canonical_identity_key_invalid"), TEXT("The canonical identity key must contain four separated parts."), TEXT("target_identity"), FString(), TEXT("canonical_key/part_count"));
@@ -574,39 +796,62 @@ namespace UeAgentAuthoringIdentity
 			return false;
 		}
 		TMap<FString, FString> Selectors;
-		TArray<FString> SelectorParts;
-		Parts[3].ParseIntoArray(SelectorParts, TEXT("&"), true);
-		for (const FString& SelectorPart : SelectorParts)
+		TArray<FStringView, TInlineAllocator<8>> SelectorParts;
+		UE::String::ParseTokens(Parts[3], FStringView(TEXT("&")),
+			[&](FStringView Part) { SelectorParts.Add(Part); },
+			UE::String::EParseTokensOptions::IgnoreCase | UE::String::EParseTokensOptions::SkipEmpty);
+		for (int32 SelectorIndex = 0; SelectorIndex < SelectorParts.Num(); ++SelectorIndex)
 		{
-			FString Name;
-			FString Value;
-			if (!SelectorPart.Split(TEXT("="), &Name, &Value) || Name.IsEmpty())
+			const FStringView SelectorPart = SelectorParts[SelectorIndex];
+			// The same bounded primitive used by FString::Split/Find preserves
+			// its NUL and first-separator behavior on the borrowed token.
+			const TCHAR* Separator = FCString::Strnistr(SelectorPart.GetData(), SelectorPart.Len(), TEXT("="), 1);
+			const int32 Split = Separator ? static_cast<int32>(Separator - SelectorPart.GetData()) : INDEX_NONE;
+			if (Split <= 0)
 			{
-				OutError = IdentityFailure(TEXT("canonical_identity_key_selector_invalid"), TEXT("A canonical key selector must have a non-empty name followed by an equals sign."), TEXT("target_identity"), FString(), TEXT("canonical_key/selectors/") + FString::FromInt(static_cast<int32>(&SelectorPart - SelectorParts.GetData())));
-				OutError.ActualEvidence = DescriptorValue(SelectorPart);
+				OutError = IdentityFailure(TEXT("canonical_identity_key_selector_invalid"), TEXT("A canonical key selector must have a non-empty name followed by an equals sign."), TEXT("target_identity"), FString(), TEXT("canonical_key/selectors/") + FString::FromInt(SelectorIndex));
+				OutError.ActualEvidence = DescriptorValue(FString(SelectorPart));
 				return false;
 			}
-			Selectors.Add(UnescapeKeyPart(Name), UnescapeKeyPart(Value));
+			Selectors.Add(UnescapeKeyPart(SelectorPart.Left(Split)), UnescapeKeyPart(SelectorPart.RightChop(Split + 1)));
 		}
-		if (!BuildCanonicalIdentity(UnescapeKeyPart(Parts[0]), UnescapeKeyPart(Parts[1]), Selectors, OutIdentity, OutError, Registry))
-		{
+		// Decode all borrowed header parts before a destination may reset the
+		// source owner (the public full parser permits aliased key/output).
+		const FString Pattern = UnescapeKeyPart(Parts[2]);
+		const FString ModelId = UnescapeKeyPart(Parts[0]);
+		const FString TargetKind = UnescapeKeyPart(Parts[1]);
+		return Consume(ModelId, TargetKind, Pattern, Selectors);
+	}
+
+	bool ParseCanonicalKey(const FString& CanonicalKey, FCanonicalIdentity& OutIdentity,
+		FDiagnostic& OutError, const FRegistry* Registry)
+	{
+		return ParseCanonicalKeyParts(CanonicalKey, OutError, [&](const FString& ModelId, const FString& Kind,
+			const FString& Pattern, TMap<FString, FString>& Selectors) {
+			if (!BuildCanonicalIdentityImpl(ModelId, Kind, Selectors, &OutIdentity, OutError, Registry)) return false;
+			const bool bPatternMatches = OutIdentity.KeyPattern.Equals(Pattern, ESearchCase::IgnoreCase);
+			if (!bPatternMatches || !OutIdentity.CanonicalKey.Equals(CanonicalKey, ESearchCase::IgnoreCase)) {
+				FailNoncanonicalKey(CanonicalKey, OutIdentity.CanonicalKey, OutIdentity.ModelId, bPatternMatches, OutError);
+				OutIdentity = FCanonicalIdentity(); return false;
+			}
+			OutError.Reset(); return true;
+		});
+	}
+
+	bool ValidateCanonicalKey(const FString& CanonicalKey, const FRegistry& Registry, const FModelView& QueryModel,
+		FString& OutModelId, FString& OutTargetKind, FDiagnostic& OutError)
+	{
+		OutModelId.Reset(); OutTargetKind.Reset();
+		if (!QueryModel) {
+			OutError = IdentityFailure(TEXT("target_identity_model_unavailable"), TEXT("Canonical key validation requires the selected registry model."),
+				TEXT("target_identity"), FString(), TEXT("identity_model"));
 			return false;
 		}
-		if (!OutIdentity.KeyPattern.Equals(UnescapeKeyPart(Parts[2]), ESearchCase::IgnoreCase)
-			|| !OutIdentity.CanonicalKey.Equals(CanonicalKey, ESearchCase::IgnoreCase))
-		{
-			OutError = IdentityFailure(TEXT("canonical_identity_key_noncanonical"),
-				!OutIdentity.KeyPattern.Equals(UnescapeKeyPart(Parts[2]), ESearchCase::IgnoreCase)
-					? TEXT("The canonical key names a different key pattern from the resolved selectors.")
-					: TEXT("The supplied identity key differs from its canonical representation."),
-				TEXT("target_identity"), OutIdentity.ModelId, TEXT("canonical_key"));
-			OutError.ExpectedEvidence = DescriptorValue(OutIdentity.CanonicalKey);
-			OutError.ActualEvidence = DescriptorValue(CanonicalKey);
-			OutIdentity = FCanonicalIdentity();
-			return false;
-		}
-		OutError.Reset();
-		return true;
+		return ParseCanonicalKeyParts(CanonicalKey, OutError, [&](const FString& ModelId, const FString& Kind,
+			const FString& Pattern, TMap<FString, FString>& Selectors) {
+			FKeyValidation Validation{CanonicalKey, Pattern, QueryModel, OutModelId, OutTargetKind};
+			return BuildCanonicalIdentityImpl(ModelId, Kind, Selectors, nullptr, OutError, &Registry, &Validation);
+		});
 	}
 
 	void WriteSelectorsFlat(const FCanonicalIdentity& Identity, const TSharedRef<FJsonObject>& Object)

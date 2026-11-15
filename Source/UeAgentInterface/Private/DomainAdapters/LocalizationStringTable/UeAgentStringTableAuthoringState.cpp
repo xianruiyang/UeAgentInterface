@@ -191,6 +191,7 @@ namespace UE::UAI::DomainAdapters::LocalizationStringTable
 		{
 			UeAgentAuthoringState::FReadRequest Request;
 			Request.SemanticId = SemanticId;
+			if (SemanticId == TargetSemantic) Request.MarkExportTarget();
 			Request.RootData = &Table;
 			Request.RootOwnerPath = AssetPath;
 			if (!UeAgentAuthoringIdentity::BuildCanonicalIdentity(IdentityModel, TargetKind,

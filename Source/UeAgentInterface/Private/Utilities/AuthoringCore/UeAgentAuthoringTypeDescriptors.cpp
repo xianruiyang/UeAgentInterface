@@ -4,6 +4,8 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringReflectionDescriptors.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 
 #include "Containers/AnsiString.h"
 #include "Containers/Utf8String.h"
@@ -23,7 +25,13 @@
 #include "UObject/Class.h"
 #include "UObject/PropertyOptional.h"
 #include "UObject/UnrealType.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/Utf8StrProperty.h"
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Core/ContextResource/UeAgentContextResource.h"
+#include "Misc/AutomationTest.h"
+#endif
 
 namespace UeAgentAuthoringTypeDescriptors
 {
@@ -67,8 +75,12 @@ bool RequiresHashSource(const FProperty *Property) {
 	{
 		if (!Enum || Index < 0 || Index >= Enum->NumEnums()) return false;
 		const FString Name = Enum->GetNameStringByIndex(Index);
-		return !Name.IsEmpty() && !Name.Equals(TEXT("MAX"), ESearchCase::IgnoreCase)
-			&& !Name.EndsWith(TEXT("_MAX"), ESearchCase::IgnoreCase);
+		if (Name.IsEmpty()) return false;
+		if (!Name.EndsWith(TEXT("MAX"), ESearchCase::CaseSensitive)) return true;
+		// Match the qualified sentinel identities recognized by UEnum::ContainsExistingMax.
+		const FString Qualified = Enum->GetNameByIndex(Index).ToString();
+		return !Qualified.Equals(Enum->GenerateFullEnumName(TEXT("MAX")), ESearchCase::CaseSensitive)
+			&& !Qualified.Equals(Enum->GenerateFullEnumName(*(Enum->GenerateEnumPrefix() + TEXT("_MAX"))), ESearchCase::CaseSensitive);
 	}
 
 	uint64 GetIntegerStorageMask(const FProperty* Property)
@@ -101,23 +113,37 @@ bool RequiresHashSource(const FProperty *Property) {
 		return true;
 	}
 
+	static void VisitEnumCandidates(const UEnum* Enum, const FProperty* Property,
+		TFunctionRef<void(int32, const FString&)> Visitor)
+	{
+		if (!Enum) return;
+		for (int32 Index = 0; Index < Enum->NumEnums(); ++Index) {
+			if (!IsEnumValueEntry(Enum, Index) || Enum->HasMetaData(TEXT("Hidden"), Index)) continue;
+			uint64 Mask = 0;
+			if (IsBitmaskProperty(Property) && !TryGetBitmaskMask(Property, Enum, Enum->GetValueByIndex(Index), Mask)) continue;
+			Visitor(Index, Enum->GetNameStringByIndex(Index));
+		}
+	}
+
+	TArray<FString> ReadEnumCandidateNames(const UEnum* Enum, const FProperty* Property)
+	{
+		TArray<FString> Names;
+		VisitEnumCandidates(Enum, Property, [&](int32, const FString& Name) { Names.Add(Name); });
+		return Names;
+	}
+
 	TSharedPtr<FJsonObject> BuildEnumCandidates(const UEnum* Enum, bool bIncludeDisplayMetadata, const FProperty* Property)
 	{
 		if (!Enum) return nullptr;
 		struct FCandidate { FString Name, DisplayName, Tooltip; };
 		TArray<FCandidate> Candidates;
 		bool bDisplay = false, bTooltip = false;
-		for (int32 Index = 0; Index < Enum->NumEnums(); ++Index)
-		{
-			if (!IsEnumValueEntry(Enum, Index) || Enum->HasMetaData(TEXT("Hidden"), Index)) continue;
-			const FString Name = Enum->GetNameStringByIndex(Index);
-			uint64 Mask = 0;
-			if (IsBitmaskProperty(Property) && !TryGetBitmaskMask(Property, Enum, Enum->GetValueByIndex(Index), Mask)) continue;
+		VisitEnumCandidates(Enum, Property, [&](int32 Index, const FString& Name) {
 			const FString Display = bIncludeDisplayMetadata ? Enum->GetDisplayNameTextByIndex(Index).ToString() : FString();
 			const FString Tooltip = bIncludeDisplayMetadata ? Enum->GetMetaData(TEXT("ToolTip"), Index) : FString();
 			bDisplay |= !Display.IsEmpty() && Display != Name; bTooltip |= !Tooltip.IsEmpty();
 			Candidates.Add({Name, Display, Tooltip});
-		}
+		});
 		if (Candidates.IsEmpty()) return nullptr;
 		TArray<TSharedPtr<FJsonValue>> Header{MakeShared<FJsonValueString>(TEXT("name"))}, Rows;
 		if (bDisplay) Header.Add(MakeShared<FJsonValueString>(TEXT("display_name")));
@@ -167,6 +193,99 @@ bool RequiresHashSource(const FProperty *Property) {
 		return FString();
 	}
 
+	static bool MayContainNativeObjectReferenceImpl(const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Descriptor,
+		TFunctionRef<bool(const UE::UAI::StateSemantic::FUeAgentCanonicalValue&)> ReferenceLeaf)
+	{
+		using namespace UE::UAI::StateSemantic;
+		if (Descriptor.GetKind() != EUeAgentValueKind::Object) return true;
+		const auto Field = [&](const TCHAR* Name) -> const FUeAgentCanonicalValue* {
+			const auto* Entry = Descriptor.GetObjectItems().FindByPredicate([&](const auto& Item) { return Item.Key == Name; });
+			return Entry ? &Entry->Value.Get() : nullptr;
+		};
+		const auto* KindValue = Field(TEXT("kind"));
+		if (!KindValue || KindValue->GetKind() != EUeAgentValueKind::String) return true;
+		const FString& Kind = KindValue->GetText();
+		const FString Wrapper = NativeCodecValueWrapper(Kind);
+		if (Wrapper == TEXT("literal") || Wrapper == TEXT("selected") || Wrapper == TEXT("components")
+			|| Kind == TEXT("gameplay_tags")) return false;
+		if (Wrapper == TEXT("path")) return ReferenceLeaf(Descriptor);
+		const auto NestedMayReference = [&](const TCHAR* Name) {
+			const auto* Nested = Field(Name);
+			return !Nested || MayContainNativeObjectReferenceImpl(*Nested, ReferenceLeaf);
+		};
+		if (Kind == TEXT("array") || Kind == TEXT("fixed_array") || Kind == TEXT("set"))
+			return NestedMayReference(TEXT("element_type"));
+		if (Kind == TEXT("map")) return NestedMayReference(TEXT("key_type")) || NestedMayReference(TEXT("mapped_type"));
+		if (Kind == TEXT("optional")) return NestedMayReference(TEXT("inner_type"));
+		return true;
+	}
+	bool MayContainNativeObjectReference(const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Descriptor)
+	{
+		return MayContainNativeObjectReferenceImpl(Descriptor, [](const auto&) { return true; });
+	}
+	bool MayContainNativeObjectReferenceTo(const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Descriptor,
+		TConstArrayView<const UObject*> Objects)
+	{
+		using namespace UE::UAI::StateSemantic;
+		if (Objects.IsEmpty()) return MayContainNativeObjectReference(Descriptor);
+		return MayContainNativeObjectReferenceImpl(Descriptor, [&](const FUeAgentCanonicalValue& Leaf) {
+			const auto Read = [&](const TCHAR* Name) {
+				const auto* Field = Leaf.GetObjectItems().FindByPredicate([&](const auto& Item) { return Item.Key == Name; });
+				return Field && Field->Value->GetKind() == EUeAgentValueKind::String ? Field->Value->GetText() : FString();
+			};
+			const FString Kind = Read(TEXT("kind"));
+			const bool bClassReference = Kind == TEXT("class_ref") || Kind == TEXT("soft_class_ref");
+			const FString AllowedPath = Read(TEXT("allowed_class"));
+			const UClass* Allowed = AllowedPath.IsEmpty() ? nullptr : FindObject<UClass>(nullptr, *AllowedPath);
+			for (const UObject* Object : Objects) {
+				if (!Object) return true; // A missing actual target supplies no exclusion proof.
+				if (bClassReference) {
+					const UClass* Class = Cast<UClass>(Object);
+					if (Class && (!Allowed || Class->IsChildOf(Allowed))) return true;
+				} else if (!Allowed || (Kind == TEXT("interface_ref")
+					? Object->GetClass()->ImplementsInterface(Allowed) : Object->IsA(Allowed))) return true;
+			}
+			return false;
+		});
+	}
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUeAgentNativeReferenceTargetTypeTest,
+	"UeAgentInterface.Core.AuthoringTypes.NativeReferenceTarget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentNativeReferenceTargetTypeTest::RunTest(const FString&)
+{
+	using namespace UE::UAI::StateSemantic;
+	UE::UAI::ContextResource::FUeAgentResourceTracker Resources;
+	const UObject* Removed = USplineComponent::StaticClass()->GetDefaultObject();
+	const TArray<const UObject*> Instances{Removed};
+	const auto Check = [&](const TCHAR* Label, const FDescriptor& Type, bool Expected,
+		TConstArrayView<const UObject*> Targets) {
+		FUeAgentCanonicalValuePtr Canonical; UE::UAI::Contract::FDiagnostic Error;
+		if (!CanonicalJson::TryFromJsonValue(MakeShared<FJsonValueObject>(Type.ToJsonObject()), Resources, Canonical, Error)) {
+			AddError(Error.PublicMessage); return;
+		}
+		TestEqual(Label, MayContainNativeObjectReferenceTo(*Canonical, Targets), Expected);
+	};
+	FDescriptor Scene; Scene.Kind = TEXT("object_ref"); Scene.AllowedClassPath = USceneComponent::StaticClass()->GetPathName();
+	Check(TEXT("compatible component references remain candidates"), Scene, true, Instances);
+	FDescriptor Curve; Curve.Kind = TEXT("object_ref"); Curve.AllowedClassPath = UCurveFloat::StaticClass()->GetPathName();
+	Check(TEXT("curve asset fields cannot reference a removed component"), Curve, false, Instances);
+	FDescriptor Array; Array.Kind = TEXT("array"); Array.ElementType = MakeShared<FDescriptor>(Curve);
+	Check(TEXT("same original container traversal excludes incompatible element classes"), Array, false, Instances);
+	FDescriptor Class = Scene; Class.Kind = TEXT("class_ref");
+	Check(TEXT("class values do not reference component instances"), Class, false, Instances);
+	const TArray<const UObject*> Classes{USplineComponent::StaticClass()};
+	Check(TEXT("real class targets retain the original metaclass semantics"), Class, true, Classes);
+	FDescriptor Unknown = Scene; Unknown.AllowedClassPath = TEXT("/Script/Unknown.NotLoaded");
+	Check(TEXT("unknown allowed class is not an exclusion proof"), Unknown, true, Instances);
+	FDescriptor Struct; Struct.Kind = TEXT("struct"); Struct.StructPath = TEXT("/Script/Unknown.Struct");
+	Check(TEXT("unknown struct keeps its actual value consumer"), Struct, true, Instances);
+	return !HasAnyErrors();
+}
+#endif
+
 	namespace
 	{
 		bool DescriptorPtrEquals(const TSharedPtr<FDescriptor>& Left, const TSharedPtr<FDescriptor>& Right)
@@ -181,7 +300,7 @@ bool RequiresHashSource(const FProperty *Property) {
 			{
 			case EJson::Null: return true;
 			case EJson::String: return Left->AsString() == Right->AsString();
-			case EJson::Number: return Left->AsNumber() == Right->AsNumber();
+			case EJson::Number: return UE::UAI::StateSemantic::CanonicalJson::AreNumbersEquivalent(*Left, *Right);
 			case EJson::Boolean: return Left->AsBool() == Right->AsBool();
 			case EJson::Array:
 			{

@@ -140,7 +140,15 @@ resolves the readable `name` and optional short `select` uniquely, and invokes t
 `FEdGraphSchemaAction::PerformAction`. It does not translate a display name to a
 node class or reconstruct an action in Python or the HJSON adapter. Unknown,
 ambiguous, stale, context-mismatched, or assertion-mismatched candidates fail
-before write.
+before write. Preflight creation resolves again in its validation Blueprint;
+the authoring target path in a diagnostic does not imply that its native menu
+used the persistent Blueprint object. Native registration requires asset
+eligibility on both the validation Blueprint and its private outer package.
+Their original transient/public flags are restored immediately after synchronous
+action registration, before menu projection or mutation; the global transient
+package and asset registry are not changed. Missing member diagnostics distinguish the
+current validation class field, registered action, menu entry, and projected name.
+They do not substitute another node or relax selection and ambiguity constraints.
 
 One native Action Menu selection may create a primary node plus UE-owned
 companion nodes in the same graph. Component-bound function actions are one

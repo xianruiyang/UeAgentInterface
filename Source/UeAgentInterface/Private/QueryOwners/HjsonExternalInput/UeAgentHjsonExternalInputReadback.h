@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 
+namespace UE::UAI::HjsonWorkspace { struct FPreparedWorkspaceExport; }
+
 namespace UE::UAI::QueryOwners::HjsonExternalInput
 {
 	UEAGENTINTERFACE_API const TArray<FString>&
@@ -15,5 +17,6 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 		const FString& TargetIdentity,
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
-		HjsonWorkspace::FWorkspaceError& OutError);
+		HjsonWorkspace::FWorkspaceError& OutError,
+		HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport = nullptr);
 }

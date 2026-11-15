@@ -27,6 +27,8 @@ namespace UE::UAI::NetworkTransport
 			FString Method;
 			FString Path;
 			FUeAgentHttpRequestHandler Handler;
+			FUeAgentHttpImmediateHandler Immediate;
+			FCriticalSection ImmediateLifetime;
 			EUeAgentHttpRouteExecution Execution = EUeAgentHttpRouteExecution::GameThread;
 			std::atomic<bool> Active{true};
 		};
@@ -40,17 +42,24 @@ namespace UE::UAI::NetworkTransport
 			FCriticalSection ResponseMutex;
 			TOptional<FUeAgentHttpResponse> Response;
 			bool bCompleted = false;
+			bool bImmediate = false;
+			double AdmittedAt = FPlatformTime::Seconds();
+			std::atomic<double> ExecutionStartedAt{0};
+			std::atomic<double> CompletedAt{0};
 
 			bool Begin()
 			{
 				EState Expected = EState::Queued;
-				return State.compare_exchange_strong(Expected, EState::Executing);
+				if (!State.compare_exchange_strong(Expected, EState::Executing)) return false;
+				ExecutionStartedAt = FPlatformTime::Seconds();
+				return true;
 			}
 			void Complete(FUeAgentHttpResponse Result)
 			{
 				FScopeLock Lock(&ResponseMutex);
 				if (bCompleted || State.load() == EState::Disconnected) return;
 				Response.Emplace(MoveTemp(Result));
+				CompletedAt = FPlatformTime::Seconds();
 				bCompleted = true;
 				State.store(EState::Completed);
 			}
@@ -83,13 +92,33 @@ namespace UE::UAI::NetworkTransport
 			double LastProgress = FPlatformTime::Seconds();
 			bool bWriting = false;
 			bool bClosed = false;
+			double AcceptedAt = FPlatformTime::Seconds();
+			double ResponseSetupAt = 0;
+			double ResponsePreparedAt = 0;
 
 			void SetResponse(FUeAgentHttpResponse Result)
 			{
+				ResponseSetupAt = FPlatformTime::Seconds();
 				Response = MoveTemp(Result);
 				ResponseHead = MakeHttpResponseHead(Response);
+				ResponsePreparedAt = FPlatformTime::Seconds();
 				bWriting = true;
 				LastProgress = FPlatformTime::Seconds();
+			}
+			void CompleteWrite()
+			{
+				bClosed = true;
+				// TakeResponse synchronized completion before SetResponse. These
+				// exclusive phases partition the route lifetime; handler time may
+				// contain the HJSON timer and must not be added to it again.
+				const double Executed = Exchange ? Exchange->ExecutionStartedAt.load() : 0;
+				const double Completed = Exchange ? Exchange->CompletedAt.load() : 0;
+				if (Executed > 0 && Completed > 0 && Exchange->Route->Execution == EUeAgentHttpRouteExecution::GameThread)
+					UE_LOG(LogTemp, Display, TEXT("UAI transport timing phase=http_game_thread_exchange ingress_s=%.6f queue_s=%.6f handler_s=%.6f response_wait_s=%.6f frame_s=%.6f write_s=%.6f execution=%s"),
+						Exchange->AdmittedAt - AcceptedAt, Executed - Exchange->AdmittedAt,
+						Completed - Executed, ResponseSetupAt - Completed,
+						ResponsePreparedAt - ResponseSetupAt, FPlatformTime::Seconds() - ResponsePreparedAt,
+						Exchange->bImmediate ? TEXT("network_control") : TEXT("game_thread"));
 			}
 		};
 
@@ -114,7 +143,8 @@ namespace UE::UAI::NetworkTransport
 		~FImpl() { check(!Thread && !ListenSocket); }
 
 		bool Bind(const FString& InstanceId, const FString& Method, const FString& Path,
-			FUeAgentHttpRequestHandler Handler, FUeAgentTransportDiagnostic& Diagnostic, EUeAgentHttpRouteExecution Execution)
+			FUeAgentHttpRequestHandler Handler, FUeAgentTransportDiagnostic& Diagnostic, EUeAgentHttpRouteExecution Execution,
+			FUeAgentHttpImmediateHandler Immediate = {})
 		{
 			check(IsInGameThread());
 			if (!IsSupportedHttpMethod(Method) || !Path.StartsWith(TEXT("/")) || !Handler)
@@ -135,6 +165,7 @@ namespace UE::UAI::NetworkTransport
 				Route->Method = Method.ToUpper();
 				Route->Path = Path;
 				Route->Handler = MoveTemp(Handler);
+				Route->Immediate = MoveTemp(Immediate);
 				Route->Execution = Execution;
 				Routes.Add(InstanceId, Route);
 			}
@@ -149,6 +180,7 @@ namespace UE::UAI::NetworkTransport
 		{
 			check(IsInGameThread());
 			bool bLastRoute;
+			TSharedPtr<FBoundRoute, ESPMode::ThreadSafe> RemovedRoute;
 			{
 				FScopeLock Lock(&RoutesMutex);
 				auto* Route = Routes.Find(InstanceId);
@@ -158,9 +190,13 @@ namespace UE::UAI::NetworkTransport
 					return false;
 				}
 				(*Route)->Active.store(false);
+				RemovedRoute = *Route;
 				Routes.Remove(InstanceId);
 				bLastRoute = Routes.IsEmpty();
 			}
+			// A non-last unbind also drains its immediate callbacks before their
+			// adapter/dispatch owners can be destroyed. Never wait with RoutesMutex.
+			if (RemovedRoute->Immediate) { FScopeLock Drain(&RemovedRoute->ImmediateLifetime); }
 			if (bLastRoute) StopNetwork();
 			return true;
 		}
@@ -292,6 +328,18 @@ namespace UE::UAI::NetworkTransport
 			Exchange->Request = MoveTemp(Connection.Reader.Request);
 			Exchange->Route = Route;
 			Connection.Exchange = Exchange;
+			if (!bStopping.load() && Route->Immediate) {
+				FScopeLock Lifetime(&Route->ImmediateLifetime);
+				if (Route->Active.load()) {
+					const double Started = FPlatformTime::Seconds();
+					auto Immediate = Route->Immediate(Exchange->Request);
+					if (Immediate.IsSet()) {
+						Exchange->Begin(); Exchange->ExecutionStartedAt = Started; Exchange->bImmediate = true;
+						Exchange->Complete(MoveTemp(Immediate.GetValue()));
+						return;
+					}
+				}
+			}
 			if (bStopping.load())
 				Exchange->Complete(FUeAgentHttpResponse::Failure(503, TEXT("transport_stopping"), TEXT("The transport is stopping; this request was not executed.")));
 			else if (Route->Execution == EUeAgentHttpRouteExecution::NetworkThread)
@@ -362,7 +410,7 @@ namespace UE::UAI::NetworkTransport
 			const bool bHeader = Connection.HeadOffset < Connection.ResponseHead.Num();
 			const TArray<uint8>& Bytes = bHeader ? Connection.ResponseHead : Connection.Response.Body;
 			int32& Offset = bHeader ? Connection.HeadOffset : Connection.BodyOffset;
-			if (Offset == Bytes.Num()) { Connection.bClosed = true; return; }
+			if (Offset == Bytes.Num()) { Connection.CompleteWrite(); return; }
 			int32 Sent = 0;
 			if (!Connection.Socket->Send(Bytes.GetData() + Offset, FMath::Min(IoChunkBytes, Bytes.Num() - Offset), Sent))
 			{
@@ -372,7 +420,7 @@ namespace UE::UAI::NetworkTransport
 			Offset += Sent;
 			if (Sent > 0) Connection.LastProgress = FPlatformTime::Seconds();
 			if (Connection.HeadOffset == Connection.ResponseHead.Num() && Connection.BodyOffset == Connection.Response.Body.Num())
-				Connection.bClosed = true;
+				Connection.CompleteWrite();
 		}
 
 		virtual uint32 Run() override
@@ -477,6 +525,12 @@ namespace UE::UAI::NetworkTransport
 	bool FUeAgentSocketHttpRouteHost::Unbind(const FString& InstanceId, FUeAgentTransportDiagnostic& Diagnostic)
 	{
 		return Impl->Unbind(InstanceId, Diagnostic);
+	}
+	bool FUeAgentSocketHttpRouteHost::BindWithImmediate(const FString& InstanceId, const FString& Method, const FString& Path,
+		FUeAgentHttpRequestHandler Handler, FUeAgentHttpImmediateHandler Immediate, FUeAgentTransportDiagnostic& Diagnostic)
+	{
+		return Impl->Bind(InstanceId, Method, Path, MoveTemp(Handler), Diagnostic,
+			EUeAgentHttpRouteExecution::GameThread, MoveTemp(Immediate));
 	}
 	bool FUeAgentSocketHttpRouteHost::IsBound(const FString& InstanceId) const { return Impl->IsBound(InstanceId); }
 }

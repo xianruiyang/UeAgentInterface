@@ -249,7 +249,15 @@ namespace UeAgentBehaviorTreeAuthoring
 		return Property ? Property->GetObjectPropertyValue_InContainer(&Node) : nullptr;
 	}
 
-	bool CaptureNode(const UEdGraphNode& NativeNode, FNodeCapture& OutCapture, UE::UAI::Contract::FDiagnostic& OutError)
+	const UObject* GetExportedNodePropertyObject(const UEdGraphNode& Node)
+	{
+		if (const auto* BehaviorNode = Cast<UBehaviorTreeGraphNode>(&Node); BehaviorNode && BehaviorNode->bInjectedNode) return nullptr;
+		if (Node.GetGraph() && !Node.GetGraph()->bEditable) return nullptr;
+		return GetNodePropertyObject(Node);
+	}
+
+	static bool CaptureNode(const UEdGraphNode& NativeNode, FNodeCapture& OutCapture, UE::UAI::Contract::FDiagnostic& OutError,
+		bool bDeferExportedProperties)
 	{
 		OutCapture = {};
 		OutError.Reset();
@@ -283,7 +291,7 @@ namespace UeAgentBehaviorTreeAuthoring
 				OutCapture.State->SetStringField(TEXT("logic"), Logic->Enum->GetNameStringByValue(Mode));
 			}
 		}
-		if (Payload)
+		if (Payload && !(bDeferExportedProperties && GetExportedNodePropertyObject(*Node)))
 		{
 			UeAgentDetailsAuthoringService::FCapturePolicy Policy;
 			UeAgentAuthoringState::FStateSnapshot PropertiesSnapshot;
@@ -356,7 +364,13 @@ namespace UeAgentBehaviorTreeAuthoring
 		return true;
 	}
 
-	bool CaptureGraphContents(const UEdGraph& NativeGraph, FGraphContents& OutCapture, UE::UAI::Contract::FDiagnostic& OutError)
+	bool CaptureNode(const UEdGraphNode& NativeNode, FNodeCapture& OutCapture, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return CaptureNode(NativeNode, OutCapture, OutError, false);
+	}
+
+	static bool CaptureGraphContents(const UEdGraph& NativeGraph, FGraphContents& OutCapture,
+		UE::UAI::Contract::FDiagnostic& OutError, bool bDeferExportedProperties)
 	{
 		OutCapture = {};
 		OutError.Reset();
@@ -393,7 +407,7 @@ namespace UeAgentBehaviorTreeAuthoring
 				return false;
 			}
 			FNodeCapture& Captured = OutCapture.Nodes.AddDefaulted_GetRef();
-			if (!CaptureNode(*Node, Captured, OutError)) return false;
+			if (!CaptureNode(*Node, Captured, OutError, bDeferExportedProperties)) return false;
 			const FString Id = Captured.Id;
 			if (Ids.Contains(Id))
 			{
@@ -443,7 +457,18 @@ namespace UeAgentBehaviorTreeAuthoring
 		return true;
 	}
 
+	bool CaptureGraphContents(const UEdGraph& NativeGraph, FGraphContents& OutCapture, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return CaptureGraphContents(NativeGraph, OutCapture, OutError, false);
+	}
+
 	bool CaptureGraph(const UBehaviorTree& Tree, FGraphCapture& OutCapture, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return CaptureGraph(Tree, OutCapture, OutError, false);
+	}
+
+	bool CaptureGraph(const UBehaviorTree& Tree, FGraphCapture& OutCapture, UE::UAI::Contract::FDiagnostic& OutError,
+		bool bDeferExportedProperties)
 	{
 		OutCapture = {};
 		OutError.Reset();
@@ -455,7 +480,7 @@ namespace UeAgentBehaviorTreeAuthoring
 				TEXT("/graph"), ObjectType(Tree.BTGraph), MakeShared<FJsonValueString>(UBehaviorTreeGraph::StaticClass()->GetPathName()));
 			return false;
 		}
-		if (!CaptureGraphContents(*Graph, OutCapture, OutError)) return false;
+		if (!CaptureGraphContents(*Graph, OutCapture, OutError, bDeferExportedProperties)) return false;
 		TSet<const UEdGraph*> Seen;
 		for (const FNodeCapture& Node : OutCapture.Nodes)
 		{
@@ -490,7 +515,7 @@ namespace UeAgentBehaviorTreeAuthoring
 			Owned.Id = TEXT("decorator:") + Node.Id;
 			Owned.OwnerId = Node.Id;
 			Owned.NativeGraph = Bound;
-			if (!CaptureGraphContents(*Bound, Owned, OutError)) return false;
+			if (!CaptureGraphContents(*Bound, Owned, OutError, bDeferExportedProperties)) return false;
 		}
 		return true;
 	}

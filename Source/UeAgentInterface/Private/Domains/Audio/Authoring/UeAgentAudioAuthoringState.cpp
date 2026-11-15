@@ -2,6 +2,8 @@
 
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringState.h"
 
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringDocuments.h"
@@ -131,8 +133,27 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
                        Request.TargetIdentity.GetSelector(TEXT("asset_path"))))
       return UeAgentAuthoringState::EReadOutcome::Failed;
     if (Profile->Kind == EAssetKind::MetaSound &&
-        Request.Context.FindRef(TEXT("semantic_verification")) == TEXT("true"))
+        Request.Context.FindRef(TEXT("semantic_verification")) == TEXT("true")) {
+      // Preview and live node GUIDs can differ. Capture the live public graph
+      // before normalizing the separate value used for semantic verification.
+      if (Request.bCaptureAuthoringProjection) {
+        UeAgentAuthoringState::FStateEntry Public;
+        Public.SemanticId = Request.SemanticId;
+        Public.TargetIdentity = OutValue.TargetIdentity;
+        Public.Type = OutValue.Type;
+        Public.Value = MakeShared<FJsonValueObject>(Document);
+        Public.Provenance = OutValue.Provenance;
+        Public.bEditable = true;
+        UE::UAI::HjsonWorkspace::FWorkspaceError Error;
+        if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(
+                MoveTemp(Public), OutValue.AuthoringProjection, Error)) {
+          OutError = Error.GetDiagnostic();
+          return UeAgentAuthoringState::EReadOutcome::Failed;
+        }
+      }
+      OutValue.bAuthoringVisible = false;
       RemoveMetaSoundNativeNodeIdentity(Document);
+    }
     OutValue.Value = MakeShared<FJsonValueObject>(Document);
     OutValue.bEditable = true;
   } else {
@@ -229,6 +250,7 @@ bool BuildAssetExportSnapshotReadRequests(
   if (!AddRequest(Profile, Profile.ExportTargetSemanticId, AssetPath, &Asset,
                   false, OutRequests, OutError))
     return false;
+  OutRequests.Last().MarkExportTarget();
   UeAgentAuthoringState::FEditablePropertyReadOptions Options;
   Options.SemanticId = TEXT("core.property");
   Options.ExcludedProperties = GetDomainOwnedRootProperties(Profile.Kind);

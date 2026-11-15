@@ -44,8 +44,9 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 			Result.InputFields = {
 				Field(TEXT("target"), TEXT("string"), true, TEXT("Persisted BehaviorTree, BlackboardData, EnvQuery, StateTree, or SmartObjectDefinition name from content search, or its exact package.object path.")),
 				Field(TEXT("query"), TEXT("string"), false, TEXT("Optional search over the exact target creation surface.")),
-				Field(TEXT("parent"), TEXT("string"), false, TEXT("BehaviorTree parent node alias from the exported graph; required together with attachment_kind.")),
-				Field(TEXT("attachment_kind"), TEXT("string"), false, TEXT("BehaviorTree native parent menu: service or decorator; requires parent.")),
+				Field(TEXT("parent"), TEXT("string"), false, TEXT("Exported placement owner. StateTree property_function uses the binding target item. SmartObject data and behavior use the root or slot.")),
+				Field(TEXT("attachment_kind"), TEXT("string"), false, TEXT("BehaviorTree service/decorator, EnvQuery test, StateTree node placement or property_function, or SmartObject slot/binding/definition_data/behavior.")),
+				Field(TEXT("target_path"), TEXT("string"), false, TEXT("Receiving field on parent for StateTree property_function discovery. Use the binding target's native property path.")),
 				Field(TEXT("graph_owner"), TEXT("string"), false, TEXT("Copy the owner reference from an exported CompositeDecorator graph to search its native inner-node menu; exclusive with parent and attachment_kind.")),
 				Field(TEXT("describe"), TEXT("object"), false, TEXT("Optional {name, select?, fields?} in the same target and attachment/graph context. Returns creation.supported/reason; editable fields require a created item.")),
 			};
@@ -62,13 +63,13 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 				{TEXT("ai_behavior_candidate_native_menu_shape_mismatch"), TEXT("The UE 5.6 native BehaviorTree menu no longer matches the fail-closed class/action mapping contract.")},
 				{TEXT("ai_behavior_candidate_identity_ambiguous"), TEXT("The complete native action set did not yield unique readable semantic names.")},
 			};
-			Result.Purpose.Summary = TEXT("Search the UE BehaviorTree blank-background or parent attachment menu; other AI contexts retain their documented compatibility boundary.");
+			Result.Purpose.Summary = TEXT("Search the target native menu, including BehaviorTree graph/attachments, EnvQuery tests and StateTree node-type placements.");
 			Result.Purpose.Target = TEXT("One exact persisted BehaviorTree, BlackboardData, EnvQuery, StateTree, or SmartObjectDefinition.");
 			Result.Purpose.Preconditions = {
 				TEXT("Copy the target unchanged from public content search or readback."),
 				TEXT("Run in the Editor on the UE game thread with uai:query."),
 			};
-			Result.Purpose.ParameterGuidance = TEXT("Omit context for the blank graph menu. For attachments, pass the exported parent alias and service or decorator. For an inner graph, copy its owner field unchanged into graph_owner. Copy the returned name into HJSON candidate.name; context belongs outside candidate.");
+			Result.Purpose.ParameterGuidance = TEXT("Omit context for the blank graph menu. For attachments, use the exported owning item and attachment_kind. StateTree global_task and evaluator are asset-level placement names and omit parent. For an inner graph, copy its owner field unchanged into graph_owner. Copy the returned name into HJSON candidate.name; context belongs outside candidate.");
 			Result.Purpose.ResultGuidance = TEXT("Default discovery contains matching names and one scope, including search-only actions. For an unfamiliar action request describe={name: returned_name} in the same context for creation.supported/reason. Editable fields resolve after creation. scope is response metadata, not a selector; re-query when target or context changes.");
 			Result.Purpose.FailureGuidance = TEXT("Unresolved targets, unavailable native contexts, menu-shape drift and readable-name collisions fail without graph mutation.");
 			Result.Purpose.SideEffectGuidance = TEXT("Content read-only: it may create a transient schema context and load native action metadata, but creates no persisted node, package, file, asset editor or external state.");

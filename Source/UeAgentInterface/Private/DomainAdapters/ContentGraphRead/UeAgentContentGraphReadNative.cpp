@@ -852,9 +852,41 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		{
 			// Capture is also the authoring baseline. Only the query view consumes the
 			// aliases already allocated by each domain; never rename native state there.
-			auto Project = [&](auto& Record)
+			// TextureGraph's native titles are not unique names. Project the same
+			// node/name-property facts through the existing authoring allocator,
+			// without changing the native identity or capturing additional values.
+			TSet<FString> TextureNodes;
+			for (const auto& Item : Capture.Items)
+				if (Item.ItemKind == TEXT("texture_graph_node")) TextureNodes.Add(Item.ItemId);
+			TMap<FString, TMap<FString, FUeAgentCanonicalValueRef>> NativeNames;
+			for (const auto& Property : Capture.Properties) {
+				if (!TextureNodes.Contains(Property.OwnerId) || !Property.State.Value.IsValid()
+					|| !HjsonWorkspace::IsGraphNodeNativeNameProperty(Property.FieldId)) continue;
+				TMap<FString, FUeAgentCanonicalValueRef> Value;
+				Value.Add(TEXT("literal"), Property.State.Value.ToSharedRef());
+				if (const auto* Name = HjsonWorkspace::FindGraphNodeNativeNameProperty(Property.FieldId, Value))
+					NativeNames.FindOrAdd(Property.OwnerId).Add(Property.FieldId, *Name);
+			}
+			TMap<FString, TArray<HjsonWorkspace::FGraphAuthoringNodeAliasInput>> TextureGraphs;
+			for (const auto& Item : Capture.Items) if (TextureNodes.Contains(Item.ItemId)
+				&& Item.State.IsValid() && Item.State->GetKind() == EUeAgentValueKind::Object) {
+				TMap<FString, FUeAgentCanonicalValueRef> Values;
+				for (const auto& Field : Item.State->GetObjectItems()) Values.Add(Field.Key, Field.Value);
+				TextureGraphs.FindOrAdd(Item.ContainerId).Add({Item.ItemId,
+					HjsonWorkspace::ReadGraphNodeSemanticName(Values, NativeNames.Find(Item.ItemId)),
+					HjsonWorkspace::ReadGraphNodeNativeIdentity(Values)});
+			}
+			TMap<FString, FString> TextureAliases;
+			for (const auto& Graph : TextureGraphs) {
+				HjsonWorkspace::FGraphAuthoringAliasProjection Aliases;
+				HjsonWorkspace::FWorkspaceError Error;
+				if (!HjsonWorkspace::TryBuildGraphAuthoringAliasProjection(Graph.Value, Aliases, Error))
+					return Fail(OutError, Error.GetDiagnostic());
+				for (const auto& Alias : Aliases.AliasBySourceId) TextureAliases.Add(Alias.Key, Alias.Value);
+			}
+			auto Project = [&](auto& Record, const FString* ProjectedName)
 			{
-				const FString* Name = Record.SemanticIdentity.Selectors.Find(TEXT("public_name"));
+				const FString* Name = ProjectedName ? ProjectedName : Record.SemanticIdentity.Selectors.Find(TEXT("public_name"));
 				if (!Name || Name->IsEmpty() || ReadPublicName(Record.State) == *Name) return true;
 				if (!Record.State.IsValid() || Record.State->GetKind() != EUeAgentValueKind::Object)
 					return Fail(OutError, NativeReadFact(TEXT("content_graph_read_named_state_not_object"),
@@ -874,8 +906,8 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				Record.State = MoveTemp(PublicState);
 				return true;
 			};
-			for (auto& Container : Capture.Containers) if (!Project(Container)) return false;
-			for (auto& Item : Capture.Items) if (!Project(Item)) return false;
+			for (auto& Container : Capture.Containers) if (!Project(Container, nullptr)) return false;
+			for (auto& Item : Capture.Items) if (!Project(Item, TextureAliases.Find(Item.ItemId))) return false;
 			return true;
 		}
 
@@ -1661,7 +1693,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			const FUeAgentOperationContext& Context,
 			TArray<FUeAgentStateEntry>& Entries,
 			FUeAgentContentGraphReadError& OutError,
-			bool bProjectPinAliases = true)
+			bool bProjectPinAliases = true, const TSet<FString>* ResolvedFields = nullptr)
 		{
 			TSet<FString> ContainerIds;
 			if (!TryResolveContainerNames(
@@ -1684,8 +1716,8 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			}
 			const TSet<FString> ItemKinds =
 				AsSet(ReadStringArray(Input, TEXT("item_kinds")));
-			const TSet<FString> Fields =
-				AsSet(ReadStringArray(Input, TEXT("fields")));
+			const TSet<FString> LocalFields = ResolvedFields ? TSet<FString>() : AsSet(ReadStringArray(Input, TEXT("fields")));
+			const TSet<FString>& Fields = ResolvedFields ? *ResolvedFields : LocalFields;
 			auto Wants =
 				[&Fields, bCompound](const TCHAR* Field)
 				{
@@ -1960,10 +1992,11 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			const FSelection& Selection,
 			const FUeAgentOperationContext& Context,
 			TArray<FUeAgentStateEntry>& Entries,
-			FUeAgentContentGraphReadError& OutError)
+			FUeAgentContentGraphReadError& OutError,
+			const TSet<FString>* ResolvedOwners = nullptr, const TSet<FString>* ResolvedFields = nullptr)
 		{
 			TSet<FString> ContainerIds;
-			if (!TryResolveContainerNames(
+			if (!ResolvedOwners && !TryResolveContainerNames(
 					Capture,
 					ReadStringArray(Input, TEXT("containers")),
 					ContainerIds,
@@ -1971,18 +2004,19 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			{
 				return false;
 			}
-			TSet<FString> OwnerIds;
-			if (!bCompound && !TryResolveOwnerNames(
+			TSet<FString> LocalOwners;
+			if (!ResolvedOwners && !bCompound && !TryResolveOwnerNames(
 					Capture,
 					ContainerIds,
 					ReadStringArray(Input, TEXT("owners")),
-					OwnerIds,
+					LocalOwners,
 					OutError))
 			{
 				return false;
 			}
-			const TSet<FString> FieldIds =
-				AsSet(ReadStringArray(Input, TEXT("fields")));
+			const auto& OwnerIds = ResolvedOwners ? *ResolvedOwners : LocalOwners;
+			const TSet<FString> LocalFields = ResolvedFields ? TSet<FString>() : AsSet(ReadStringArray(Input, TEXT("fields")));
+			const auto& FieldIds = ResolvedFields ? *ResolvedFields : LocalFields;
 			const bool bPresence = !bCompound
 				&& ReadBoolean(Input, TEXT("include_presence"));
 			TSet<FString> Found;
@@ -2421,11 +2455,14 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				}
 
 				FUeAgentContentGraphCapture Capture;
-				if (!Environment->TryCapture(
-						Target.GetValue(),
-						Context.GetExecutionContext(),
-						Capture,
-						OutError))
+				bool bDeferredProperties = false;
+				const TSet<FString> RequestedFields = AsSet(ReadStringArray(Input, TEXT("fields")));
+				if (!(ProviderBinding == TEXT("content_graph.read.items")
+					? Environment->TryCaptureItemTopology(Target.GetValue(), Context.GetExecutionContext(), Capture, OutError,
+						RequestedFields.IsEmpty() || RequestedFields.Contains(TEXT("geometry_components")))
+					: ProviderBinding == TEXT("content_graph.read.properties")
+					? Environment->TryCapturePropertyTopology(Target.GetValue(), Context.GetExecutionContext(), Capture, bDeferredProperties, OutError)
+					: Environment->TryCapture(Target.GetValue(), Context.GetExecutionContext(), Capture, OutError)))
 				{
 					return false;
 				}
@@ -2534,7 +2571,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 						Selection,
 						Context,
 						Entries,
-						OutError))
+						OutError, true, &RequestedFields))
 				{
 					return false;
 				}
@@ -2550,6 +2587,14 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				{
 					return false;
 				}
+				TSet<FString> DeferredOwners;
+				const auto& DeferredFields = RequestedFields;
+				if (bDeferredProperties) {
+					TSet<FString> Containers;
+					if (!TryResolveContainerNames(Capture, ReadStringArray(Input, TEXT("containers")), Containers, OutError)
+						|| !TryResolveOwnerNames(Capture, Containers, ReadStringArray(Input, TEXT("owners")), DeferredOwners, OutError)
+						|| !Environment->TryCaptureSelectedProperties(Capture, DeferredOwners, DeferredFields, OutError)) return false;
+				}
 				if (Sections.Contains(TEXT("properties"))
 					&& !AddProperties(
 						Capture,
@@ -2558,7 +2603,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 						Selection,
 						Context,
 						Entries,
-						OutError))
+						OutError, bDeferredProperties ? &DeferredOwners : nullptr, bDeferredProperties ? &DeferredFields : nullptr))
 				{
 					return false;
 				}
@@ -2584,6 +2629,9 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				{
 					return false;
 				}
+				// All native geometry/property getters are complete. The query
+				// result is pure values; do not carry loaded Partition cells onward.
+				Capture.NativeReadScope.Reset();
 				return BuildSnapshot(
 					ProviderBinding,
 					Capture,
@@ -2702,6 +2750,13 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		{
 			return false;
 		}
+		if (!bProjectPinAliases && Capture.DomainId == TEXT("texture_graph"))
+			for (auto& Entry : Entries)
+				// Native owner/selectors identify the asset, expression and field.
+				// Content revision remains real observation evidence, not identity.
+				// Legacy bindings are adapted by scoped composition at the edge.
+				Entry = Entry.WithIdentityAndDefault(Entry.GetIdentity().WithGeneration(TEXT("authoring-binding/1")),
+					Entry.GetDefault(), Entry.GetObservedRevision());
 		return BuildSnapshot(
 			TEXT("content_graph.read.compound"),
 			Capture,

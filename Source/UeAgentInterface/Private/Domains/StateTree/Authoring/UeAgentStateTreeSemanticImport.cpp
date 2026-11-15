@@ -58,7 +58,19 @@ namespace UeAgentStateTreeAuthoring
 					CandidatePointer, Selector, Error)) return false;
 			QueryOwners::AiBehavior::FAiBehaviorCandidate Candidate;
 			QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError Failure;
-			if (!QueryOwners::AiBehavior::TryResolveAiBehaviorCandidate(Target, Selector.Name, FString(), Candidate, Failure, Selector.Select))
+			QueryOwners::AiBehavior::FAiBehaviorCandidateContext Context;
+			FString Placement, Parent;
+			Source->TryGetStringField(TEXT("placement"), Placement);
+			if (QueryOwners::AiBehavior::IsStateTreeNodePlacement(Placement)) {
+				const bool bGlobal = Placement == TEXT("global_task") || Placement == TEXT("evaluator");
+				// Existing parent references are normalized by the keyed document.
+				// A same-request new parent is validated on the proposed tree.
+				if (bGlobal || (Source->TryGetStringField(TEXT("parent"), Parent) && FGuid::Parse(Parent, Context.StateTreeParentId)))
+					Context.AttachmentKind = Placement;
+			}
+			auto InitialSelection = Selector.Select;
+			if (Placement == TEXT("property_function")) InitialSelection.Remove(TEXT("output"));
+			if (!QueryOwners::AiBehavior::TryResolveAiBehaviorCandidate(Target, Selector.Name, FString(), Candidate, Failure, InitialSelection, Context))
 			{ auto Detail = UeAgentAuthoringDiagnostics::CandidateFailure(Failure.Code, Selector.Name, Target.GetPathName(), TEXT("StateTree"), TEXT("ai.behavior.candidates"), Failure);
 				UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Detail, CandidatePointer);
 				Error.SetFailure(Detail); return false; }
@@ -77,7 +89,6 @@ namespace UeAgentStateTreeAuthoring
 				Item->SetStringField(TEXT("id"), TEXT("new_binding:") + Key);
 				Item->SetStringField(TEXT("kind"), TEXT("binding"));
 				Item->SetStringField(TEXT("label"), TEXT("Binding"));
-				Item->SetStringField(TEXT("parent"), TEXT(""));
 				Item->SetNumberField(TEXT("index"), 0);
 				UeAgentPropertyValueCodec::FOptions Options;
 				const FPropertyBindingPath EmptyPath;
@@ -91,8 +102,6 @@ namespace UeAgentStateTreeAuthoring
 				}
 				return true;
 			}
-			FString Placement;
-			Source->TryGetStringField(TEXT("placement"), Placement);
 			const TSharedPtr<FJsonObject>* Categories = nullptr;
 			if (Source->HasField(TEXT("categories")) && !Source->TryGetObjectField(TEXT("categories"), Categories))
 			{ return Fail(TEXT("hjson_initial_categories_invalid"), TEXT("categories"), TEXT("Initial property categories must be an object.")); }
@@ -603,6 +612,32 @@ namespace UeAgentStateTreeAuthoring
 						return FailDiagnostic(MoveTemp(Diagnostic)); }
 					UeAgentPropertyValueCodec::FOptions Options;
 					Item->SetField(StateField, UeAgentPropertyValueCodec::EncodeStructValue(FPropertyBindingPath::StaticStruct(), &Path, nullptr, Options));
+				}
+				// Once the proposed owners and endpoints exist, validate a new function against
+				// the same receiving-field menu used for discovery (also supports same-edit targets).
+				const FString FunctionId = Item->GetStringField(TEXT("source"));
+				const FString* FunctionKey = SourceKeyByNativeId.Find(FunctionId);
+				const TSharedPtr<FJsonObject>* FunctionItem = nullptr;
+				FString FunctionPlacement;
+				if (FunctionKey && NativeByNewKey.Contains(*FunctionKey) && Desired->TryGetObjectField(FunctionId, FunctionItem)
+					&& (*FunctionItem)->TryGetStringField(TEXT("placement"), FunctionPlacement) && FunctionPlacement == TEXT("property_function"))
+				{
+					const auto FunctionRow = RowsValue->AsObject()->GetObjectField(*FunctionKey);
+					const auto CandidateSpec = FunctionRow->GetObjectField(TEXT("candidate"));
+					const FString Pointer = TEXT("/tree_items/") + HjsonWorkspace::EscapeJsonPointerSegment(*FunctionKey) + TEXT("/candidate");
+					HjsonWorkspace::DomainAuthoring::FDomainHjsonCandidateSelector Selector;
+					if (!HjsonWorkspace::DomainAuthoring::TryReadCandidateSelector(CandidateSpec, Pointer, Selector, Error)) return false;
+					QueryOwners::AiBehavior::FAiBehaviorCandidateContext Context;
+					Context.AttachmentKind = TEXT("property_function");
+					Context.TargetPath = Item->GetStringField(TEXT("target_path"));
+					Context.FunctionOutput = Item->GetStringField(TEXT("source_path"));
+					FGuid::Parse(Item->GetStringField(TEXT("target")), Context.StateTreeParentId);
+					QueryOwners::AiBehavior::FAiBehaviorCandidate Candidate;
+					if (!QueryOwners::AiBehavior::TryResolveAiBehaviorCandidate(*Proposed, Selector.Name, {}, Candidate, Detail, Selector.Select, Context))
+					{
+						UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Detail, Pointer);
+						return FailDiagnostic(Detail);
+					}
 				}
 			}
 			if (!ApplyTreeDocumentForAuthoring(*Proposed, Captured, Detail)) { Error.SetFailure(Detail); return false; }

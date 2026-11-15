@@ -36,7 +36,166 @@
 #include "WorldPartition/HLOD/HLODActor.h"
 
 namespace UeAgentLevelAuthoring {
+struct FLevelSemanticFacts {
+  FString SemanticId;
+  UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
+  TMap<FString, FString> Context;
+  FString ClassPath, Level, Label, Folder, Parent, Socket;
+  TArray<FString> Tags;
+  FTransform Transform = FTransform::Identity;
+  bool bScene = false;
+  bool bOmitLabel = false, bOmitTranslation = false, bOmitRotation = false, bOmitScale = false;
+};
+struct FLevelSemanticFactsSet {
+  TMap<FString, TSharedPtr<const FLevelSemanticFacts>> Values;
+  uint64 AllocatedBytes = 0;
+  FString ActorDefinitionKey, ComponentDefinitionKey;
+  // The existing semantic-fact producer already builds these two static
+  // contracts. Keep that result until the last capture/composition consumer.
+  TSharedPtr<FJsonValue> ActorDefinition, ComponentDefinition;
+  TSharedPtr<FJsonObject> ObjectDeclaration;
+  int64 TypeDeclarationReads = 0, SpatialDefinitionReads = 0;
+};
 namespace {
+thread_local FLevelSemanticFactsSet* ActiveSemanticFacts = nullptr;
+FLevelSemanticFacts ReadActorFacts(const AActor& Actor, const TMap<FString, FString>* Context);
+FLevelSemanticFacts ReadComponentFacts(const UActorComponent& Component, const TMap<FString, FString>* Context);
+
+FString SemanticFactsKey(const UeAgentAuthoringState::FReadRequest& Request) {
+  const auto& Identity = Request.SnapshotIdentityOverride.IsSet()
+      ? Request.SnapshotIdentityOverride.GetValue() : Request.TargetIdentity;
+  return FString::FromInt(Request.SemanticId.Len()) + TEXT(":") + Request.SemanticId + Identity.CanonicalKey;
+}
+
+uint64 SemanticFactsSize(const FLevelSemanticFacts& Facts) {
+  uint64 Size = sizeof(FLevelSemanticFacts) + Facts.SemanticId.GetAllocatedSize()
+      + Facts.Identity.ModelId.GetAllocatedSize() + Facts.Identity.TargetKind.GetAllocatedSize()
+      + Facts.Identity.KeyPattern.GetAllocatedSize() + Facts.Identity.CanonicalKey.GetAllocatedSize()
+      + Facts.Identity.Selectors.GetAllocatedSize() + Facts.Context.GetAllocatedSize()
+      + Facts.ClassPath.GetAllocatedSize() + Facts.Level.GetAllocatedSize() + Facts.Label.GetAllocatedSize()
+      + Facts.Folder.GetAllocatedSize() + Facts.Parent.GetAllocatedSize() + Facts.Socket.GetAllocatedSize()
+      + Facts.Tags.GetAllocatedSize();
+  for (const auto& Pair : Facts.Identity.Selectors) Size += Pair.Key.GetAllocatedSize() + Pair.Value.GetAllocatedSize();
+  for (const auto& Pair : Facts.Context) Size += Pair.Key.GetAllocatedSize() + Pair.Value.GetAllocatedSize();
+  for (const auto& Tag : Facts.Tags) Size += Tag.GetAllocatedSize();
+  return Size;
+}
+
+void RememberSemanticFacts(const UeAgentAuthoringState::FReadRequest& Request,
+    TSharedPtr<const FLevelSemanticFacts> Facts) {
+  if (!ActiveSemanticFacts) return;
+  const FString Key = SemanticFactsKey(Request);
+  if (const auto* Existing = ActiveSemanticFacts->Values.Find(Key))
+    ActiveSemanticFacts->AllocatedBytes -= SemanticFactsSize(**Existing) + Key.GetAllocatedSize();
+  ActiveSemanticFacts->Values.Remove(Key);
+  const uint64 Bytes = SemanticFactsSize(*Facts) + Key.GetAllocatedSize();
+  if (ActiveSemanticFacts->Values.Num() >= 20000
+      || ActiveSemanticFacts->AllocatedBytes + Bytes + ActiveSemanticFacts->Values.GetAllocatedSize() > 16ull * 1024 * 1024) return;
+  ActiveSemanticFacts->Values.Add(Key, MoveTemp(Facts));
+  ActiveSemanticFacts->AllocatedBytes += Bytes;
+}
+
+TSharedPtr<const FLevelSemanticFacts> ObserveSemanticFacts(const UeAgentAuthoringState::FReadRequest& Request) {
+  const UObject* Root = Request.RootObject;
+  if (!IsValid(Root) || Root->IsTemplate()
+      || Root->GetClass()->GetOutermost()->GetName() != TEXT("/Script/Engine")
+      || !Root->GetClass()->HasAnyClassFlags(CLASS_Native)
+      || Root->GetClass()->HasAnyClassFlags(CLASS_CompiledFromBlueprint)) return {};
+  // Overrides and unknown context keep the existing accessor path. Do not infer
+  // their output from a similar-looking native transform or target identity.
+  for (const auto& Pair : Request.Context)
+    if (Pair.Key != TEXT("scene_editing")) return {};
+  const bool bActor = Request.SemanticId == ActorTargetSemanticId || Request.SemanticId == ActorStateSemanticId;
+  const bool bComponent = Request.SemanticId == ComponentTargetSemanticId || Request.SemanticId == ComponentStateSemanticId;
+  if (!bActor && !bComponent) return {};
+  const AActor* Actor = bActor ? Cast<AActor>(Root) : nullptr;
+  const UActorComponent* Component = bComponent ? Cast<UActorComponent>(Root) : nullptr;
+  if ((!Actor && !Component) || (Component && Component->IsA<UPCGComponent>())) return {};
+  auto Facts = MakeShared<FLevelSemanticFacts>();
+  if (Request.SemanticId == ActorStateSemanticId) {
+    *Facts = ReadActorFacts(*Actor, &Request.Context);
+  } else if (Request.SemanticId == ComponentStateSemanticId) {
+    *Facts = ReadComponentFacts(*Component, &Request.Context);
+  }
+  Facts->SemanticId = Request.SemanticId;
+  Facts->Identity = Request.TargetIdentity;
+  Facts->Context = Request.Context;
+  Facts->ClassPath = Root->GetClass()->GetPathName();
+  return Facts;
+}
+
+bool SameSemanticFacts(const FLevelSemanticFacts& A, const FLevelSemanticFacts& B) {
+  const auto& X = A.Identity;
+  const auto& Y = B.Identity;
+  // These facts prove identical exported text, not native FName identity.
+  // FString's default equality would hide case-only labels or selector text.
+  const auto SameText = [](const FString& Left, const FString& Right) {
+    return Left.Equals(Right, ESearchCase::CaseSensitive);
+  };
+  const auto SameTextMap = [&SameText](const TMap<FString, FString>& Left, const TMap<FString, FString>& Right) {
+    if (Left.Num() != Right.Num()) return false;
+    for (const auto& Pair : Left) {
+      const auto Id = Right.FindId(Pair.Key);
+      if (!Id.IsValidId()) return false;
+      const auto& Other = Right.Get(Id);
+      if (!SameText(Pair.Key, Other.Key) || !SameText(Pair.Value, Other.Value)) return false;
+    }
+    return true;
+  };
+  const auto SameTags = [&SameText](const TArray<FString>& Left, const TArray<FString>& Right) {
+    if (Left.Num() != Right.Num()) return false;
+    for (int32 Index = 0; Index < Left.Num(); ++Index)
+      if (!SameText(Left[Index], Right[Index])) return false;
+    return true;
+  };
+  const auto ExactScalar = [](double Left, double Right) { return FMemory::Memcmp(&Left, &Right, sizeof(double)) == 0; };
+  const auto ExactVector = [&ExactScalar](const FVector& Left, const FVector& Right) {
+    return ExactScalar(Left.X, Right.X) && ExactScalar(Left.Y, Right.Y) && ExactScalar(Left.Z, Right.Z);
+  };
+  const FQuat Q = A.Transform.GetRotation(), R = B.Transform.GetRotation();
+  return SameText(A.SemanticId, B.SemanticId) && SameText(X.ModelId, Y.ModelId) && SameText(X.TargetKind, Y.TargetKind)
+      && SameText(X.KeyPattern, Y.KeyPattern) && SameText(X.CanonicalKey, Y.CanonicalKey)
+      && SameTextMap(X.Selectors, Y.Selectors) && SameTextMap(A.Context, B.Context)
+      && SameText(A.ClassPath, B.ClassPath) && SameText(A.Level, B.Level) && SameText(A.Label, B.Label) && SameText(A.Folder, B.Folder)
+      && SameText(A.Parent, B.Parent) && SameText(A.Socket, B.Socket) && SameTags(A.Tags, B.Tags) && A.bScene == B.bScene
+      && A.bOmitLabel == B.bOmitLabel && A.bOmitTranslation == B.bOmitTranslation
+      && A.bOmitRotation == B.bOmitRotation && A.bOmitScale == B.bOmitScale
+      && ExactVector(A.Transform.GetTranslation(), B.Transform.GetTranslation())
+      && ExactVector(A.Transform.GetScale3D(), B.Transform.GetScale3D())
+      && ExactScalar(Q.X, R.X) && ExactScalar(Q.Y, R.Y) && ExactScalar(Q.Z, R.Z) && ExactScalar(Q.W, R.W);
+}
+
+TSharedRef<FJsonObject> BuildSemanticFactsValue(const FLevelSemanticFacts& Facts) {
+  const auto Result = MakeShared<FJsonObject>();
+  if (Facts.SemanticId == ActorTargetSemanticId || Facts.SemanticId == ComponentTargetSemanticId) {
+    UeAgentAuthoringIdentity::WriteSelectorsFlat(Facts.Identity, Result);
+    Result->SetStringField(Facts.SemanticId == ActorTargetSemanticId ? TEXT("actor_class") : TEXT("component_class"), Facts.ClassPath);
+  } else {
+    const bool bActor = Facts.SemanticId == ActorStateSemanticId;
+    if (bActor) {
+      Result->SetStringField(TEXT("level"), Facts.Level);
+      if (!Facts.bOmitLabel) Result->SetStringField(TEXT("label"), Facts.Label);
+      Result->SetStringField(TEXT("folder_path"), Facts.Folder);
+      const auto Transform = BuildTransformState(Facts.Transform, ETransformFrame::ActorWorld);
+      if (Facts.bOmitTranslation) Transform->RemoveField(TEXT("translation"));
+      if (Facts.bOmitRotation) Transform->RemoveField(TEXT("rotation"));
+      if (Facts.bOmitScale) Transform->RemoveField(TEXT("scale"));
+      Result->SetObjectField(TEXT("transform"), Transform);
+      TArray<TSharedPtr<FJsonValue>> Tags;
+      for (const FString& Tag : Facts.Tags) Tags.Add(MakeShared<FJsonValueString>(Tag));
+      Result->SetArrayField(TEXT("tags"), MoveTemp(Tags));
+    }
+    if (bActor || Facts.bScene) {
+      const auto Attachment = MakeShared<FJsonObject>();
+      Attachment->SetStringField(bActor ? TEXT("parent_managed_id") : TEXT("parent_component"), Facts.Parent);
+      Attachment->SetStringField(TEXT("socket_name"), Facts.Socket);
+      if (!bActor) Attachment->SetObjectField(TEXT("transform"), BuildTransformState(Facts.Transform, ETransformFrame::ComponentParentRelative));
+      Result->SetObjectField(TEXT("attachment"), Attachment);
+    }
+  }
+  return Result;
+}
+
 UE::UAI::Contract::FDiagnostic StateFailure(const TCHAR* Code, const FString& Reason,
     const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
     const FJsonObject* Input = nullptr) {
@@ -101,11 +260,12 @@ TMap<FString, FString> ComponentSelectors(const UActorComponent &Component) {
   };
 }
 
+template <typename TRequest>
 bool AddReadRequest(
     const FString &SemanticId,
     const UeAgentAuthoringIdentity::FCanonicalIdentity &Identity,
     const UObject *RootObject, const bool bExpectedAbsent,
-    TArray<UeAgentAuthoringState::FReadRequest> &OutRequests) {
+    TArray<TRequest> &OutRequests, bool bSceneEditing = false) {
   UeAgentAuthoringState::FReadRequest Request;
   Request.SemanticId = SemanticId;
   Request.TargetIdentity = Identity;
@@ -116,16 +276,19 @@ bool AddReadRequest(
   Request.RootOwnerPath = Identity.GetSelector(TEXT("world_path"));
   if (bExpectedAbsent)
     Request.Context.Add(TEXT("expected_absent"), TEXT("true"));
+  if (bSceneEditing) Request.Context.Add(TEXT("scene_editing"), TEXT("true"));
   OutRequests.Add(MoveTemp(Request));
   return true;
 }
 
+template <typename TRequest>
 bool AppendEditableProperties(
     const UObject *Object, const FString &SemanticId, const FString &ModelId,
     const FString &TargetKind, const TMap<FString, FString> &BaseSelectors,
     const TSet<FName> &Excluded,
-    TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing = false) {
+    TArray<TRequest> &OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing = false,
+    const TSet<FString>* PropertyNames = nullptr) {
   UeAgentAuthoringState::FEditablePropertyReadOptions Options;
   Options.SemanticId = SemanticId;
   const auto IdentityScope = MakeShared<FJsonObject>();
@@ -136,7 +299,8 @@ bool AppendEditableProperties(
   IdentityScope->SetObjectField(TEXT("selectors"), SelectorScope);
   Options.RequestIdentityScope = UeAgentAuthoringState::MakeStableCanonicalValueKey(MakeShared<FJsonValueObject>(IdentityScope));
   Options.ExcludedProperties = Excluded;
-  Options.IncludeProperty = [bSceneEditing, bComponent = TargetKind == TEXT("level_component_property")](const FProperty* Property, const void* Value, const UObject* Owner) {
+  Options.IncludeProperty = [bSceneEditing, PropertyNames, bComponent = TargetKind == TEXT("level_component_property")](const FProperty* Property, const void* Value, const UObject* Owner) {
+    if (PropertyNames && !PropertyNames->Contains(Property->GetName())) return false;
     if (bSceneEditing && !IsSceneEditingProperty(Property->GetName(), bComponent, Owner ? Owner->GetClass() : nullptr)) return false;
     const auto* Actor = Cast<AActor>(Owner);
     const auto* ObjectProperty = CastField<FObjectPropertyBase>(Property);
@@ -190,72 +354,52 @@ bool ReadTransformOverride(const TMap<FString, FString> *Context,
       &OutTransform, Error);
 }
 
-TSharedRef<FJsonObject>
-BuildActorState(const AActor &Actor,
-                const TMap<FString, FString> *Context = nullptr) {
-  TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-  Result->SetStringField(TEXT("level"), Context && Context->Contains(TEXT("actor_level_override"))
+FLevelSemanticFacts ReadActorFacts(const AActor& Actor, const TMap<FString, FString>* Context) {
+  FLevelSemanticFacts Result;
+  Result.SemanticId = ActorStateSemanticId;
+  Result.Level = Context && Context->Contains(TEXT("actor_level_override"))
       ? Context->FindRef(TEXT("actor_level_override"))
-      : Actor.GetLevel() ? Actor.GetLevel()->GetPackage()->GetName() : FString());
-  const bool bOmitGeneratedLabel =
+      : Actor.GetLevel() ? Actor.GetLevel()->GetPackage()->GetName() : FString();
+  Result.bOmitLabel =
       Context && Context->FindRef(TEXT("actor_label_omit")) == TEXT("true");
-  if (!bOmitGeneratedLabel) {
-    Result->SetStringField(
-        TEXT("label"),
-        Context && Context->Contains(TEXT("actor_label_override"))
+  if (!Result.bOmitLabel) {
+    Result.Label = Context && Context->Contains(TEXT("actor_label_override"))
             ? Context->FindRef(TEXT("actor_label_override"))
             // Native-default reads must not cache a generated display label on
             // a CDO/archetype: that would change the defaults used by serialization.
-            : Actor.GetActorLabel(!Actor.IsTemplate()));
+            : Actor.GetActorLabel(!Actor.IsTemplate());
   }
-  Result->SetStringField(
-      TEXT("folder_path"),
-      Context && Context->Contains(TEXT("actor_folder_override"))
+  Result.Folder = Context && Context->Contains(TEXT("actor_folder_override"))
           ? Context->FindRef(TEXT("actor_folder_override"))
-          : GetActorFolderPathText(Actor));
-  FTransform Transform = Actor.GetActorTransform();
-  ReadTransformOverride(Context, TEXT("actor_"), Transform);
-  TSharedRef<FJsonObject> TransformState =
-      BuildTransformState(Transform, ETransformFrame::ActorWorld);
+          : GetActorFolderPathText(Actor);
+  Result.Transform = Actor.GetActorTransform();
+  ReadTransformOverride(Context, TEXT("actor_"), Result.Transform);
   if (Context) {
-    if (Context->FindRef(TEXT("actor_transform_translation_omit")) ==
-        TEXT("true")) {
-      TransformState->RemoveField(TEXT("translation"));
-    }
-    if (Context->FindRef(TEXT("actor_transform_rotation_omit")) ==
-        TEXT("true")) {
-      TransformState->RemoveField(TEXT("rotation"));
-    }
-    if (Context->FindRef(TEXT("actor_transform_scale_omit")) == TEXT("true")) {
-      TransformState->RemoveField(TEXT("scale"));
-    }
+    Result.bOmitTranslation = Context->FindRef(TEXT("actor_transform_translation_omit")) == TEXT("true");
+    Result.bOmitRotation = Context->FindRef(TEXT("actor_transform_rotation_omit")) == TEXT("true");
+    Result.bOmitScale = Context->FindRef(TEXT("actor_transform_scale_omit")) == TEXT("true");
   }
-  Result->SetObjectField(TEXT("transform"), TransformState);
-  TArray<TSharedPtr<FJsonValue>> Tags;
   for (const FName &Tag : Actor.Tags) {
     if (!IsManagedActorIdentityTag(Tag))
-      Tags.Add(MakeShared<FJsonValueString>(Tag.ToString()));
+      Result.Tags.Add(Tag.ToString());
   }
-  Result->SetArrayField(TEXT("tags"), MoveTemp(Tags));
   const bool bAttachmentOverride =
       Context &&
       Context->FindRef(TEXT("actor_attachment_override")) == TEXT("true");
   const AActor *Parent = Actor.GetAttachParentActor();
-  TSharedRef<FJsonObject> Attachment = MakeShared<FJsonObject>();
-  Attachment->SetStringField(
-      TEXT("parent_managed_id"),
-      bAttachmentOverride
+  Result.Parent = bAttachmentOverride
           ? Context->FindRef(TEXT("actor_parent_managed_id_override"))
-          : (Parent ? GetManagedActorId(*Parent) : FString()));
-  Attachment->SetStringField(
-      TEXT("socket_name"),
-      bAttachmentOverride
+          : (Parent ? GetManagedActorId(*Parent) : FString());
+  Result.Socket = bAttachmentOverride
           ? Context->FindRef(TEXT("actor_socket_name_override"))
           : (Actor.GetAttachParentSocketName().IsNone()
                  ? FString()
-                 : Actor.GetAttachParentSocketName().ToString()));
-  Result->SetObjectField(TEXT("attachment"), Attachment);
+                 : Actor.GetAttachParentSocketName().ToString());
   return Result;
+}
+
+TSharedRef<FJsonObject> BuildActorState(const AActor& Actor, const TMap<FString, FString>* Context = nullptr) {
+  return BuildSemanticFactsValue(ReadActorFacts(Actor, Context));
 }
 
 TSharedRef<FJsonObject> BuildComponentTarget(
@@ -268,39 +412,34 @@ TSharedRef<FJsonObject> BuildComponentTarget(
   return Result;
 }
 
-TSharedRef<FJsonObject>
-BuildComponentState(const UActorComponent &Component,
-                    const TMap<FString, FString> *Context = nullptr) {
-  TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-  if (!Context || Context->FindRef(TEXT("scene_editing")) != TEXT("true")) {
-    if (const auto Pcg = UeAgentPcgComponentAuthoring::Read(Component))
-      Result->SetObjectField(TEXT("pcg"), Pcg);
-  }
+FLevelSemanticFacts ReadComponentFacts(const UActorComponent& Component, const TMap<FString, FString>* Context) {
+  FLevelSemanticFacts Result;
+  Result.SemanticId = ComponentStateSemanticId;
   const USceneComponent *Scene = Cast<USceneComponent>(&Component);
   if (!Scene)
     return Result;
-  TSharedRef<FJsonObject> Attachment = MakeShared<FJsonObject>();
+  Result.bScene = true;
   const bool bOverride =
       Context && Context->FindRef(TEXT("attachment_override")) == TEXT("true");
   const USceneComponent *Parent = Scene->GetAttachParent();
-  Attachment->SetStringField(
-      TEXT("parent_component"),
-      bOverride && Context->Contains(TEXT("parent_component_override"))
+  Result.Parent = bOverride && Context->Contains(TEXT("parent_component_override"))
           ? Context->FindRef(TEXT("parent_component_override"))
-          : (Parent ? Parent->GetName() : FString()));
-  Attachment->SetStringField(
-      TEXT("socket_name"),
-      bOverride && Context->Contains(TEXT("socket_name_override"))
+          : (Parent ? Parent->GetName() : FString());
+  Result.Socket = bOverride && Context->Contains(TEXT("socket_name_override"))
           ? Context->FindRef(TEXT("socket_name_override"))
           : (Scene->GetAttachSocketName().IsNone()
                  ? FString()
-                 : Scene->GetAttachSocketName().ToString()));
-  FTransform Transform = Scene->GetRelativeTransform();
-  ReadTransformOverride(Context, TEXT("component_"), Transform);
-  Attachment->SetObjectField(
-      TEXT("transform"),
-      BuildTransformState(Transform, ETransformFrame::ComponentParentRelative));
-  Result->SetObjectField(TEXT("attachment"), Attachment);
+                 : Scene->GetAttachSocketName().ToString());
+  Result.Transform = Scene->GetRelativeTransform();
+  ReadTransformOverride(Context, TEXT("component_"), Result.Transform);
+  return Result;
+}
+
+TSharedRef<FJsonObject> BuildComponentState(const UActorComponent& Component, const TMap<FString, FString>* Context = nullptr) {
+  const auto Result = BuildSemanticFactsValue(ReadComponentFacts(Component, Context));
+  if (!Context || Context->FindRef(TEXT("scene_editing")) != TEXT("true")) {
+    if (const auto Pcg = UeAgentPcgComponentAuthoring::Read(Component)) Result->SetObjectField(TEXT("pcg"), Pcg);
+  }
   return Result;
 }
 
@@ -345,8 +484,25 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
   OutValue.TargetIdentity = Request.TargetIdentity;
   OutValue.Provenance = StateAccessorId;
   OutValue.Type.Kind = TEXT("object");
-  if (Request.SemanticId == ActorStateSemanticId || Request.SemanticId == ComponentStateSemanticId)
+  const bool bSpatialState = Request.SemanticId == ActorStateSemanticId || Request.SemanticId == ComponentStateSemanticId;
+  if (ActiveSemanticFacts) {
+    OutValue.FieldDeclaration = ActiveSemanticFacts->ObjectDeclaration;
+    ++ActiveSemanticFacts->TypeDeclarationReads;
+    if (bSpatialState) {
+      OutValue.ValueDefinition = Request.SemanticId == ComponentStateSemanticId
+          ? ActiveSemanticFacts->ComponentDefinition : ActiveSemanticFacts->ActorDefinition;
+      ++ActiveSemanticFacts->SpatialDefinitionReads;
+    }
+    if (!OutValue.FieldDeclaration || (bSpatialState && !OutValue.ValueDefinition)) {
+      OutError = StateFailure(TEXT("level_semantic_declaration_missing"),
+          TEXT("The active Level semantic-fact scope did not supply its object/spatial declaration; no per-instance reconstruction was selected."), TEXT("semantic_declaration"),
+          nullptr, MakeShared<FJsonValueString>(TEXT("declaration produced by the active Level semantic-fact scope")));
+      return UeAgentAuthoringState::EReadOutcome::Failed;
+    }
+  } else if (bSpatialState) {
+    // Explicit standalone state reads have no capture fact-set input.
     OutValue.ValueDefinition = BuildSpatialStateDefinition(Request.SemanticId == ComponentStateSemanticId);
+  }
   OutValue.bEditable = Request.SemanticId != WorldTargetSemanticId &&
                        Request.SemanticId != ActorTargetSemanticId &&
                        Request.SemanticId != ComponentTargetSemanticId;
@@ -355,6 +511,17 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
     OutValue.bAvailable = false;
     OutValue.AvailabilityReason = TEXT("target_not_found");
     return UeAgentAuthoringState::EReadOutcome::Unavailable;
+  }
+
+  if (ActiveSemanticFacts) {
+    if (const auto Facts = ObserveSemanticFacts(Request)) {
+      OutValue.Value = MakeShared<FJsonValueObject>(BuildSemanticFactsValue(*Facts));
+      // This builder creates fresh codec-ready JSON, with no borrowed mutable
+      // value tree or native buffer. Transfer it and the immutable declaration.
+      OutValue.bOwnsNormalizedPropertyData = true;
+      RememberSemanticFacts(Request, Facts);
+      return UeAgentAuthoringState::EReadOutcome::Resolved;
+    }
   }
 
   if (Request.SemanticId == WorldStateSemanticId ||
@@ -449,6 +616,36 @@ ProbeNativeDefault(const UeAgentAuthoringNativeDefaults::FRequest &Request,
   return UeAgentAuthoringNativeDefaults::EProbeOutcome::Resolved;
 }
 } // namespace
+
+FScopedLevelSemanticFacts::FScopedLevelSemanticFacts()
+    : Facts(MakeShared<FLevelSemanticFactsSet>()), Previous(ActiveSemanticFacts) {
+  Facts->ActorDefinition = BuildSpatialStateDefinition(false);
+  Facts->ComponentDefinition = BuildSpatialStateDefinition(true);
+  Facts->ActorDefinitionKey = UeAgentAuthoringState::MakeStableCanonicalValueKey(Facts->ActorDefinition);
+  Facts->ComponentDefinitionKey = UeAgentAuthoringState::MakeStableCanonicalValueKey(Facts->ComponentDefinition);
+  UeAgentAuthoringTypeDescriptors::FDescriptor Type; Type.Kind = TEXT("object");
+  Facts->ObjectDeclaration = MakeShared<FJsonObject>();
+  Facts->ObjectDeclaration->SetObjectField(TEXT("type"), Type.ToJsonObject());
+  ActiveSemanticFacts = Facts.Get();
+}
+FScopedLevelSemanticFacts::~FScopedLevelSemanticFacts() {
+  ActiveSemanticFacts = Previous;
+  UE_LOG(LogTemp, Display, TEXT("UAI export timing phase=level_semantic_declarations actor_definitions=1 component_definitions=1 object_declarations=1 type_reads=%lld spatial_reads=%lld per_instance_spatial_builds=0"),
+      Facts->TypeDeclarationReads, Facts->SpatialDefinitionReads);
+}
+TSharedPtr<const FLevelSemanticFactsSet> FScopedLevelSemanticFacts::GetFacts() const { return Facts; }
+bool FScopedLevelSemanticFacts::ObserveUnchanged(const UeAgentAuthoringState::FReadRequest& Request,
+    const TSharedPtr<const FLevelSemanticFactsSet>& Baseline) {
+  if (!Baseline) return false;
+  if (Request.SemanticId == ActorStateSemanticId && Baseline->ActorDefinitionKey != Facts->ActorDefinitionKey) return false;
+  if (Request.SemanticId == ComponentStateSemanticId && Baseline->ComponentDefinitionKey != Facts->ComponentDefinitionKey) return false;
+  const auto* PreviousFacts = Baseline->Values.Find(SemanticFactsKey(Request));
+  if (!PreviousFacts) return false;
+  const auto Current = ObserveSemanticFacts(Request);
+  if (!Current || !SameSemanticFacts(**PreviousFacts, *Current)) return false;
+  RememberSemanticFacts(Request, Current);
+  return true;
+}
 
 FString GetWorldPath(const UWorld &World) {
   return World.GetOutermost()->GetName();
@@ -1021,16 +1218,23 @@ bool BuildComponentSnapshotReadRequests(
   return AddReadRequest(ComponentStateSemanticId, Identity, Component, bExpectedAbsent, OutRequests);
 }
 
-bool BuildWorldExportReadRequests(
+bool BuildWorldExportIdentityReadRequests(
     UWorld &World, TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
     UE::UAI::Contract::FDiagnostic& OutError) {
   OutRequests.Reset();
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
-  if (!BuildWorldIdentity(World, Identity, OutError) ||
-      !AddReadRequest(WorldTargetSemanticId, Identity, &World, false,
-                      OutRequests) ||
-      !AddReadRequest(WorldStateSemanticId, Identity, &World, false,
+  return BuildWorldIdentity(World, Identity, OutError) &&
+      AddReadRequest(WorldTargetSemanticId, Identity, &World, false, OutRequests);
+}
+
+bool BuildWorldExportReadRequests(
+    UWorld &World, TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, const TSet<FString>* PropertyNames,
+    bool bWorldState) {
+  if (!BuildWorldExportIdentityReadRequests(World, OutRequests, OutError)) return false;
+  if (bWorldState && !AddReadRequest(WorldStateSemanticId, OutRequests[0].TargetIdentity, &World, false,
                       OutRequests)) return false;
+  if (PropertyNames && PropertyNames->IsEmpty()) return true;
   const AWorldSettings* Settings = World.GetWorldSettings();
   if (!Settings) {
     OutError = StateFailure(TEXT("level_world_settings_missing"), TEXT("The world has no WorldSettings object to export."),
@@ -1043,7 +1247,7 @@ bool BuildWorldExportReadRequests(
       Settings, WorldPropertySemanticId, WorldPropertyIdentityModelId,
       TEXT("level_world_property"), {{TEXT("world_path"), GetWorldPath(World)}},
       {TEXT("ActorGuid"), TEXT("RootComponent"), TEXT("Tags")}, OutRequests,
-      OutError);
+      OutError, false, PropertyNames);
 }
 
 static FName SceneEditingRootProperty(const FString& PropertyPath) {
@@ -1085,9 +1289,11 @@ bool IsSceneEditingProperty(const FString& PropertyPath, bool bComponent, const 
   return Property && Property->GetOwnerClass() == RequiredClass;
 }
 
-bool BuildActorExportReadRequests(
-    AActor &Actor, TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing) {
+template <typename TRequest>
+static bool BuildActorExportReadRequestsImpl(
+    AActor &Actor, TArray<TRequest> &OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing,
+    bool bIncludeState = true, bool bIncludeProperties = true) {
   OutRequests.Reset();
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   const TMap<FString, FString> Selectors = ActorSelectors(Actor);
@@ -1095,15 +1301,32 @@ bool BuildActorExportReadRequests(
                      Identity, OutError) ||
       !AddReadRequest(ActorTargetSemanticId, Identity, &Actor, false,
                       OutRequests) ||
-      !AddReadRequest(ActorStateSemanticId, Identity, &Actor, false,
-                      OutRequests)) {
+      (bIncludeState && !AddReadRequest(ActorStateSemanticId, Identity, &Actor, false,
+                      OutRequests))) {
     return false;
   }
-  return AppendEditableProperties(
+  return !bIncludeProperties || AppendEditableProperties(
       &Actor, ActorPropertySemanticId, ActorPropertyIdentityModelId,
       TEXT("level_actor_property"), Selectors,
       {TEXT("ActorGuid"), TEXT("RootComponent"), TEXT("Tags")}, OutRequests,
       OutError, bSceneEditing);
+}
+
+bool BuildActorExportReadRequests(AActor& Actor, TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing) {
+  return BuildActorExportReadRequestsImpl(Actor, OutRequests, OutError, bSceneEditing);
+}
+bool BuildActorExportReadRequests(AActor& Actor, TArray<UeAgentAuthoringState::FReadRequestBinding>& OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing) {
+  return BuildActorExportReadRequestsImpl(Actor, OutRequests, OutError, bSceneEditing);
+}
+bool BuildActorExportScopedReadRequests(AActor& Actor, TArray<UeAgentAuthoringState::FReadRequestBinding>& OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing, bool bIncludeState, bool bIncludeProperties) {
+  return BuildActorExportReadRequestsImpl(Actor, OutRequests, OutError, bSceneEditing, bIncludeState, bIncludeProperties);
+}
+bool BuildActorExportScopedReadRequests(AActor& Actor, TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing, bool bIncludeState, bool bIncludeProperties) {
+  return BuildActorExportReadRequestsImpl(Actor, OutRequests, OutError, bSceneEditing, bIncludeState, bIncludeProperties);
 }
 
 TSet<FName> ComponentStructuralProperties(const UActorComponent& Component) {
@@ -1116,28 +1339,39 @@ TSet<FName> ComponentStructuralProperties(const UActorComponent& Component) {
   return Excluded;
 }
 
-bool BuildComponentExportReadRequests(
+template <typename TRequest>
+static bool BuildComponentExportReadRequestsImpl(
     UActorComponent &Component,
-    TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing) {
+    TArray<TRequest> &OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing, bool bIncludeProperties = true) {
   OutRequests.Reset();
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   const TMap<FString, FString> Selectors = ComponentSelectors(Component);
   if (!BuildIdentity(ComponentIdentityModelId, TEXT("level_component"),
                      Selectors, Identity, OutError) ||
       !AddReadRequest(ComponentTargetSemanticId, Identity, &Component, false,
-                      OutRequests) ||
+                      OutRequests, bSceneEditing) ||
       !AddReadRequest(ComponentStateSemanticId, Identity, &Component, false,
-                      OutRequests)) {
+                      OutRequests, bSceneEditing)) {
     return false;
   }
-  if (bSceneEditing) {
-    for (auto& Request : OutRequests) Request.Context.Add(TEXT("scene_editing"), TEXT("true"));
-  }
-  return AppendEditableProperties(
+  return !bIncludeProperties || AppendEditableProperties(
       &Component, ComponentPropertySemanticId, ComponentPropertyIdentityModelId,
       TEXT("level_component_property"), Selectors, ComponentStructuralProperties(Component),
       OutRequests, OutError, bSceneEditing);
+}
+
+bool BuildComponentExportReadRequests(UActorComponent& Component, TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing) {
+  return BuildComponentExportReadRequestsImpl(Component, OutRequests, OutError, bSceneEditing);
+}
+bool BuildComponentExportReadRequests(UActorComponent& Component, TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing, bool bIncludeProperties) {
+  return BuildComponentExportReadRequestsImpl(Component, OutRequests, OutError, bSceneEditing, bIncludeProperties);
+}
+bool BuildComponentExportReadRequests(UActorComponent& Component, TArray<UeAgentAuthoringState::FReadRequestBinding>& OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError, bool bSceneEditing, bool bIncludeProperties) {
+  return BuildComponentExportReadRequestsImpl(Component, OutRequests, OutError, bSceneEditing, bIncludeProperties);
 }
 
 bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError) {

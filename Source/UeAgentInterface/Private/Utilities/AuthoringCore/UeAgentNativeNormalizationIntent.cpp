@@ -85,10 +85,10 @@ namespace UeAgentNativeNormalizationIntent
 				for (auto& Proof : *Proofs)
 				{
 					if (Proof.Completion == EValueCompletion::ResolvedArgument) continue;
-					const auto Value = UeAgentAuthoringSemanticCompare::FindDeclaredValuePath(Entry, Entry.Value, Proof.Path);
+					const auto Value = UeAgentAuthoringSemanticCompare::FindDeclaredValuePath(Entry, Entry.Value, Proof.ProposalPath);
 					if (!Value) return FailNormalization(Error, TEXT("native_normalization_readback_missing"),
 						TEXT("The captured state does not contain the value required by the native normalization record."),
-						Entry.TargetIdentity, Proof.Path, Entry.SemanticId);
+						Entry.TargetIdentity, Proof.ProposalPath, Entry.SemanticId);
 					Proof.NormalizedValue = UeAgentAuthoringState::CloneCanonicalValue(Value);
 				}
 			}
@@ -145,6 +145,13 @@ namespace UeAgentNativeNormalizationIntent
 		const UeAgentAuthoringTypeDescriptors::FDescriptor* Type, const TSharedPtr<FJsonValue>& ValueDefinition,
 		const EValueCompletion Completion)
 	{
+		return RecordValue(Path, Path, SourceValue, NormalizedValue, Error, Type, ValueDefinition, Completion);
+	}
+	bool RecordValue(const FString& Path, const FString& ProposalPath, const TSharedPtr<FJsonValue>& SourceValue,
+		const TSharedPtr<FJsonValue>& NormalizedValue, UE::UAI::Contract::FDiagnostic& Error,
+		const UeAgentAuthoringTypeDescriptors::FDescriptor* Type, const TSharedPtr<FJsonValue>& ValueDefinition,
+		const EValueCompletion Completion)
+	{
 		if (!IsValueRecording()) return true;
 		if (Path.IsEmpty()) return FailNormalization(Error, TEXT("native_normalization_source_missing"),
 			TEXT("The native normalization record has no value path."), *ActiveValueIdentity);
@@ -165,6 +172,7 @@ namespace UeAgentNativeNormalizationIntent
 			Value.ValueDefinition = UeAgentAuthoringState::CloneCanonicalValue(ValueDefinition);
 			Proof = &Proofs.Add_GetRef(MoveTemp(Value));
 		}
+		Proof->ProposalPath = ProposalPath;
 		Proof->NormalizedValue = UeAgentAuthoringState::CloneCanonicalValue(NormalizedValue);
 		Proof->Completion = Completion;
 		return true;

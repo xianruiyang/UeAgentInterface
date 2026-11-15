@@ -66,6 +66,20 @@ namespace UeAgentAuthoringTargetLocator
 		int32 MaxDiagnosticCandidates = -1,
 		const UeAgentAuthoringIdentity::FRegistry* Registry = nullptr);
 
+	/** Validate one current identity through the same exact-resolution rules, without a success candidate copy. */
+	UEAGENTINTERFACE_API bool ValidateExact(
+		const FTargetQuery& Query,
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Candidate,
+		FDiagnostic& OutError,
+		const UeAgentAuthoringIdentity::FRegistry* Registry = nullptr);
+
+	/** Validate a mutable current identity with the original key/model rules,
+	 * borrowing its fields instead of manufacturing an owning self-query. */
+	UEAGENTINTERFACE_API bool ValidateIdentity(
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity,
+		FDiagnostic& OutError,
+		const UeAgentAuthoringIdentity::FRegistry* Registry = nullptr);
+
 	UEAGENTINTERFACE_API bool BuildPropertyIdentity(
 		const UObject* RootObject,
 		const FString& PropertyPath,
@@ -79,6 +93,12 @@ namespace UeAgentAuthoringTargetLocator
 		const FString& NotificationOwnerPath,
 		UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
 		FDiagnostic& OutError);
+
+	/** Same current property source and identity grammar, comparison-only.
+	 * OutActualKey is produced only for a real mismatch diagnostic. */
+	bool ComparePropertyIdentity(const FString& RootOwnerPath, const FString& PropertyPath,
+		const FString& NotificationOwnerPath, const FString& ExpectedKey,
+		bool& OutMatches, FString& OutActualKey, FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResolvePropertyPath(
 		UObject* RootObject,

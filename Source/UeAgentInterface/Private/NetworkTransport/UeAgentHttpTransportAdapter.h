@@ -38,6 +38,7 @@ namespace UE::UAI::NetworkTransport
 
 	using FUeAgentHttpRequestHandler =
 		TFunction<FUeAgentHttpResponse(const FUeAgentHttpRequest&)>;
+	using FUeAgentHttpImmediateHandler = TFunction<TOptional<FUeAgentHttpResponse>(const FUeAgentHttpRequest&)>;
 
 	enum class EUeAgentHttpRouteExecution : uint8
 	{
@@ -57,6 +58,11 @@ namespace UE::UAI::NetworkTransport
 			FUeAgentHttpRequestHandler Handler,
 			FUeAgentTransportDiagnostic& OutDiagnostic,
 			EUeAgentHttpRouteExecution Execution = EUeAgentHttpRouteExecution::GameThread) = 0;
+		virtual bool BindWithImmediate(const FString& InstanceId, const FString& Method, const FString& RoutePath,
+			FUeAgentHttpRequestHandler Handler, FUeAgentHttpImmediateHandler Immediate, FUeAgentTransportDiagnostic& Diagnostic)
+		{
+			return Bind(InstanceId, Method, RoutePath, MoveTemp(Handler), Diagnostic);
+		}
 		virtual bool Unbind(
 			const FString& InstanceId,
 			FUeAgentTransportDiagnostic& OutDiagnostic) = 0;
@@ -99,6 +105,7 @@ namespace UE::UAI::NetworkTransport
 			const FUeAgentHttpRequest& Request) const;
 
 	private:
+		TOptional<FUeAgentHttpResponse> HandleRequestInternal(const FUeAgentHttpRequest& Request, bool bConcurrent) const;
 		FString ProbeBindingId() const;
 		FUeAgentHttpResponse HandleProbeRequest(
 			const FUeAgentHttpRequest& Request) const;
@@ -129,6 +136,8 @@ namespace UE::UAI::NetworkTransport
 			FUeAgentHttpRequestHandler Handler,
 			FUeAgentTransportDiagnostic& OutDiagnostic,
 			EUeAgentHttpRouteExecution Execution = EUeAgentHttpRouteExecution::GameThread) override;
+		bool BindWithImmediate(const FString& InstanceId, const FString& Method, const FString& RoutePath,
+			FUeAgentHttpRequestHandler Handler, FUeAgentHttpImmediateHandler Immediate, FUeAgentTransportDiagnostic& Diagnostic) override;
 		virtual bool Unbind(
 			const FString& InstanceId,
 			FUeAgentTransportDiagnostic& OutDiagnostic) override;

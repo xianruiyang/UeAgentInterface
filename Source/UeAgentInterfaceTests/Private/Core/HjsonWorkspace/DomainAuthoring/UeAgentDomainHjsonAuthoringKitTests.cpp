@@ -604,15 +604,13 @@ bool FUeAgentDomainHjsonDirectoryExportStagingVerifyTest::RunTest(
 			Request, PublishResources, Receipt, PublishError));
 	UE::UAI::ContextResource::FUeAgentResourceTracker VerifyResources =
 		MakeExportResources();
-	TestTrue(TEXT("active import parser verifies the staged workspace"),
-		TryVerifyDomainHjsonStagedWorkspace(
-			Output,
-			TEXT("/Game/UAI/Fixture.Fixture"),
-			FixtureContract,
-			TEXT("rev-1"),
-			TEXT("root.hjson"),
-			VerifyResources,
-			Error));
+	const auto Source = MakeShared<FJsonObject>();
+	Source->SetStringField(TEXT("kind"), TEXT("directory"));
+	Source->SetStringField(TEXT("path"), Output);
+	FResolvedContentGraphImportSourcePtr Resolved;
+	TestTrue(TEXT("generated workspace is accepted by the actual input owner"),
+		TryLoadContentGraphImportSource(Source, TEXT("/Game/UAI/Fixture.Fixture"), VerifyResources, Resolved, Error));
+	if (Resolved) TestEqual(TEXT("input retains the target revision"), Resolved->GetBaseRevision(), FString(TEXT("rev-1")));
 	TestTrue(TEXT("the owned workspace cleanup succeeds"),
 		IFileManager::Get().DeleteDirectory(*Output, false, true));
 	return !HasAnyErrors();

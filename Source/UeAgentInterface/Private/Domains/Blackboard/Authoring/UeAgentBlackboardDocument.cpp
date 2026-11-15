@@ -78,8 +78,10 @@ namespace UeAgentBlackboardAuthoring
 					Selected.Add(Entry);
 				}
 			}
+			UeAgentDetailsAuthoringService::FProjectionPolicy Checkpoint;
+			Checkpoint.bRequireEditable = false;
 			return UeAgentDetailsAuthoringService::BuildPropertiesDocument(
-				Selected, {}, OutProperties, OutError);
+				Selected, Checkpoint, OutProperties, OutError);
 		}
 
 		bool ResolveCandidateClass(
@@ -236,13 +238,20 @@ namespace UeAgentBlackboardAuthoring
 
 	bool ReadDocument(UBlackboardData& Blackboard, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		return ReadDocument(Blackboard, OutValue, OutError, nullptr);
+	}
+
+	bool ReadDocument(UBlackboardData& Blackboard, TSharedPtr<FJsonValue>& OutValue,
+		UE::UAI::Contract::FDiagnostic& OutError, TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
+	{
 		OutValue.Reset();
 		OutError.Reset();
 		TArray<UeAgentAuthoringState::FReadRequest> Requests;
 		if (!AppendStructuralReadRequests(
 				Blackboard, Blackboard.GetOutermost()->GetName(), Requests, OutError)) return false;
-		// Exact document retains complete captured values; the ordinary projection applies visibility later.
-		for (auto& Request : Requests) Request.Limits.StructFieldFilter = nullptr;
+		// The same typed reads supply the private key-type reconstruction and public projection.
+		for (auto& Request : Requests)
+			if (Request.SemanticId == KeyPropertySemanticId) Request.Limits.bApplyAuthoringStructFieldPolicy = false;
 		UeAgentAuthoringState::FCaptureResult Capture;
 		if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
 		{
@@ -288,6 +297,7 @@ namespace UeAgentBlackboardAuthoring
 		}
 		Document->SetObjectField(TEXT("blackboard_keys"), Keys);
 		OutValue = MakeShared<FJsonValueObject>(Document);
+		if (OutStructure) OutStructure->Emplace(MoveTemp(Capture.Snapshot));
 		return true;
 	}
 

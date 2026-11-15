@@ -335,7 +335,8 @@ public:
       Options.NotificationChangeType = EPropertyChangeType::ValueSet;
       Options.NativeStages = {
           {{TEXT("TileSheet"), TEXT("TileSize"), TEXT("BorderMargin"), TEXT("PerTileSpacing")}, true,
-              {TEXT("PerTileData"), TEXT("WidthInTiles"), TEXT("HeightInTiles"), TEXT("AllocatedWidth"), TEXT("AllocatedHeight")}},
+              {TEXT("PerTileData")},
+              {TEXT("WidthInTiles"), TEXT("HeightInTiles"), TEXT("AllocatedWidth"), TEXT("AllocatedHeight")}},
           {{TEXT("PerTileData"), TEXT("Terrains")}, true}};
     }
     if (Profile.TypeId == TEXT("paper_sprite_atlas")) {
@@ -888,6 +889,9 @@ public:
     return true;
   }
 
+  virtual TConstArrayView<FName> GetLifecycleReadbackProperties() const override {
+    return GenerationPlan ? TConstArrayView<FName>(Profile.GenerationReadbackProperties) : TConstArrayView<FName>();
+  }
   virtual bool BuildDomainExpectedReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {

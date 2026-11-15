@@ -471,10 +471,16 @@ private:
                     FOperationFailure &OutFailure) const {
     OutFailure = FOperationFailure();
     UE::UAI::Contract::FDiagnostic Error;
+    const int32 First = OutRequests.Num();
     if (!BuildAssetSnapshotReadRequests(Graph, PackagePath, bExpectedAbsent,
                                         OutRequests, Error)) {
       SetFailure(OutFailure, MoveTemp(Error), PackagePath);
       return false;
+    }
+    if (Operation == EOperation::Update && GraphDocument.IsValid() && !bExpectedAbsent) {
+      for (int32 Index = First; Index < OutRequests.Num(); ++Index)
+        if (OutRequests[Index].SemanticId == GraphSemanticId)
+          OutRequests[Index].Context.Add(TEXT("observed_graph_body"), TEXT("true"));
     }
     return true;
   }

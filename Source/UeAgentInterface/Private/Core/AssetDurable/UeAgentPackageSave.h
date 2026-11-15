@@ -28,4 +28,6 @@ namespace UE::UAI::AssetDurable
 	// Synchronously publish the current disk state (including absence) to native
 	// discovery before loading packages. Does not save or load asset objects.
 	UEAGENTINTERFACE_API void RefreshPublishedPackageFiles(const TArray<FString>& Filenames);
+	// Rescan an incomplete filesystem operation without announcing a confirmed save.
+	void RescanPackageFiles(const TArray<FString>& Filenames);
 }

@@ -3,6 +3,7 @@
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringState.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringDescriptors.h"
 #include "Domains/Material/Authoring/UeAgentMaterialGraphAuthoring.h"
 #include "Domains/Material/Authoring/UeAgentMaterialInstanceAuthoring.h"
@@ -39,6 +40,12 @@ namespace UeAgentMaterialAuthoring
 			};
 		return Options;
 	}
+
+	static bool AppendExportRoots(UObject& Asset, const FString& AssetPath, bool bFunction, bool bInstance,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError,
+		bool bIncludeGraph = true);
+	static bool AppendExportGraphMembers(UObject& Asset, const FString& AssetPath, const FJsonObject& GraphState,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError);
 
 	namespace
 	{
@@ -85,6 +92,120 @@ namespace UeAgentMaterialAuthoring
 			Request.RootObject = RootObject;
 			Request.Context = Context;
 			OutRequests.Add(MoveTemp(Request));
+			return true;
+		}
+
+		const TCHAR* ObservedParameterRole = TEXT("observed_material_instance_parameter");
+		const TCHAR* ObservedEffectiveParameterSet = TEXT("observed_effective_parameter_set");
+		const TCHAR* ObservedInstanceLayers = TEXT("observed_material_instance_layers");
+		struct FObservedInstanceRead {
+			const UeAgentAuthoringState::FReadRequest& Request;
+			const TArray<TSharedPtr<FJsonValue>>& Rows;
+			const TArray<TSharedPtr<FJsonValue>>& Definitions;
+			int32 Index;
+			int32& BorrowedReads;
+			TSharedPtr<FJsonValue> Layers;
+		};
+		thread_local const FObservedInstanceRead* CurrentInstanceRead = nullptr;
+
+		bool AppendInstanceParameterRequest(const UObject* Asset, const FString& AssetPath, const FJsonObject& Row,
+			TArray<UeAgentAuthoringState::FReadRequest>& Requests, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			const TMap<FString, FString> Context = {
+				{TEXT("parameter_kind"), Row.GetStringField(TEXT("parameter_kind"))},
+				{TEXT("parameter_name"), Row.GetStringField(TEXT("parameter_name"))},
+				{TEXT("association"), Row.GetStringField(TEXT("association"))},
+				{TEXT("parameter_index"), FString::FromInt(Row.GetIntegerField(TEXT("parameter_index")))}
+			};
+			auto Selectors = Context;
+			Selectors.Add(TEXT("asset_path"), AssetPath);
+			return AddReadRequest(ExportInstanceParameterSemanticId, MaterialInstanceParameterIdentityModelId,
+				TEXT("material_instance_parameter"), Selectors, Asset, Context, Requests, Error);
+		}
+
+		bool AppendInstanceLayersRequest(const UObject& Asset, const FString& AssetPath,
+			TArray<UeAgentAuthoringState::FReadRequest>& Requests, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			return AddReadRequest(ExportInstanceLayersSemanticId, MaterialInstanceLayersIdentityModelId,
+				TEXT("material_instance_layers"), {{TEXT("asset_path"), AssetPath}, {TEXT("selector"), TEXT("layer_stack")}},
+				&Asset, {}, Requests, Error);
+		}
+
+		bool CaptureObservedInstanceParameters(const UObject& Asset, const UeAgentAuthoringState::FReadRequest& Request,
+			const FJsonObject& NativeState, const TArray<TSharedPtr<FJsonValue>>& Definitions,
+			UeAgentAuthoringState::FStateValue& OutValue, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			const FString AssetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+			int32 Expected = 0;
+			for (const auto& Binding : Request.Context) if (Binding.Value == ObservedParameterRole) ++Expected;
+			// The complete verification pack still participates in native comparison. Only
+			// the public capture for this prepared operation participates in HJSON publication.
+			OutValue.bAuthoringVisible = false;
+			const bool bObserveLayers = Request.Context.Contains(ObservedInstanceLayers);
+			const bool bObserveEffectiveSet = bObserveLayers || Request.Context.Contains(ObservedEffectiveParameterSet);
+			if (!Expected && !bObserveEffectiveSet) return true;
+			if (Asset.GetOutermost()->GetName() != AssetPath) {
+				Error = StateFailure(TEXT("material_instance_observed_target_mismatch"), TEXT("The current parameter capture does not resolve the prepared material instance."),
+					TEXT("asset_path"), MakeShared<FJsonValueString>(Asset.GetOutermost()->GetName()), MakeShared<FJsonValueString>(AssetPath), &Asset);
+				return false;
+			}
+			TArray<UeAgentAuthoringState::FReadRequest> Inputs;
+			if (!AddReadRequest(ExportInstanceTargetSemanticId, MaterialInstanceIdentityModelId, TEXT("material_instance"),
+				{{TEXT("asset_path"),AssetPath}}, &Asset, {}, Inputs, Error)) return false;
+			TSet<FString> Matched;
+			const auto& Rows = NativeState.GetArrayField(TEXT("parameters"));
+			TArray<int32> Selected;
+			for (int32 Index = 0; Index < Rows.Num(); ++Index) {
+				if (!AppendInstanceParameterRequest(&Asset, AssetPath, *Rows[Index]->AsObject(), Inputs, Error)) return false;
+				const FString& Key = Inputs.Last().TargetIdentity.CanonicalKey;
+				const auto* Role = Request.Context.Find(Key);
+				const bool bEdited = Role && *Role == ObservedParameterRole;
+				if (bEdited) Matched.Add(Key);
+				if (bEdited || bObserveEffectiveSet) Selected.Add(Index);
+				else Inputs.Pop(EAllowShrinking::No);
+			}
+			if (Matched.Num() != Expected || (!bObserveEffectiveSet && Selected.Num() != Expected) || Definitions.Num() != Rows.Num()) {
+				Error = StateFailure(TEXT("material_instance_observed_parameter_missing"), TEXT("The prepared parameter identities and declarations do not match the current material instance."),
+					TEXT("parameters"), MakeShared<FJsonValueNumber>(Matched.Num()), MakeShared<FJsonValueNumber>(Expected), &Asset);
+				return false;
+			}
+			TSharedPtr<FJsonValue> Layers;
+			if (bObserveLayers) {
+				Layers = NativeState.TryGetField(TEXT("layer_stack"));
+				if (!Layers || Layers->Type != EJson::Object) {
+					Error = StateFailure(TEXT("material_instance_observed_layers_missing"), TEXT("The observed material instance has no captured layer stack."),
+						TEXT("layer_stack"), Layers, MakeShared<FJsonValueString>(TEXT("object")), &Asset);
+					return false;
+				}
+				if (!AppendInstanceLayersRequest(Asset, AssetPath, Inputs, Error)) return false;
+			}
+			UeAgentAuthoringState::FCaptureResult Capture;
+			int32 BorrowedReads = 0;
+			const auto Produce = [&](UeAgentAuthoringState::FReadRequestConsumer Consume, UE::UAI::Contract::FDiagnostic&) {
+				if (!Consume(Inputs[0])) return true;
+				for (int32 Index = 0; Index < Selected.Num(); ++Index) {
+					const auto& Input = Inputs[Index + 1];
+					const FObservedInstanceRead Read{Input, Rows, Definitions, Selected[Index], BorrowedReads, nullptr};
+					TGuardValue<const FObservedInstanceRead*> Bind(CurrentInstanceRead, &Read);
+					if (!Consume(Input)) return true;
+				}
+				if (bObserveLayers) {
+					const auto& Input = Inputs.Last();
+					const FObservedInstanceRead Read{Input, Rows, Definitions, INDEX_NONE, BorrowedReads, Layers};
+					TGuardValue<const FObservedInstanceRead*> Bind(CurrentInstanceRead, &Read);
+					Consume(Input);
+				}
+				return true;
+			};
+			if (!UeAgentAuthoringState::CaptureSnapshot(Produce, Capture, UeAgentAuthoringState::ECaptureValueMode::Authoring)) {
+				Error = Capture.Diagnostic; return false;
+			}
+			auto Resources = UE::UAI::HjsonWorkspace::MakeSemanticWorkspaceResourceTracker();
+			UE::UAI::HjsonWorkspace::FWorkspaceError ProjectionError;
+			if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(TEXT("ue.material_instance.asset"), TEXT("llm_authoring"),
+				Capture.Snapshot, Resources, OutValue.AuthoringProjection, ProjectionError)) { Error = ProjectionError.GetDiagnostic(); return false; }
+			UE_LOG(LogTemp, Display, TEXT("UAI read timing phase=material_instance_observed_parameters native_parameters=%d selected=%d public_entries=%d effective_set=%d borrowed_parameter_reads=%d"),
+				Rows.Num(), Selected.Num(), Capture.Snapshot.Num(), bObserveEffectiveSet ? 1 : 0, BorrowedReads);
 			return true;
 		}
 
@@ -200,7 +321,7 @@ namespace UeAgentMaterialAuthoring
 		TSharedRef<FJsonObject> BuildAssetState(
 			const UObject& Asset,
 			const FString& CanonicalAssetPath,
-			UE::UAI::Contract::FDiagnostic& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError, TArray<TSharedPtr<FJsonValue>>* ParameterDefinitions = nullptr)
 		{
 			TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
 			const FString AssetPath = CanonicalAssetPath.IsEmpty() ? Asset.GetOutermost()->GetName() : CanonicalAssetPath;
@@ -211,7 +332,7 @@ namespace UeAgentMaterialAuthoring
 			if (const auto* Instance = Cast<UMaterialInstanceConstant>(&Asset))
 			{
 				TArray<TSharedPtr<FJsonValue>> Parameters;
-				if (!CaptureInstanceParameters(*const_cast<UMaterialInstanceConstant*>(Instance), Parameters, OutError))
+				if (!CaptureInstanceParameters(*const_cast<UMaterialInstanceConstant*>(Instance), Parameters, OutError, ParameterDefinitions))
 				{
 					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = AssetPath;
 					return State;
@@ -246,24 +367,31 @@ namespace UeAgentMaterialAuthoring
 			return State;
 		}
 
+		// The registered accessor stays responsible for validation and projection. Only
+		// this exact synchronous nested request borrows its enclosing native graph.
+		struct FObservedGraphRead
+		{
+			const UeAgentAuthoringState::FReadRequest& Request;
+			const FJsonObject& Graph;
+		};
+		thread_local const FObservedGraphRead* CurrentGraphRead = nullptr;
+
 		TSharedRef<FJsonObject> BuildExportGraphState(
-			const UObject& Asset,
+			const UObject& Asset, const FJsonObject& Raw,
 			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedRef<FJsonObject> Graph = MakeShared<FJsonObject>();
-			TSharedPtr<FJsonObject> Raw;
-			if (!BuildGraphState(Asset, Raw, OutError)) return Graph;
 			const TArray<TSharedPtr<FJsonValue>>* Expressions = nullptr;
 			const TArray<TSharedPtr<FJsonValue>>* RawEdges = nullptr;
-			if (!Raw->TryGetArrayField(TEXT("expressions"), Expressions)
-				|| !Raw->TryGetArrayField(TEXT("edges"), RawEdges)
+			if (!Raw.TryGetArrayField(TEXT("expressions"), Expressions)
+				|| !Raw.TryGetArrayField(TEXT("edges"), RawEdges)
 				|| !Expressions || !RawEdges)
 			{
 				const bool bExpressionsInvalid = !Expressions;
 				OutError = StateFailure(TEXT("material_export_graph_state_invalid"),
 					TEXT("Native material graph export did not provide the required expression and edge arrays."),
 					bExpressionsInvalid ? TEXT("expressions") : TEXT("edges"),
-					Raw->TryGetField(bExpressionsInvalid ? TEXT("expressions") : TEXT("edges")), MakeShared<FJsonValueString>(TEXT("array")), &Asset);
+					Raw.TryGetField(bExpressionsInvalid ? TEXT("expressions") : TEXT("edges")), MakeShared<FJsonValueString>(TEXT("array")), &Asset);
 				return Graph;
 			}
 			TSharedRef<FJsonObject> Nodes = MakeShared<FJsonObject>();
@@ -366,7 +494,7 @@ namespace UeAgentMaterialAuthoring
 				Edges->SetObjectField(FString::Printf(TEXT("edge_%d"), Index), Edge);
 			}
 			const TArray<TSharedPtr<FJsonValue>>* RawRootInputs = nullptr;
-			if (Raw->TryGetArrayField(TEXT("root_inputs"), RawRootInputs)
+			if (Raw.TryGetArrayField(TEXT("root_inputs"), RawRootInputs)
 				&& RawRootInputs)
 			{
 				for (int32 Index = 0; Index < RawRootInputs->Num(); ++Index)
@@ -401,6 +529,70 @@ namespace UeAgentMaterialAuthoring
 			}
 			Graph->SetObjectField(TEXT("edges"), Edges);
 			return Graph;
+		}
+
+		bool CaptureObservedMaterial(UObject& Asset, const UeAgentAuthoringState::FReadRequest& Request,
+			const FJsonObject& NativeState, UeAgentAuthoringState::FStateValue& Value, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			const FString* GraphName = Request.Context.Find(ObservedGraphName);
+			const FString* FunctionRootKind = Request.Context.Find(ObservedFunctionRoot);
+			if (!GraphName && !FunctionRootKind) return true;
+			const bool bFunction = Asset.IsA<UMaterialFunction>();
+			const FString AssetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+			if (AssetPath != Asset.GetOutermost()->GetName() || (!bFunction && !Asset.IsA<UMaterial>())
+				|| (GraphName && *GraphName != GetAuthoringGraphName(bFunction))
+				|| (FunctionRootKind && (!bFunction || *FunctionRootKind != GetAssetKind(&Asset))))
+			{
+				Error = StateFailure(TEXT("material_observed_graph_target_mismatch"),
+					TEXT("The current graph does not resolve the prepared material graph owner."),
+					TEXT("graph_target"), MakeShared<FJsonValueString>(Asset.GetPathName()),
+					MakeShared<FJsonValueString>(GraphName ? AssetPath + TEXT(":") + *GraphName : AssetPath), &Asset);
+				return false;
+			}
+			const TSharedPtr<FJsonObject>* Graph = nullptr;
+			if (GraphName && (!NativeState.TryGetObjectField(TEXT("graph"), Graph) || !Graph || !Graph->IsValid()))
+			{
+				Error = StateFailure(TEXT("material_observed_graph_missing"), TEXT("The current material capture has no graph."),
+					TEXT("graph"), NativeState.TryGetField(TEXT("graph")), MakeShared<FJsonValueString>(*GraphName), &Asset);
+				return false;
+			}
+			TArray<UeAgentAuthoringState::FReadRequest> Inputs;
+			if (!AppendExportRoots(Asset, AssetPath, bFunction, false, Inputs, Error, GraphName != nullptr)
+				|| (GraphName && !AppendExportGraphMembers(Asset, AssetPath, **Graph, Inputs, Error))) return false;
+			UeAgentAuthoringState::FCaptureResult Capture;
+			const auto Produce = [&](UeAgentAuthoringState::FReadRequestConsumer Consume, UE::UAI::Contract::FDiagnostic&) {
+				for (const auto& Input : Inputs)
+				{
+					if (Input.SemanticId == ExportGraphSemanticId)
+					{
+						const FObservedGraphRead Read{Input, **Graph};
+						TGuardValue<const FObservedGraphRead*> Bind(CurrentGraphRead, &Read);
+						if (!Consume(Input)) break;
+					}
+					else if (!Consume(Input)) break;
+				}
+				return true;
+			};
+			if (!UeAgentAuthoringState::CaptureSnapshot(Produce, Capture, UeAgentAuthoringState::ECaptureValueMode::Authoring))
+			{
+				Error = Capture.Diagnostic;
+				return false;
+			}
+			auto Resources = UE::UAI::HjsonWorkspace::MakeSemanticWorkspaceResourceTracker();
+			UE::UAI::HjsonWorkspace::FWorkspaceError ProjectionError;
+			if (!UE::UAI::HjsonWorkspace::TryBuildVisibleAuthoringProjection(
+				bFunction ? TEXT("ue.material_function.asset") : TEXT("ue.material.asset"), TEXT("llm_authoring"),
+				Capture.Snapshot, Resources, Value.AuthoringProjection, ProjectionError))
+			{
+				Error = ProjectionError.GetDiagnostic();
+				return false;
+			}
+			Value.bAuthoringVisible = false;
+			if (GraphName) {
+				UE_LOG(LogTemp, Display, TEXT("UAI read timing phase=material_observed_graph graph=%s public_entries=%d owner_reflection_fields=0"),
+					**GraphName, Capture.Snapshot.Num());
+			}
+			return true;
 		}
 
 		UeAgentAuthoringState::EReadOutcome ReadState(
@@ -450,8 +642,15 @@ namespace UeAgentMaterialAuthoring
 						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return UeAgentAuthoringState::EReadOutcome::Failed;
 				}
-				OutValue.Value = MakeShared<FJsonValueObject>(
-					BuildExportGraphState(*Request.RootObject, OutError));
+				TSharedPtr<FJsonObject> NativeGraph;
+				const FJsonObject* Graph = nullptr;
+				if (CurrentGraphRead && &CurrentGraphRead->Request == &Request) Graph = &CurrentGraphRead->Graph;
+				else
+				{
+					if (!BuildGraphState(*Request.RootObject, NativeGraph, OutError)) return UeAgentAuthoringState::EReadOutcome::Failed;
+					Graph = NativeGraph.Get();
+				}
+				OutValue.Value = MakeShared<FJsonValueObject>(BuildExportGraphState(*Request.RootObject, *Graph, OutError));
 				if (!OutError.IsEmpty()) return UeAgentAuthoringState::EReadOutcome::Failed;
 				OutValue.bAvailable = true;
 				return UeAgentAuthoringState::EReadOutcome::Resolved;
@@ -474,14 +673,20 @@ namespace UeAgentMaterialAuthoring
 			if (Request.SemanticId == ExportInstanceLayersSemanticId)
 			{
 				auto* Instance = Cast<UMaterialInstanceConstant>(const_cast<UObject*>(Request.RootObject));
-				if (!Instance || !CaptureInstanceLayers(*Instance, OutValue.Value, OutError))
-					return UeAgentAuthoringState::EReadOutcome::Failed;
+				const auto* Observed = CurrentInstanceRead && &CurrentInstanceRead->Request == &Request ? CurrentInstanceRead : nullptr;
+				if (!Instance) return UeAgentAuthoringState::EReadOutcome::Failed;
+				if (Observed) OutValue.Value = Observed->Layers;
+				else if (!CaptureInstanceLayers(*Instance, OutValue.Value, OutError)) return UeAgentAuthoringState::EReadOutcome::Failed;
 				auto LayersDefinition = MakeShared<FJsonObject>();
 				auto LayersContract = MakeShared<FJsonObject>();
 				LayersContract->SetStringField(TEXT("collection_semantics"), TEXT("keyed_desired_state"));
 				LayersDefinition->SetStringField(TEXT("type"), TEXT("object[]"));
 				LayersDefinition->SetObjectField(TEXT("contract"), LayersContract);
+				auto OverrideDefinition = MakeShared<FJsonObject>();
+				OverrideDefinition->SetStringField(TEXT("type"), TEXT("bool"));
+				OverrideDefinition->SetObjectField(TEXT("contract"), MakeShared<FJsonObject>());
 				auto Fields = MakeShared<FJsonObject>();
+				Fields->SetObjectField(TEXT("authored_override"), OverrideDefinition);
 				Fields->SetObjectField(TEXT("layers"), LayersDefinition);
 				auto Definition = MakeShared<FJsonObject>();
 				Definition->SetObjectField(TEXT("fields"), Fields);
@@ -493,14 +698,20 @@ namespace UeAgentMaterialAuthoring
 			if (Request.SemanticId
 				== ExportInstanceParameterSemanticId)
 			{
-				TArray<TSharedPtr<FJsonValue>> Parameters, Definitions;
+				TArray<TSharedPtr<FJsonValue>> OwnedRows, OwnedDefinitions;
+				const auto* Observed = CurrentInstanceRead && &CurrentInstanceRead->Request == &Request ? CurrentInstanceRead : nullptr;
 				auto* Instance = Cast<UMaterialInstanceConstant>(const_cast<UObject*>(Request.RootObject));
-				if (!Instance || !CaptureInstanceParameters(*Instance, Parameters, OutError, &Definitions))
+				if (!Instance || (!Observed && !CaptureInstanceParameters(*Instance, OwnedRows, OutError, &OwnedDefinitions)))
 				{
 					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.RootOwnerPath;
 					return UeAgentAuthoringState::EReadOutcome::Failed;
 				}
-				for (int32 Index = 0; Index < Parameters.Num(); ++Index)
+				const auto& Parameters = Observed ? Observed->Rows : OwnedRows;
+				const auto& Definitions = Observed ? Observed->Definitions : OwnedDefinitions;
+				if (Observed) ++Observed->BorrowedReads;
+				const int32 First = Observed ? Observed->Index : 0;
+				const int32 End = Observed ? First + 1 : Parameters.Num();
+				for (int32 Index = First; Index < End; ++Index)
 				{
 					const auto State = Parameters[Index]->AsObject();
 					if (State->GetStringField(TEXT("parameter_kind")) != Request.Context.FindRef(TEXT("parameter_kind"))
@@ -577,6 +788,8 @@ namespace UeAgentMaterialAuthoring
 				return UeAgentAuthoringState::EReadOutcome::Failed;
 			}
 			const FString AssetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+			TArray<TSharedPtr<FJsonValue>> ParameterDefinitions;
+			const bool bObserveParameters = Request.SemanticId == MaterialInstanceSemanticId && Request.bCaptureAuthoringProjection;
 			TSharedRef<FJsonObject> State =
 				Request.SemanticId == ExportTargetSemanticId
 					|| Request.SemanticId == ExportFunctionTargetSemanticId
@@ -592,8 +805,15 @@ namespace UeAgentMaterialAuthoring
 						Settings->SetBoolField(TEXT("expose_to_library"), Function->bExposeToLibrary);
 						return Settings;
 					}()
-					: BuildAssetState(*Object, AssetPath, OutError);
+					: BuildAssetState(*Object, AssetPath, OutError, bObserveParameters ? &ParameterDefinitions : nullptr);
 			if (!OutError.IsEmpty()) return UeAgentAuthoringState::EReadOutcome::Failed;
+			if ((Request.SemanticId == MaterialSemanticId || Request.SemanticId == MaterialFunctionSemanticId)
+				&& Request.bCaptureAuthoringProjection && !CaptureObservedMaterial(*Object, Request, *State, OutValue, OutError))
+				return UeAgentAuthoringState::EReadOutcome::Failed;
+			if (bObserveParameters
+				&& !CaptureObservedInstanceParameters(*Object, Request, *State, ParameterDefinitions, OutValue, OutError)) {
+				return UeAgentAuthoringState::EReadOutcome::Failed;
+			}
 			OutValue.Value = MakeShared<FJsonValueObject>(State);
 			OutValue.bAvailable = true;
 			return UeAgentAuthoringState::EReadOutcome::Resolved;
@@ -727,26 +947,24 @@ namespace UeAgentMaterialAuthoring
 		return true;
 	}
 
-	bool BuildAssetExportSnapshotReadRequests(
-		UObject& Asset,
-		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+	bool BindObservedInstanceParameters(const TArray<FInstanceParameterEdit>& Edits, bool bObserveLayers, UeAgentAuthoringState::FReadRequest& Request,
 		UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		OutRequests.Reset();
-		OutError.Reset();
-		const FString AssetKind = GetAssetKind(&Asset);
-		const FString AssetPath = Asset.GetOutermost()->GetName();
-		const bool bFunction = AssetKind == TEXT("material_function");
-		const bool bInstance = AssetKind == TEXT("material_instance");
-		if (AssetKind != TEXT("material") && !bFunction && !bInstance)
-		{
-			OutError = StateFailure(TEXT("material_export_asset_type_invalid"),
-				TEXT("Material export requires a Material, MaterialFunction, or MaterialInstanceConstant asset."),
-				TEXT("asset_class"), MakeShared<FJsonValueString>(Asset.GetClass()->GetPathName()),
-				MakeShared<FJsonValueString>(TEXT("Material, MaterialFunction, or MaterialInstanceConstant")), &Asset);
-			return false;
+		if (bObserveLayers) Request.Context.Add(ObservedInstanceLayers, TEXT("effective_stack"));
+		TArray<UeAgentAuthoringState::FReadRequest> Identities;
+		const FString AssetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+		for (const auto& Edit : Edits) {
+			if (!AppendInstanceParameterRequest(Request.RootObject, AssetPath, *Edit.Source, Identities, OutError)) return false;
+			if (Edit.Kind == TEXT("static_switch") || Edit.Kind == TEXT("static_component_mask"))
+				Request.Context.Add(ObservedEffectiveParameterSet, TEXT("static_permutation"));
+			Request.Context.Add(Identities.Last().TargetIdentity.CanonicalKey, ObservedParameterRole);
 		}
+		return true;
+	}
 
+	static bool AppendExportRoots(UObject& Asset, const FString& AssetPath, bool bFunction, bool bInstance,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError, bool bIncludeGraph)
+	{
 		const FString AssetModel = bFunction
 			? MaterialFunctionIdentityModelId
 			: bInstance
@@ -768,7 +986,8 @@ namespace UeAgentMaterialAuthoring
 		{
 			return false;
 		}
-		if (!bInstance)
+		OutRequests.Last().MarkExportTarget();
+		if (!bInstance && bIncludeGraph)
 		{
 			if (!AddReadRequest(
 				ExportGraphSemanticId,
@@ -789,96 +1008,18 @@ namespace UeAgentMaterialAuthoring
 				return false;
 			}
 		}
+		return true;
+	}
 
-		UeAgentAuthoringState::FEditablePropertyReadOptions OwnerPropertyOptions;
-		OwnerPropertyOptions.SemanticId = TEXT("core.property");
-		if (bInstance)
-		{
-			OwnerPropertyOptions.ExcludedProperties = {
-				TEXT("ScalarParameterValues"),
-				TEXT("VectorParameterValues"),
-				TEXT("DoubleVectorParameterValues"),
-				TEXT("TextureParameterValues"),
-				TEXT("TextureCollectionParameterValues"),
-				TEXT("RuntimeVirtualTextureParameterValues"),
-				TEXT("SparseVolumeTextureParameterValues"),
-				TEXT("FontParameterValues")};
-		}
-		if (!UeAgentAuthoringState::AppendEditableObjectPropertyReadRequests(
-			&Asset, OwnerPropertyOptions, OutRequests, OutError))
-		{
-			return false;
-		}
-
-		if (bInstance)
-		{
-			UMaterialInstanceConstant* Instance = CastChecked<UMaterialInstanceConstant>(&Asset);
-			if (!AddReadRequest(ExportInstanceLayersSemanticId, MaterialInstanceLayersIdentityModelId,
-				TEXT("material_instance_layers"), {{TEXT("asset_path"), AssetPath}, {TEXT("selector"), TEXT("layer_stack")}},
-				&Asset, {}, OutRequests, OutError)) return false;
-			auto AddParameter = [
-				&AssetPath,
-				&Asset,
-				&OutRequests,
-				&OutError](
-					const FString& Kind,
-					const FMaterialParameterInfo& Info,
-					TMap<FString, FString> Context)
-			{
-				const FString Association = Info.Association == EMaterialParameterAssociation::GlobalParameter
-					? TEXT("global") : Info.Association == EMaterialParameterAssociation::LayerParameter ? TEXT("layer") : TEXT("blend");
-				const FString Index = FString::FromInt(Info.Index);
-				Context.Add(TEXT("parameter_kind"), Kind);
-				Context.Add(
-					TEXT("parameter_name"),
-					Info.Name.ToString());
-				Context.Add(TEXT("association"), Association);
-				Context.Add(TEXT("parameter_index"), Index);
-				return AddReadRequest(
-					ExportInstanceParameterSemanticId,
-					MaterialInstanceParameterIdentityModelId,
-					TEXT("material_instance_parameter"),
-					{
-						{TEXT("asset_path"), AssetPath},
-						{TEXT("parameter_kind"), Kind},
-						{TEXT("parameter_name"), Info.Name.ToString()},
-						{TEXT("association"), Association},
-						{TEXT("parameter_index"), Index}},
-					&Asset,
-					Context,
-					OutRequests,
-					OutError);
-			};
-			TArray<TSharedPtr<FJsonValue>> Parameters;
-			if (!CaptureInstanceParameters(*Instance, Parameters, OutError))
-			{
-				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = AssetPath;
-				return false;
-			}
-			for (const auto& Parameter : Parameters)
-			{
-				const auto Value = Parameter->AsObject();
-				const FString Kind = Value->GetStringField(TEXT("parameter_kind"));
-				const FString Association = Value->GetStringField(TEXT("association"));
-				const FMaterialParameterInfo Info(FName(*Value->GetStringField(TEXT("parameter_name"))),
-					Association == TEXT("global") ? EMaterialParameterAssociation::GlobalParameter
-					: Association == TEXT("layer") ? EMaterialParameterAssociation::LayerParameter : EMaterialParameterAssociation::BlendParameter,
-					static_cast<int32>(Value->GetNumberField(TEXT("parameter_index"))));
-				TMap<FString, FString> Context;
-
-				if (!AddParameter(Kind, Info, MoveTemp(Context))) return false;
-			}
-			return true;
-		}
-
-		TSharedPtr<FJsonObject> GraphState;
-		if (!BuildGraphState(Asset, GraphState, OutError)) return false;
+	static bool AppendExportGraphMembers(UObject& Asset, const FString& AssetPath, const FJsonObject& GraphState,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, UE::UAI::Contract::FDiagnostic& OutError)
+	{
 		const TArray<TSharedPtr<FJsonValue>>* Expressions = nullptr;
-		if (!GraphState->TryGetArrayField(TEXT("expressions"), Expressions) || !Expressions)
+		if (!GraphState.TryGetArrayField(TEXT("expressions"), Expressions) || !Expressions)
 		{
 			OutError = StateFailure(TEXT("material_export_expression_state_missing"),
 				TEXT("Native material graph state has no expression array."),
-				TEXT("expressions"), GraphState->TryGetField(TEXT("expressions")), MakeShared<FJsonValueString>(TEXT("array")), &Asset);
+				TEXT("expressions"), GraphState.TryGetField(TEXT("expressions")), MakeShared<FJsonValueString>(TEXT("array")), &Asset);
 			return false;
 		}
 		for (const TSharedPtr<FJsonValue>& Value : *Expressions)
@@ -938,7 +1079,7 @@ namespace UeAgentMaterialAuthoring
 		}
 
 		const TArray<TSharedPtr<FJsonValue>>* Edges = nullptr;
-		if (GraphState->TryGetArrayField(TEXT("edges"), Edges) && Edges)
+		if (GraphState.TryGetArrayField(TEXT("edges"), Edges) && Edges)
 		{
 			for (const TSharedPtr<FJsonValue>& Value : *Edges)
 			{
@@ -978,7 +1119,7 @@ namespace UeAgentMaterialAuthoring
 		}
 
 		const TArray<TSharedPtr<FJsonValue>>* RootInputs = nullptr;
-		if (GraphState->TryGetArrayField(TEXT("root_inputs"), RootInputs) && RootInputs)
+		if (GraphState.TryGetArrayField(TEXT("root_inputs"), RootInputs) && RootInputs)
 		{
 			for (const TSharedPtr<FJsonValue>& Value : *RootInputs)
 			{
@@ -1020,6 +1161,84 @@ namespace UeAgentMaterialAuthoring
 			}
 		}
 		return true;
+	}
+
+	static bool BuildMaterialExportRequests(
+		UObject& Asset,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+		UE::UAI::Contract::FDiagnostic& OutError, bool bRootPropertiesOnly)
+	{
+		OutRequests.Reset();
+		OutError.Reset();
+		const FString AssetKind = GetAssetKind(&Asset);
+		const FString AssetPath = Asset.GetOutermost()->GetName();
+		const bool bFunction = AssetKind == TEXT("material_function");
+		const bool bInstance = AssetKind == TEXT("material_instance");
+		if (AssetKind != TEXT("material") && !bFunction && !bInstance)
+		{
+			OutError = StateFailure(TEXT("material_export_asset_type_invalid"),
+				TEXT("Material export requires a Material, MaterialFunction, or MaterialInstanceConstant asset."),
+				TEXT("asset_class"), MakeShared<FJsonValueString>(Asset.GetClass()->GetPathName()),
+				MakeShared<FJsonValueString>(TEXT("Material, MaterialFunction, or MaterialInstanceConstant")), &Asset);
+			return false;
+		}
+
+		if (!AppendExportRoots(Asset, AssetPath, bFunction, bInstance, OutRequests, OutError, !bRootPropertiesOnly)) return false;
+
+		UeAgentAuthoringState::FEditablePropertyReadOptions OwnerPropertyOptions;
+		OwnerPropertyOptions.SemanticId = TEXT("core.property");
+		if (bInstance)
+		{
+			OwnerPropertyOptions.ExcludedProperties = {
+				TEXT("ScalarParameterValues"),
+				TEXT("VectorParameterValues"),
+				TEXT("DoubleVectorParameterValues"),
+				TEXT("TextureParameterValues"),
+				TEXT("TextureCollectionParameterValues"),
+				TEXT("RuntimeVirtualTextureParameterValues"),
+				TEXT("SparseVolumeTextureParameterValues"),
+				TEXT("FontParameterValues")};
+		}
+		if (!UeAgentAuthoringState::AppendEditableObjectPropertyReadRequests(
+			&Asset, OwnerPropertyOptions, OutRequests, OutError))
+		{
+			return false;
+		}
+
+		if (bRootPropertiesOnly) return true;
+
+		if (bInstance)
+		{
+			UMaterialInstanceConstant* Instance = CastChecked<UMaterialInstanceConstant>(&Asset);
+			if (!AppendInstanceLayersRequest(Asset, AssetPath, OutRequests, OutError)) return false;
+			TArray<TSharedPtr<FJsonValue>> Parameters;
+			if (!CaptureInstanceParameters(*Instance, Parameters, OutError))
+			{
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = AssetPath;
+				return false;
+			}
+			for (const auto& Parameter : Parameters)
+			{
+				if (!AppendInstanceParameterRequest(&Asset, AssetPath, *Parameter->AsObject(), OutRequests, OutError)) return false;
+			}
+			return true;
+		}
+
+		TSharedPtr<FJsonObject> GraphState;
+		if (!BuildGraphState(Asset, GraphState, OutError)) return false;
+		return AppendExportGraphMembers(Asset, AssetPath, *GraphState, OutRequests, OutError);
+	}
+
+	bool BuildAssetExportSnapshotReadRequests(UObject& Asset, TArray<UeAgentAuthoringState::FReadRequest>& Requests,
+		UE::UAI::Contract::FDiagnostic& Error)
+	{
+		return BuildMaterialExportRequests(Asset, Requests, Error, false);
+	}
+
+	bool BuildRootPropertyReadRequests(UObject& Asset, TArray<UeAgentAuthoringState::FReadRequest>& Requests,
+		UE::UAI::Contract::FDiagnostic& Error)
+	{
+		return BuildMaterialExportRequests(Asset, Requests, Error, true);
 	}
 
 	bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError)

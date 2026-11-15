@@ -52,6 +52,9 @@ struct UEAGENTINTERFACE_API FOptions {
     // Native derived state that must independently agree with the preview,
     // including when no explicit edit was supplied for that property.
     TSet<FName> ReadbackProperties;
+    // Read and compare these native effects at every checkpoint without
+    // publishing them as properties of the edited asset.
+    TSet<FName> VerificationOnlyReadbackProperties;
   };
   bool bAllowReadOnly = false;
   bool bAllowTemplateOwners = false;

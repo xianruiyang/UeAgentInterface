@@ -9,8 +9,10 @@
 
 class FJsonObject;
 class FProperty;
+class UObject;
 class UEnum;
 class UScriptStruct;
+namespace UE::UAI::StateSemantic { class FUeAgentCanonicalValue; }
 
 namespace UeAgentAuthoringTypeDescriptors
 {
@@ -18,6 +20,13 @@ namespace UeAgentAuthoringTypeDescriptors
 	UEAGENTINTERFACE_API bool IsDirectPropertyValueWrapper(const FString& FieldName);
 	/** Native codec envelope declared by a formal type kind; empty means no compact envelope. */
 	UEAGENTINTERFACE_API FString NativeCodecValueWrapper(const FString& Kind);
+	/** Conservative reference capability of this formal captured descriptor.
+	 * Missing/dynamic/owned/struct facts retain the native reference reader. */
+	UEAGENTINTERFACE_API bool MayContainNativeObjectReference(const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Descriptor);
+	/** Same codec/type traversal, narrowed by actual removed instances. Unknown
+	 * types/classes remain candidates; this neither loads classes nor reads values. */
+	UEAGENTINTERFACE_API bool MayContainNativeObjectReferenceTo(
+		const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Descriptor, TConstArrayView<const UObject*> Objects);
 	/** Explanation produced with a type, never an assertion or decoding input. */
 	UEAGENTINTERFACE_API bool IsReadOnlyTypeMetadataField(const FString& FieldName);
 	UEAGENTINTERFACE_API bool IsStructMemberAuthoringEditable(const FProperty* Property, const UScriptStruct* Scope = nullptr);
@@ -67,6 +76,8 @@ namespace UeAgentAuthoringTypeDescriptors
 	UEAGENTINTERFACE_API bool TryGetBitmaskMask(const FProperty* Property, const UEnum* Enum, int64 EnumValue, uint64& OutMask);
 	/** Shared enumeration/filtering; ordinary authoring keeps names-only rows. */
 	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> BuildEnumCandidates(const UEnum* Enum, bool bIncludeDisplayMetadata = false, const FProperty* Property = nullptr);
+	/** Current names-only candidate sequence, using the same filtering as BuildEnumCandidates. */
+	UEAGENTINTERFACE_API TArray<FString> ReadEnumCandidateNames(const UEnum* Enum, const FProperty* Property);
 	UEAGENTINTERFACE_API FString GetValueKind(const FProperty* Property, bool bIgnoreFixedArray = false);
 	UEAGENTINTERFACE_API FDescriptor Describe(const FProperty* Property, bool bIgnoreFixedArray = false);
 	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> BuildJson(const FProperty* Property, bool bIgnoreFixedArray = false);

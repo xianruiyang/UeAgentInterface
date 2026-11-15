@@ -364,10 +364,19 @@ namespace UE::UAI::Contract
 			const TSharedRef<IUeAgentCancellationSignal>& Cancellation) = 0;
 	};
 
+	/** Short synchronous capability for a pure control read. It must not outlive
+	 * Submit or carry UObject/request JSON across threads. Unsupported ports
+	 * return no capability and retain their original execution thread. */
+	class IUeAgentOperationReadScope
+	{
+	public:
+		virtual ~IUeAgentOperationReadScope() = default;
+	};
 	class UEAGENTINTERFACE_API IUeAgentOperationApplicationPort
 	{
 	public:
 		virtual ~IUeAgentOperationApplicationPort() = default;
+		virtual TUniquePtr<IUeAgentOperationReadScope> TryBeginConcurrentRead(const FUeAgentOperationRequest&) { return {}; }
 
 		virtual FUeAgentOperationResult Submit(
 			const FUeAgentOperationRequest& Request,

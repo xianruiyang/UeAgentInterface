@@ -1,6 +1,7 @@
 #include "Core/HjsonWorkspace/UeAgentKeyedItemAuthoringProjection.h"
 #include "Core/StateSemantic/UeAgentExactStringKeys.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/HjsonWorkspace/UeAgentReflectedPropertyRows.h"
 #include "Utilities/UeAgentReadableName.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringJsonFields.h"
@@ -104,8 +105,8 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				const auto Merged = UeAgentAuthoringState::CloneCanonicalValue(Argument ? Argument : Captured)->AsObject();
 				for (const auto& Field : Row->Values)
-					if ((!Argument || UeAgentAuthoringState::MakeStableCanonicalValueKey(Field.Value)
-						!= UeAgentAuthoringState::MakeStableCanonicalValueKey(Captured->AsObject()->TryGetField(Field.Key)))
+					if ((!Argument || !UeAgentAuthoringState::AreStableCanonicalValuesEqual(Field.Value,
+						Captured->AsObject()->TryGetField(Field.Key)))
 						&& !(Contract.bRequiresCreationCandidate && Field.Key == TEXT("candidate")))
 						Merged->SetField(Field.Key, UeAgentAuthoringState::CloneCanonicalValue(Field.Value));
 				Resolved->SetObjectField(Record.Key, Merged);
@@ -187,6 +188,7 @@ namespace UE::UAI::HjsonWorkspace
 					Group.Value[Index].Value->SetNumberField(Contract.OrderRankField, Index);
 			}
 		}
+		if (Contract.ProjectDerivedOrder) Contract.ProjectDerivedOrder(*Base, *Records, *Resolved);
 		TMap<FString, FString> AliasById;
 		TMap<FString, FString> AliasByNativeId;
 		TMap<FString, FString> AliasByDerivedIdentity;
@@ -336,7 +338,7 @@ namespace UE::UAI::HjsonWorkspace
 		bool SameProjectedValue(const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right)
 		{
 			return Left.IsValid() == Right.IsValid()
-				&& (!Left.IsValid() || FJsonValue::CompareEqual(*Left, *Right));
+				&& UeAgentAuthoringState::AreStableCanonicalValuesEqual(Left, Right);
 		}
 
 		bool MergeProjectedValueEdits(const TSharedPtr<FJsonValue>& Captured,
@@ -449,6 +451,42 @@ namespace UE::UAI::HjsonWorkspace
 			: TEXT("Captured owned-item owner_relative_path must be a nonempty string.")); }
 		OutRelativePath = Path->GetText();
 		return TryFormatReadableKeyedItemAlias(Name->GetText(), Occurrence, OutKey, OutError);
+	}
+
+	static constexpr TCHAR OwnedApplyPath[] = TEXT("owner_relative_path");
+
+	bool FOrderedOwnedItemBinding::TryBuildApplyItem(const FUeAgentCanonicalValueRef& Business,
+		FUeAgentResourceTracker& Resources, FUeAgentCanonicalValuePtr& Out, FUeAgentStateSemanticError& Error) const
+	{
+		const auto* Owned = OwnedDefinitionField(Business.Get(), TEXT("owned_object"));
+		if (!Owned) { Out = Business; return true; } // Explicit nullable slot.
+		if (Owned->GetKind() != EUeAgentValueKind::Object) {
+			Error = Contract::FDiagnostic::Failure(TEXT("hjson_owned_item_value_invalid"),
+				TEXT("The owned_object value must be an object."), TEXT("hjson_import"));
+			FUeAgentStateSemanticError ConversionError;
+			if (!CanonicalJson::TryToJsonValue(*Owned, Error.ActualValue, ConversionError)) Error = MoveTemp(ConversionError);
+			else Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+			return false;
+		}
+		auto Fields = Owned->GetObjectItems();
+		FUeAgentCanonicalValuePtr Selector, ApplyOwned;
+		if (!FUeAgentCanonicalValue::TryString(RelativePath, Resources, Selector, Error)) return false;
+		Fields.Emplace(OwnedApplyPath, Selector.ToSharedRef());
+		return FUeAgentCanonicalValue::TryObject(Fields, Resources, ApplyOwned, Error)
+			&& FUeAgentCanonicalValue::TryObject({{TEXT("owned_object"), ApplyOwned.ToSharedRef()}}, Resources, Out, Error);
+	}
+
+	TSharedPtr<FJsonValue> FOrderedOwnedItemBinding::BuildReadableApplyItem(const TSharedPtr<FJsonValue>& Source) const
+	{
+		const TSharedPtr<FJsonObject>* Owned = nullptr;
+		if (Source->Type != EJson::Object || !Source->AsObject()->TryGetObjectField(TEXT("owned_object"), Owned)) return Source;
+		auto Fields = MakeShared<FJsonObject>();
+		Fields->Values = (*Owned)->Values;
+		Fields->RemoveField(TEXT("instance"));
+		Fields->SetStringField(OwnedApplyPath, RelativePath);
+		auto Item = MakeShared<FJsonObject>();
+		Item->SetObjectField(TEXT("owned_object"), Fields);
+		return MakeShared<FJsonValueObject>(Item);
 	}
 
 	bool TryResolveOrderedOwnedItems(const FUeAgentCanonicalValue& ProposedItems,
@@ -1114,6 +1152,32 @@ namespace UE::UAI::HjsonWorkspace
 		Tree.OrderRankGroupFields = {TEXT("kind"), TEXT("parent"), TEXT("placement")};
 		Tree.OrderRankTieIdentityField = TEXT("id");
 		Tree.UnorderedKinds = {TEXT("settings"), TEXT("parameters"), TEXT("color"), TEXT("binding_source")};
+		Tree.ProjectDerivedOrder = [](const FJsonObject& Baseline, const FJsonObject& Input, FJsonObject& Resolved)
+		{
+			TMap<FString, int32> BindingIndices;
+			for (const auto& Pair : Resolved.Values)
+			{
+				const auto Row = Pair.Value->AsObject();
+				FString Source;
+				if (Row->GetStringField(TEXT("kind")) == TEXT("binding") && Row->TryGetStringField(TEXT("source"), Source))
+					BindingIndices.Add(Source, Row->GetIntegerField(TEXT("index")));
+			}
+			for (const auto& Pair : Resolved.Values)
+			{
+				const auto Row = Pair.Value->AsObject();
+				FString Placement;
+				if (!Row->TryGetStringField(TEXT("placement"), Placement) || Placement != TEXT("property_function")) continue;
+				const int32* OwnerIndex = BindingIndices.Find(Row->GetStringField(TEXT("id")));
+				if (!OwnerIndex) continue;
+				const auto Authored = Input.TryGetField(Pair.Key);
+				const auto Before = Baseline.TryGetField(Pair.Key);
+				const auto Rank = Authored ? Authored->AsObject()->TryGetField(TEXT("index")) : nullptr;
+				// An explicitly requested, mismatched position must still be diagnosed.
+				if (Rank && (!Before || !UeAgentAuthoringState::AreStableCanonicalValuesEqual(Rank, Before->AsObject()->TryGetField(TEXT("index")))))
+					Row->SetField(TEXT("index"), Rank);
+				else Row->SetNumberField(TEXT("index"), *OwnerIndex);
+			}
+		};
 		Tree.DerivedIdentityFieldsByKind = {{TEXT("binding"), {TEXT("target"), TEXT("target_path")}}};
 		Tree.ReferenceIdentityField = TEXT("id");
 		Tree.ReferenceFields = {{TEXT("parent"), {}}, {TEXT("target"), {}}, {TEXT("source"), {}}, {TEXT("linked_state"), {}}, {TEXT("color_ref"), {}}};
@@ -1212,6 +1276,7 @@ namespace UE::UAI::HjsonWorkspace
 			Result.CollectionFieldContracts.Add(TEXT("channels"), &GetLevelSequenceScalarChannelProjectionContract());
 			for (const FString Path : {FString(TEXT("range/lower")), FString(TEXT("range/upper"))})
 			{
+				Result.ObjectFieldPolicies.FindChecked(Path + TEXT("/point")).ParentObjectContextField = TEXT("bound_point_context");
 				auto& Bound = Result.ObjectFieldPolicies.FindChecked(Path);
 				Bound.DiscriminatorField = TEXT("kind");
 				Bound.BranchFields = {
@@ -1334,7 +1399,7 @@ namespace UE::UAI::HjsonWorkspace
 		bool TryMergeRecordObject(const FUeAgentCanonicalValue& Value, const FUeAgentCanonicalValue* Captured,
 			const FUeAgentCanonicalValue* Defaults, const FString& Path, const FKeyedItemProjectionContract& Contract,
 			FUeAgentResourceTracker& Resources, FUeAgentCanonicalValuePtr& OutValue, FWorkspaceError& OutError,
-			const FString& InputPointer)
+			const FString& InputPointer, const FUeAgentCanonicalValue* ParentRecord)
 		{
 			// Policy keys retain their existing spelling. Input pointers independently
 			// escape each segment and retain provenance without reconstructing syntax.
@@ -1354,6 +1419,12 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			if (Value.GetKind() != EUeAgentValueKind::Object)
 				return Reject(TEXT("keyed_record_object_required"), FString::Printf(TEXT("Record field '%s' must be an object."), *Path));
+			if (!Captured && !Policy->ParentObjectContextField.IsEmpty())
+			{
+				Captured = ParentRecord ? OwnedDefinitionField(*ParentRecord, Policy->ParentObjectContextField) : nullptr;
+				if (!Captured || Captured->GetKind() != EUeAgentValueKind::Object)
+					return Reject(TEXT("keyed_record_object_context_missing"), FString::Printf(TEXT("Object '%s' requires captured parent context '%s'."), *Path, *Policy->ParentObjectContextField), {}, nullptr, MakeShared<FJsonValueString>(Policy->ParentObjectContextField), true);
+			}
 			auto Fields = Captured && Captured->GetKind() == EUeAgentValueKind::Object
 				? ObjectMap(*Captured) : TMap<FString, FUeAgentCanonicalValueRef>();
 			const TSet<FString>* Branch = nullptr;
@@ -1401,7 +1472,7 @@ namespace UE::UAI::HjsonWorkspace
 				FUeAgentCanonicalValuePtr Child;
 				if (!TryMergeRecordObject(Field.Value.Get(), Previous ? &Previous->Get() : nullptr, Default,
 					Path + TEXT("/") + Field.Key, Contract, Resources, Child, OutError,
-					InputPointer + TEXT("/") + EscapeJsonPointerSegment(Field.Key))) return false;
+					InputPointer + TEXT("/") + EscapeJsonPointerSegment(Field.Key), ParentRecord)) return false;
 				Fields.Add(Field.Key, Child.ToSharedRef());
 			}
 			if (Branch)
@@ -1849,7 +1920,7 @@ namespace UE::UAI::HjsonWorkspace
 		}
 	}
 
-	bool TryResolveKeyedItemDesiredState(
+	static bool ResolveKeyedItemsFromParent(
 		const FUeAgentCanonicalValue& VisibleItems,
 		const FUeAgentCanonicalValue& CapturedItems,
 		const FString& SourceUnit,
@@ -1861,7 +1932,7 @@ namespace UE::UAI::HjsonWorkspace
 		FWorkspaceError& OutError,
 		const FUeAgentCanonicalValue* NestedRecordDefaults,
 		const EKeyedItemInputKind InputKind, const FKeyedItemReferenceContext* ReferenceContext,
-		const FHjsonNode* VisibleSource)
+		const FHjsonNode* VisibleSource, const FUeAgentCanonicalValue* ParentRecord)
 	{
 		OutResolvedItems.Reset();
 		bOutSemanticChanged = false;
@@ -1876,10 +1947,10 @@ namespace UE::UAI::HjsonWorkspace
 			FKeyedItemProjectionContract ValueContract = Contract;
 			ValueContract.ReferenceFields.Reset();
 			FWorkspaceError ItemErrors;
-			const bool bItemsValid = TryResolveKeyedItemDesiredState(
+			const bool bItemsValid = ResolveKeyedItemsFromParent(
 				bReferencesValid ? *ResolvedReferences : VisibleItems, CapturedItems, SourceUnit,
 				ValueContract, RecordSchema, Resources, OutResolvedItems, bOutSemanticChanged,
-				ItemErrors, NestedRecordDefaults, InputKind, ReferenceContext, VisibleSource);
+				ItemErrors, NestedRecordDefaults, InputKind, ReferenceContext, VisibleSource, ParentRecord);
 			if (!bReferencesValid || !bItemsValid)
 			{
 				OutResolvedItems.Reset();
@@ -2029,10 +2100,11 @@ namespace UE::UAI::HjsonWorkspace
 								}
 								FUeAgentCanonicalValuePtr Resolved;
 								bool bChanged = false;
-								if (!TryResolveKeyedItemDesiredState(Field.Value.Get(), Original->Get(),
+								if (!ResolveKeyedItemsFromParent(Field.Value.Get(), Original->Get(),
 									SourceUnit, **ChildContract,
 									ChildRecordDefaults, Resources, Resolved, bChanged, OutError, ChildNestedDefaults, EKeyedItemInputKind::VisibleDesiredState, nullptr,
-									VisibleSource && VisibleSource->Get(Item.Key) ? VisibleSource->Get(Item.Key)->Get(Field.Key) : nullptr))
+									VisibleSource && VisibleSource->Get(Item.Key) ? VisibleSource->Get(Item.Key)->Get(Field.Key) : nullptr,
+									Before ? &Before->Get() : RecordSchema))
 								{
 									OutError.PrependPath(TEXT("/") + EscapeJsonPointerSegment(Field.Key), true);
 									return false;
@@ -2049,7 +2121,7 @@ namespace UE::UAI::HjsonWorkspace
 							const auto* Default = Schema.Find(Field.Key);
 							if (!TryMergeRecordObject(Field.Value.Get(), Original ? &Original->Get() : nullptr,
 						Default ? &Default->Get() : nullptr, Field.Key, Contract, Resources, Merged, OutError,
-						TEXT("/") + EscapeJsonPointerSegment(Field.Key))) return false;
+						TEXT("/") + EscapeJsonPointerSegment(Field.Key), ParentRecord)) return false;
 							Fields.Add(Field.Key, Merged.ToSharedRef());
 						}
 						if (!Before && !Contract.CapturedRecordIdentityField.IsEmpty())
@@ -2088,23 +2160,20 @@ namespace UE::UAI::HjsonWorkspace
 							const FUeAgentCanonicalValueRef* Definition = Defaults.Find(Property.Key);
 							if (!Definition || Property.Value->GetKind() != EUeAgentValueKind::Object)
 								return FailAt(OutError, TEXT("keyed_record_property_unknown"), !Definition ? FString::Printf(TEXT("Property '%s' is absent from the captured record schema."), *Property.Key) : FString::Printf(TEXT("Property descriptor '%s' must be an object."), *Property.Key), SourceUnit, TEXT("/properties/") + EscapeJsonPointerSegment(Property.Key));
-							const auto Descriptor = ObjectMap(Property.Value.Get());
 							const auto DefaultDescriptor = ObjectMap(Definition->Get());
-							const FUeAgentCanonicalValueRef* Type = Descriptor.Find(TEXT("type"));
 							const FUeAgentCanonicalValueRef* ExpectedType = DefaultDescriptor.Find(TEXT("type"));
-							if (Descriptor.Num() != 2 || !Descriptor.Contains(TEXT("value")) || !Type || !ExpectedType
-								|| (*Type)->GetKind() != EUeAgentValueKind::String
-								|| (*Type)->GetText() != (*ExpectedType)->GetText())
-								return FailAt(OutError, TEXT("semantic_workspace_property_type_mismatch"),
-									FString::Printf(TEXT("Property '%s': %s"), *Property.Key,
-										!Type ? TEXT("type is missing.") : !ExpectedType ? TEXT("captured schema type is missing.")
-										: (*Type)->GetKind() != EUeAgentValueKind::String ? TEXT("type must be a string.")
-										: (*Type)->GetText() != (*ExpectedType)->GetText() ? TEXT("type differs from the captured schema.")
-										: TEXT("descriptor must contain exactly type and value.")), SourceUnit, TEXT("/properties/") + EscapeJsonPointerSegment(Property.Key)
-										+ ((!Type || (Type && ExpectedType && ((*Type)->GetKind() != EUeAgentValueKind::String || (*Type)->GetText() != (*ExpectedType)->GetText()))) ? TEXT("/type") : TEXT("")),
-									Type && (*Type)->GetKind() == EUeAgentValueKind::String ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>((*Type)->GetText())) : nullptr,
-									ExpectedType ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>((*ExpectedType)->GetText())) : nullptr,
-									Type && !ExpectedType);
+						const FUeAgentCanonicalValueRef* ExpectedDefinition = DefaultDescriptor.Find(TEXT("definition"));
+						FReadablePropertySchema PropertySchema;
+						PropertySchema.Name = Property.Key;
+						if (ExpectedType && (*ExpectedType)->GetKind() == EUeAgentValueKind::String) PropertySchema.Type = (*ExpectedType)->GetText();
+						if (ExpectedDefinition && (*ExpectedDefinition)->GetKind() == EUeAgentValueKind::String) PropertySchema.Definition = (*ExpectedDefinition)->GetText();
+						FUeAgentCanonicalValuePtr PropertyValue;
+						FUeAgentStateSemanticError PropertyError;
+						if (!TryReadReadablePropertyRow(Property.Value.Get(), PropertySchema, PropertyValue, PropertyError,
+							TEXT("/properties/") + EscapeJsonPointerSegment(Property.Key))) {
+							OutError.SetFailure(MoveTemp(PropertyError), SourceUnit);
+							return false;
+						}
 							Fields.Add(Property.Key, Property.Value);
 						}
 					}
@@ -2329,6 +2398,18 @@ namespace UE::UAI::HjsonWorkspace
 		FUeAgentCanonicalValuePtr Desired;
 		if (!TryObject(Resolved, Resources, Desired, OutError)) return false;
 		return TryBuildKeyedItemOperationRecords(*Desired, CapturedItems, Contract, Resources, OutResolvedItems, OutError);
+	}
+
+	bool TryResolveKeyedItemDesiredState(
+		const FUeAgentCanonicalValue& VisibleItems, const FUeAgentCanonicalValue& CapturedItems,
+		const FString& SourceUnit, const FKeyedItemProjectionContract& Contract,
+		const FUeAgentCanonicalValue* RecordSchema, FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalValuePtr& OutResolvedItems, bool& bOutSemanticChanged, FWorkspaceError& OutError,
+		const FUeAgentCanonicalValue* NestedRecordDefaults, EKeyedItemInputKind InputKind,
+		const FKeyedItemReferenceContext* ReferenceContext, const FHjsonNode* VisibleSource)
+	{
+		return ResolveKeyedItemsFromParent(VisibleItems, CapturedItems, SourceUnit, Contract, RecordSchema, Resources,
+			OutResolvedItems, bOutSemanticChanged, OutError, NestedRecordDefaults, InputKind, ReferenceContext, VisibleSource, nullptr);
 	}
 
 	bool TryResolveKeyedItemDesiredState(

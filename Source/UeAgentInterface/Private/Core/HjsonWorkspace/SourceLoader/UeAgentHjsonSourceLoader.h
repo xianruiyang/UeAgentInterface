@@ -90,6 +90,12 @@ namespace UE::UAI::HjsonWorkspace
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FResolvedContentGraphImportSourcePtr& OutSource,
 		FWorkspaceError& OutError);
+	/** Identify the source and, for a semantic directory, accept its resolver
+	 * result under the same namespace interval rather than two paired scans. */
+	bool TryLoadContentGraphImportWorkspace(const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity, ContextResource::FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutSource, FResolvedSemanticWorkspacePtr& OutWorkspace,
+		FWorkspaceError& OutError);
 
 	/**
 	 * Recovers the revision and impact authorization used by the internal
@@ -124,6 +130,18 @@ namespace UE::UAI::HjsonWorkspace
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FResolvedContentGraphImportSourcePtr& OutSource,
 		FWorkspaceError& OutError);
+
+	/** Returns the same successful semantic resolution used to validate the
+	 * envelope. Immediate model consumers need not resolve it again. This is a
+	 * point-in-time result, not permission to skip later source/version checks. */
+	UEAGENTINTERFACE_API bool TryLoadNormalizedContentGraphImportSource(
+		const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity,
+		const FString& ExpectedRevision,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutSource,
+		FWorkspaceError& OutError,
+		FResolvedSemanticWorkspacePtr& OutSemanticWorkspace);
 
 	/**
 	 * Loads one discriminated HJSON source without performing UE mutation.

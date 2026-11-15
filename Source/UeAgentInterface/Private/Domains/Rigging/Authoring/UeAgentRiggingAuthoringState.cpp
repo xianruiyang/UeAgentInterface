@@ -184,6 +184,7 @@ namespace UeAgentRiggingAuthoring
 		const FString AssetPath = Asset.GetOutermost()->GetName();
 		if (!AddRequest(Profile, Profile.ExportTargetSemanticId, AssetPath,
 			&Asset, false, OutRequests, OutError)) return false;
+		OutRequests.Last().MarkExportTarget();
 		UeAgentAuthoringState::FEditablePropertyReadOptions Options;
 		Options.SemanticId = TEXT("core.property");
 		Options.ExcludedProperties = GetDomainOwnedRootProperties(Profile.Kind);

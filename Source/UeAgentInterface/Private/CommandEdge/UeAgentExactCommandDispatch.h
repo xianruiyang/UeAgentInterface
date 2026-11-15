@@ -18,6 +18,7 @@ namespace UE::UAI::CommandEdge
 
 		virtual const FString& GetCommandId() const = 0;
 		virtual const FString& GetPublicOwner() const = 0;
+		virtual TUniquePtr<Contract::IUeAgentOperationReadScope> TryBeginConcurrentRead(const FUeAgentCommandRequest&) { return {}; }
 		virtual FUeAgentCommandResult Submit(
 			const FUeAgentCommandRequest& Request,
 			const Contract::FUeAgentCallerContext& CallerContext,
@@ -52,6 +53,9 @@ namespace UE::UAI::CommandEdge
 			const Contract::FUeAgentCallerContext& CallerContext,
 			const TSharedRef<Contract::IUeAgentCancellationSignal>&
 				Cancellation) const;
+		TOptional<FUeAgentCommandResult> TrySubmitConcurrent(const FUeAgentCommandRequest& Request,
+			const Contract::FUeAgentCallerContext& CallerContext,
+			const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation) const;
 
 	private:
 		FUeAgentExactCommandDispatch(

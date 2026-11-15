@@ -80,7 +80,8 @@ bool AppendPropertyReadRequestsInternal(
     const FReflectionRoot &Root, const FString &TargetKey,
     const TArray<UeAgentAuthoringObjectApply::FResolvedNode> &Nodes,
     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    FOperationFailure &OutFailure) {
+    FOperationFailure &OutFailure,
+    const UeAgentAuthoringObjectApply::FOptions* Options = nullptr) {
   if (!Root.IsValid()) {
     SetFailure(OutFailure, NativeFailure(TEXT("reflection_operation_readback_root_missing"),
         TEXT("The reflection root required for property readback is unavailable."), TargetKey));
@@ -113,6 +114,18 @@ bool AppendPropertyReadRequestsInternal(
       return false;
     }
     ReadRequest.SnapshotIdentityOverride = MoveTemp(SnapshotIdentity);
+    if (Options) {
+      ReadRequest.Limits.AuthorizeProperty = Options->AuthorizeProperty;
+      if (!Node.bExplicit && !Options->NativeStages.IsEmpty()) {
+        const FName Name(*Node.PropertyPath);
+        for (const auto& Stage : Options->NativeStages) {
+          if (Stage.VerificationOnlyReadbackProperties.Contains(Name)) {
+            ReadRequest.MarkVerificationOnly();
+            break;
+          }
+        }
+      }
+    }
     OutRequests.Add(MoveTemp(ReadRequest));
   }
   return true;
@@ -182,6 +195,8 @@ public:
       AttachPropertyFailureSource(OutFailure, LifecycleState->GetActualRoot(), SourceDescriptors);
       return false;
     }
+    if (!LifecycleState->UsesProposedPropertyPreview())
+      return LifecycleState->ApplyProposed(OutFailure);
     if (bHasPropertyApply) {
       if (PropertyApply.HasTextSourceEdits()) {
         const FReflectionRoot ActualRoot = LifecycleState->GetActualRoot();
@@ -238,6 +253,10 @@ public:
         || VerifyIntent(UnchangedPropertyIntent.GetValue(), LifecycleState->GetProposedRoot(), OutFailure);
   }
 
+  virtual bool CaptureExpectedAfterLifecycle() const override {
+    return !LifecycleState->UsesProposedPropertyPreview();
+  }
+
   virtual bool BuildExpectedReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {
@@ -245,11 +264,13 @@ public:
     if (!LifecycleState->BuildDomainExpectedReadRequests(OutRequests,
                                                          OutFailure))
       return false;
-    if (!bHasPropertyApply)
+    if (ResolvedNodes.IsEmpty())
       return true;
-    return UeAgentAuthoringOperationApply::AppendPropertyReadRequests(
-        LifecycleState->GetProposedRoot(), LifecycleState->GetTargetKey(),
-        ResolvedNodes, OutRequests, OutFailure);
+    return AppendPropertyReadRequestsInternal(
+        LifecycleState->UsesProposedPropertyPreview()
+            ? LifecycleState->GetProposedRoot() : LifecycleState->GetActualRoot(),
+        LifecycleState->GetTargetKey(),
+        ResolvedNodes, OutRequests, OutFailure, &ObjectApplyOptions);
   }
 
   virtual bool ApplyLifecycle(FOperationFailure &OutFailure) override {
@@ -338,10 +359,10 @@ public:
     if ((LifecycleState->GetResolvedOperation() == UeAgentApplyInputContract::EOperation::Create || LifecycleState->GetResolvedOperation() == UeAgentApplyInputContract::EOperation::Clone) &&
         !LifecycleState->GetActualRoot().IsValid()) return true;
     if (!VerifyActualIntent(OutFailure)) return false;
-    if (!bHasPropertyApply) return true;
-    return UeAgentAuthoringOperationApply::AppendPropertyReadRequests(
+    if (ResolvedNodes.IsEmpty()) return true;
+    return AppendPropertyReadRequestsInternal(
         LifecycleState->GetActualRoot(), LifecycleState->GetTargetKey(),
-        ResolvedNodes, OutRequests, OutFailure);
+        ResolvedNodes, OutRequests, OutFailure, &ObjectApplyOptions);
   }
 
   virtual TSharedPtr<FJsonObject> BuildResultMetadata() const override {
@@ -354,12 +375,12 @@ public:
     OutRequests.Reset();
     if (!LifecycleState->BuildDomainBeforeReadRequests(OutRequests, OutFailure))
       return false;
-    if (!bHasPropertyApply) return true;
+    if (ResolvedNodes.IsEmpty()) return true;
     if ((LifecycleState->GetResolvedOperation() == UeAgentApplyInputContract::EOperation::Create || LifecycleState->GetResolvedOperation() == UeAgentApplyInputContract::EOperation::Clone) &&
         !LifecycleState->GetActualRoot().IsValid()) return true;
-    return UeAgentAuthoringOperationApply::AppendPropertyReadRequests(
+    return AppendPropertyReadRequestsInternal(
         LifecycleState->GetActualRoot(), LifecycleState->GetTargetKey(),
-        ResolvedNodes, OutRequests, OutFailure);
+        ResolvedNodes, OutRequests, OutFailure, &ObjectApplyOptions);
   }
 
   virtual bool Commit(FOperationFailure &OutFailure) override {
@@ -563,6 +584,14 @@ bool FReflectionApplyProvider::PrepareOperation(
   bool bHasPropertyApply = !InputPropertyDescriptors.IsEmpty();
   TArray<UeAgentAuthoringObjectApply::FResolvedNode> ResolvedNodes;
   TArray<TSharedPtr<FJsonValue>> EffectivePropertyDescriptors;
+  const auto AddReadbackProperty = [&ResolvedNodes](FName Property) {
+    const FString Path = Property.ToString();
+    if (!ResolvedNodes.ContainsByPredicate([&](const auto& Node) { return Node.PropertyPath == Path; })) {
+      auto& Node = ResolvedNodes.AddDefaulted_GetRef();
+      Node.PropertyPath = Path;
+      Node.bExplicit = false;
+    }
+  };
   if (bHasPropertyApply) {
     const FReflectionRoot ProposedRoot = LifecycleState->GetProposedRoot();
     if (!ProposedRoot.IsValid()) {
@@ -659,12 +688,9 @@ bool FReflectionApplyProvider::PrepareOperation(
       ChangedPaths.Add(Node.PropertyPath);
       ResolvedNodes.Add(Node);
     }
-    for (const auto& Stage : ResolvedOptions.NativeStages) for (const FName Property : Stage.ReadbackProperties) {
-      const FString Path = Property.ToString();
-      if (!ResolvedNodes.ContainsByPredicate([&](const auto& Node) { return Node.PropertyPath == Path; })) {
-        UeAgentAuthoringObjectApply::FResolvedNode Node;
-        Node.PropertyPath = Path; Node.bExplicit = false; ResolvedNodes.Add(MoveTemp(Node));
-      }
+    for (const auto& Stage : ResolvedOptions.NativeStages) {
+      for (const FName Property : Stage.ReadbackProperties) AddReadbackProperty(Property);
+      for (const FName Property : Stage.VerificationOnlyReadbackProperties) AddReadbackProperty(Property);
     }
     for (const TSharedPtr<FJsonValue> &DescriptorValue :
          ProjectedPropertyDescriptors) {
@@ -681,21 +707,25 @@ bool FReflectionApplyProvider::PrepareOperation(
     }
     bHasPropertyApply = !EffectivePropertyDescriptors.IsEmpty();
     if (bHasPropertyApply) {
-      if (bUseActualBaseline) {
+      if (bUseActualBaseline && LifecycleState->UsesProposedPropertyPreview()) {
         PrepareFailure = UeAgentAuthoringObjectApply::FFailure();
         if (!PrepareRoot(ProposedRoot, EffectivePropertyDescriptors,
                          PropertyApply, PrepareFailure)) {
           SetPreparedPropertyFailure(PrepareFailure);
           return false;
         }
-      } else {
+      } else if (!bUseActualBaseline) {
         PropertyApply = MoveTemp(DeltaApply);
       }
     }
   }
 
+  if (!bHasPropertyApply) ResolvedNodes.Reset();
+  for (const FName Property : LifecycleState->GetLifecycleReadbackProperties()) AddReadbackProperty(Property);
   auto ResolvedOptions = ObjectApplyOptions;
   LifecycleState->ConfigurePropertyOptions(ResolvedOptions);
+  if (!bHasPropertyApply && LifecycleState->IsNoOp())
+    LifecycleState->DiscardNoOpPreparation();
   OutState = MakeUnique<FReflectionPreparedOperationState>(
       MoveTemp(LifecycleState), MoveTemp(PropertyApply), bHasPropertyApply,
       MoveTemp(ResolvedNodes), MoveTemp(EffectivePropertyDescriptors),

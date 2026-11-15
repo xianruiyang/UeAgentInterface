@@ -2,6 +2,10 @@
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Core/HjsonWorkspace/UeAgentKeyedItemAuthoringProjection.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticUnitComparison.h"
+#include "Core/HjsonWorkspace/UeAgentCommittedWorkspaceExport.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
+#include "Core/HjsonWorkspace/UeAgentWorkspacePublication.h"
 
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Dom/JsonObject.h"
@@ -19,7 +23,10 @@ namespace UE::UAI::Composition::HjsonImport
 			return Path + TEXT("/") + EscapeJsonPointerSegment(Key);
 		}
 
-		const TCHAR* BindingDifference(const FSemanticUnit& A, const FSemanticUnit& B)
+		enum class EBindingComparison { Complete, OwnerIdentity };
+
+		const TCHAR* BindingDifference(const FSemanticUnit& A, const FSemanticUnit& B,
+			const EBindingComparison Purpose = EBindingComparison::Complete)
 		{
 			if (A.GetUnitId() != B.GetUnitId()) return TEXT("unit");
 			if (A.GetUnitKind() != B.GetUnitKind()) return TEXT("unit kind");
@@ -28,7 +35,7 @@ namespace UE::UAI::Composition::HjsonImport
 			if (A.GetRole() != B.GetRole()) return TEXT("role");
 			if (A.GetFieldSetRef() != B.GetFieldSetRef()) return TEXT("field set");
 			if (A.GetTargetIdentityKey() != B.GetTargetIdentityKey()) return TEXT("target");
-			if (A.GetDependencyRefs() != B.GetDependencyRefs()) return TEXT("dependencies");
+			if (Purpose == EBindingComparison::Complete && A.GetDependencyRefs() != B.GetDependencyRefs()) return TEXT("dependencies");
 			if (A.GetOrderingRef() != B.GetOrderingRef()) return TEXT("ordering");
 			if (A.GetLayoutRef() != B.GetLayoutRef()) return TEXT("layout");
 			return nullptr;
@@ -47,9 +54,11 @@ namespace UE::UAI::Composition::HjsonImport
 			const FResolvedSemanticWorkspaceRef& Source;
 			const FAuthoringModelRef& Current;
 			FUeAgentResourceTracker& Resources;
+			const FScopedCurrentCoverage* Coverage = nullptr;
 			TArray<Contract::FDiagnostic> Issues;
 			Contract::FDiagnostic EvaluationFailure;
 			TSet<FString> CheckedDependencies;
+			bool bKeepNewAuthorLeaves = false;
 
 			bool Equal(const FString& Id, const FString& Path, const FUeAgentCanonicalValuePtr& A, const FUeAgentCanonicalValuePtr& B)
 			{
@@ -66,7 +75,7 @@ namespace UE::UAI::Composition::HjsonImport
 				if (Item.SemanticPointer.IsEmpty()) Item.SemanticPointer = Path.IsEmpty() ? TEXT("/") : Path;
 				const auto* Location = Source->FindValueSource(Id, Path);
 				const bool bExact = Location != nullptr;
-				if (!Location) Location = Source->GetUnitSources().Find(Id);
+				if (!Location) Location = Source->FindUnitSource(Id);
 				if (Location && Item.Source.SourceFile.IsEmpty())
 				{
 					Item.Source.SourceUnit = Location->GetSourceUnit();
@@ -205,6 +214,7 @@ namespace UE::UAI::Composition::HjsonImport
 					return true;
 				}
 				if (!EvaluationFailure.IsEmpty()) return false;
+				if (bKeepNewAuthorLeaves) { Out = Edit; return true; }
 				auto Conflict = Contract::FDiagnostic::Failure(TEXT("workspace_edit_conflict"),
 					TEXT("The current value and the authored edit both changed from the baseline."), TEXT("workspace_rebase"));
 				CurrentDifference.WithPrefix(Path).ApplyTo(Conflict);
@@ -249,7 +259,7 @@ namespace UE::UAI::Composition::HjsonImport
 
 			void Changed(const FString& Id, const FString& Code, const FString& Reason)
 			{
-				const auto* Base = Source->GetBaselineUnits().Find(Id);
+				const auto* Base = Source->FindBaselineUnit(Id);
 				const auto* Now = Current->FindUnit(Id);
 				const int32 Before = Issues.Num();
 				if (Base && Now)
@@ -261,7 +271,7 @@ namespace UE::UAI::Composition::HjsonImport
 					const FSemanticUnit* BeforeDefinition = nullptr;
 					const FSemanticUnit* CurrentDefinition = nullptr;
 					for (const FString& Ref : Base->GetDependencyRefs())
-						if (const auto* Unit = Source->GetBaselineUnits().Find(Ref); Unit && Unit->GetRole() == TEXT("property_definition"))
+						if (const auto* Unit = Source->FindBaselineUnit(Ref); Unit && Unit->GetRole() == TEXT("property_definition"))
 						{ BeforeDefinition = Unit; break; }
 					for (const FString& Ref : Now->GetDependencyRefs())
 						if (const auto* Unit = Current->FindUnit(Ref); Unit && Unit->GetRole() == TEXT("property_definition"))
@@ -283,7 +293,8 @@ namespace UE::UAI::Composition::HjsonImport
 			void Dependencies(const FSemanticUnit& Unit)
 			{
 				TArray<FString> Pending = Unit.GetDependencyRefs();
-				Pending.Add(Unit.GetFieldSetRef());
+				if (HasSemanticFieldSetReference(Unit.GetUnitKind(), Unit.GetSemanticTypeRef(), Unit.GetFieldSetRef()))
+					Pending.Add(Unit.GetFieldSetRef());
 				// Child inventories, relation inventories, ordering and layout are owned
 				// state, not value dependencies. Replaying an edit must retain their current
 				// units; only explicit dependency contracts are required to stay unchanged.
@@ -293,13 +304,27 @@ namespace UE::UAI::Composition::HjsonImport
 					const FString Id = Pending.Pop(EAllowShrinking::No);
 					if (Id.IsEmpty() || CheckedDependencies.Contains(Id)) continue;
 					CheckedDependencies.Add(Id);
-					const FString* Hash = Source->GetBaselineUnitHashes().Find(Id);
+					const FString RecordedHash = Source->ReadBaselineUnitHash(Id);
+					const auto* Base = Source->FindBaselineUnit(Id);
 					const auto* Now = Current->FindUnit(Id);
+					if (Coverage && !Coverage->ValueUnits.Contains(Id) && (!RecordedHash.IsEmpty() || Now || Source->GetModel()->FindUnit(Id)))
+					{ Changed(Id, TEXT("workspace_current_scope_incomplete"), TEXT("The dependency was not observed in the current capture scope.")); continue; }
 					// A field-set may be a native field name rather than a semantic unit ref.
-					if (!Hash && !Now && !Source->GetModel()->FindUnit(Id)) continue;
-					FString CurrentHash;
-					if (Now && !this->Hash(*Now, CurrentHash)) continue;
-					if (!Hash || !Now || *Hash != CurrentHash)
+					if (RecordedHash.IsEmpty() && !Now && !Source->GetModel()->FindUnit(Id)) continue;
+					bool bEquivalent = false;
+					if (Base && Now) {
+						FWorkspaceError Error;
+						if (!TryAreSemanticUnitsEquivalent(*Base, *Now, Resources, bEquivalent, Error)) {
+							AddIssue(Id, Error.GetJsonPointer(), Error.GetDiagnostic(), true); continue;
+						}
+					} else if (!RecordedHash.IsEmpty() && Now) {
+						// Older envelopes without captured values retain their exact
+						// recorded-row fallback; never invent an unobserved baseline.
+						FString CurrentHash;
+						if (!this->Hash(*Now, CurrentHash)) continue;
+						bEquivalent = RecordedHash.Equals(CurrentHash, ESearchCase::CaseSensitive);
+					}
+					if (!bEquivalent)
 						Changed(Id, TEXT("workspace_dependency_changed"), TEXT("A dependency required by this edit changed or was removed since export."));
 					if (Now) Dependencies(*Now);
 				}
@@ -309,9 +334,16 @@ namespace UE::UAI::Composition::HjsonImport
 				{
 					const auto* OldOwner = Source->GetModel()->FindUnit(Unit.GetOwnerRef());
 					const auto* NewOwner = Current->FindUnit(Unit.GetOwnerRef());
+					// A binding-only observation identifies the owner. The edited unit's
+					// own value dependencies were checked above; siblings can contribute
+					// other dependencies to the owner outside this observation.
+					const auto Purpose = Coverage && !Coverage->ValueUnits.Contains(Unit.GetOwnerRef())
+						? EBindingComparison::OwnerIdentity : EBindingComparison::Complete;
+					if (Coverage && !Coverage->BindingUnits.Contains(Unit.GetOwnerRef()))
+					{ Issue(Unit.GetUnitId(), FString(), TEXT("workspace_current_scope_incomplete"), TEXT("The current owner identity was not observed.")); return; }
 					if (!OldOwner || !NewOwner)
 						Issue(Unit.GetUnitId(), FString(), TEXT("workspace_owner_changed"), TEXT("The edited unit's owner is missing from the authored or current asset."));
-					else if (const TCHAR* Field = BindingDifference(*OldOwner, *NewOwner))
+					else if (const TCHAR* Field = BindingDifference(*OldOwner, *NewOwner, Purpose))
 						Issue(Unit.GetUnitId(), FString(), TEXT("workspace_owner_changed"),
 							FString::Printf(TEXT("The edited unit's owner changed its %s binding since export."), Field));
 				}
@@ -338,14 +370,103 @@ namespace UE::UAI::Composition::HjsonImport
 		};
 	}
 
-	bool TryRebaseSemanticWorkspace(const FResolvedSemanticWorkspaceRef& Source, const FAuthoringModelRef& Current,
+	bool TryMergeAcceptedAuthoringValues(const FResolvedSemanticWorkspaceRef& Latest,
+		const FAuthoringModelRef& ActualModel, const FSemanticUnit& Accepted,
+		const FSemanticUnit& Actual, const FSemanticUnit& Authored,
+		FUeAgentResourceTracker& Resources, TOptional<FSemanticUnit>& Out, FWorkspaceError& Error)
+	{
+		Out.Reset();
+		if (BindingDifference(Accepted, Authored) || BindingDifference(Accepted, Actual)
+			|| Authored.GetUnitKind() != ESemanticUnitKind::PropertySet) {
+			Error.SetSourceFailure(TEXT("workspace_committed_author_structure_conflict"),
+				TEXT("The newer author input changes this committed unit's binding or structure; retain the input and resolve this commit before advancing its publication."), Authored.GetUnitId());
+			return false;
+		}
+		FRebase Merge{Latest, ActualModel, Resources};
+		Merge.bKeepNewAuthorLeaves = true;
+		const bool bWrapped = Actual.GetValues().Num() == 1 && Actual.GetValues().Contains(TEXT("value"));
+		const auto Payload = [&](const FSemanticUnit& Unit) -> FUeAgentCanonicalValuePtr {
+			return bWrapped ? (Unit.GetValues().Contains(TEXT("value")) ? FUeAgentCanonicalValuePtr(Unit.GetValues().FindChecked(TEXT("value"))) : nullptr)
+				: Merge.Values(Unit);
+		};
+		FUeAgentCanonicalValuePtr Type, Definition;
+		for (const FString& Id : Actual.GetDependencyRefs())
+			if (const auto* Unit = ActualModel->FindUnit(Id); Unit && Unit->GetRole() == TEXT("property_definition")) {
+				if (const auto* Value = Unit->GetValues().Find(TEXT("type"))) Type = *Value;
+				if (const auto* Value = Unit->GetValues().Find(TEXT("value_definition"))) Definition = *Value;
+				break;
+			}
+		const auto Native = Payload(Actual), Desired = Payload(Accepted), NewAuthor = Payload(Authored);
+		FUeAgentCanonicalValuePtr RestoredAccepted, RestoredAuthor, Result;
+		FUeAgentStateSemanticError RestoreError;
+		if (!Native || !Desired || !NewAuthor
+			|| !TryRestoreSemanticPropertyValue(Accepted, *Latest->GetModel(), Native.ToSharedRef(), Desired.ToSharedRef(), Resources, RestoredAccepted, RestoreError)
+			|| !TryRestoreSemanticPropertyValue(Authored, *Latest->GetModel(), Native.ToSharedRef(), NewAuthor.ToSharedRef(), Resources, RestoredAuthor, RestoreError)) {
+			Error.SetFailure(RestoreError.IsEmpty() ? Contract::FDiagnostic::Failure(TEXT("workspace_committed_author_value_unavailable"),
+				TEXT("The accepted, actual and newer author values cannot be restored with their declared type.")) : RestoreError, Authored.GetUnitId());
+			return false;
+		}
+		if (!Merge.Merge(Authored.GetUnitId(), bWrapped ? TEXT("/value") : FString(), RestoredAccepted, Native,
+			RestoredAuthor, Type, Definition, Result)) {
+			FSemanticWorkspaceImportError Diagnostic;
+			Merge.Fail(Diagnostic);
+			Error.SetFailure(MoveTemp(Diagnostic), Authored.GetUnitId()); return false;
+		}
+		TMap<FString, FUeAgentCanonicalValueRef> Values;
+		if (bWrapped) Values.Add(TEXT("value"), Result.ToSharedRef());
+		else for (const auto& Field : Result->GetObjectItems()) Values.Add(Field.Key, Field.Value);
+		Out.Emplace(Actual.WithValues(MoveTemp(Values)));
+		return true;
+	}
+
+	bool TryRebaseSemanticWorkspace(const FResolvedSemanticWorkspaceRef& Input, const FAuthoringModelRef& Current,
 		const FUeAgentStateRevision& Revision, FUeAgentResourceTracker& Resources,
-		FResolvedSemanticWorkspaceRef& OutWorkspace, FSemanticWorkspaceImportError& OutError)
+		FResolvedSemanticWorkspaceRef& OutWorkspace, FSemanticWorkspaceImportError& OutError,
+		const FScopedCurrentCoverage* Coverage)
 	{
 		OutError.Reset();
+		FResolvedSemanticWorkspaceRef Source = Input;
+		FWorkspaceError AcceptedError;
+		const FString AcceptedRoot = GetAcceptedSemanticWorkspaceRoot();
+		const auto AcceptedSource = GetAcceptedSemanticWorkspace(AcceptedRoot);
+		if (AcceptedSource.Get() == &Input.Get()
+			&& !TryResolveUnconsumedAuthoring(AcceptedRoot, Input, Resources, Source, AcceptedError)) {
+			OutError = AcceptedError.GetDiagnostic(); return false;
+		}
 		OutWorkspace = Source;
-		if (Source->GetBaseStateRevision() == Revision && Source->GetModel()->GetBaseRevision() == Current->GetBaseRevision()) return true;
-		FRebase Rebase{Source, Current, Resources};
+		const bool bLocalState = Source->GetSourceKind() == EWorkspaceSourceKind::Directory
+			&& Source->GetMode() == ESemanticWorkspaceMode::State;
+		if (bLocalState && !Source->GetEditedUnitIds().IsSet()) {
+			FWorkspaceError Error;
+			FailWorkspaceDataflowHandoff(Error, TEXT("workspace_rebase"), TEXT("edited_unit_ids"), AcceptedRoot,
+				TEXT("unset"), TEXT("the source resolver's explicit edit set"), TEXT("ReadDirectorySource / typed intent resolution"));
+			OutError = Error.GetDiagnostic(); return false;
+		}
+		FRebase Rebase{Source, Current, Resources, Coverage};
+		if (Coverage && (!Source->GetStructuralEdits().IsEmpty() || !Source->GetEditedUnitIds().IsSet())) {
+			Rebase.Issue(FString(), FString(), TEXT("workspace_current_scope_incomplete"), TEXT("Structural or unknown edits require a complete current capture."));
+			return Rebase.Fail(OutError);
+		}
+		if (Source->GetBaseStateRevision() == Revision
+			&& (!Coverage || Coverage->KeyedValueScopes.IsEmpty())) {
+			// A matching revision does not itself establish a partial capture's
+			// declared coverage. Repeated preparation may reuse the rebase result,
+			// but must still bind its edited units and dependencies to this scope.
+			if (Coverage) for (const FString& Id : *Source->GetEditedUnitIds()) {
+				const auto* Edit = Source->GetModel()->FindUnit(Id);
+				const auto* Now = Current->FindUnit(Id);
+				if (!Coverage->ValueUnits.Contains(Id) || !Edit || !Now) {
+					Rebase.Issue(Id, FString(), TEXT("workspace_current_scope_incomplete"), TEXT("An authored edit is outside the actual current observation scope."));
+					continue;
+				}
+				if (const TCHAR* Field = BindingDifference(*Edit, *Now))
+					Rebase.Changed(Id, TEXT("workspace_binding_changed"), FString::Printf(TEXT("The edited unit's %s binding differs from the current asset."), Field));
+				Rebase.Dependencies(*Edit);
+				Rebase.Dependencies(*Now);
+			}
+			if (!Rebase.Issues.IsEmpty() || !Rebase.EvaluationFailure.IsEmpty()) return Rebase.Fail(OutError);
+			return true;
+		}
 		const auto& Proposed = Source->GetModel();
 		if (Proposed->GetContractId() != Current->GetContractId() || Proposed->GetContractVersion() != Current->GetContractVersion()
 			|| Proposed->GetProfileId() != Current->GetProfileId())
@@ -373,21 +494,32 @@ namespace UE::UAI::Composition::HjsonImport
 			Rebase.Issues.Add(MoveTemp(Issue));
 			return Rebase.Fail(OutError, TEXT("workspace_contract_changed"));
 		}
-		if (!Source->GetEditedUnitIds().IsSet() || Source->GetBaselineUnitHashes().IsEmpty())
+		if (!Source->GetEditedUnitIds().IsSet())
 		{
 			Rebase.Issue(FString(), FString(), TEXT("workspace_edit_baseline_unavailable"),
-				!Source->GetEditedUnitIds().IsSet() ? TEXT("The workspace does not record which units were edited.")
-				: TEXT("The workspace has no baseline records for rebasing edits."));
+				TEXT("The workspace does not record which units were edited."));
 			return Rebase.Fail(OutError, TEXT("workspace_edit_baseline_unavailable"));
 		}
 		TMap<FString, FSemanticUnit> Replacements;
+		bool bMergedSourceValues = false;
 		for (const FString& Id : *Source->GetEditedUnitIds())
 		{
+			if (Coverage && !Coverage->ValueUnits.Contains(Id)) {
+				Rebase.Issue(Id, FString(), TEXT("workspace_current_scope_incomplete"), TEXT("An authored edit is outside the actual current observation scope.")); continue;
+			}
 			const auto* Edit = Proposed->FindUnit(Id);
 			const auto* Now = Current->FindUnit(Id);
-			const auto* Base = Source->GetBaselineUnits().Find(Id);
-			const auto* Hash = Source->GetBaselineUnitHashes().Find(Id);
-			if (!Edit || !Now || !Hash) { Rebase.Changed(Id, TEXT("workspace_edited_target_removed"),
+			TOptional<FSemanticUnit> AddressedBaseline;
+			const FSemanticUnit* Base = nullptr;
+			if (const auto* Keyed = Coverage ? Coverage->KeyedValueScopes.Find(Id) : nullptr) {
+				FWorkspaceError Error;
+				if (!Source->TryReadBaselineMembers(Id, Keyed->RootField, Keyed->ObservedKeys, Resources, AddressedBaseline, Error)) {
+					Rebase.AddIssue(Id, Error.GetJsonPointer(), Error.GetDiagnostic(), true); continue;
+				}
+				if (AddressedBaseline.IsSet()) Base = &AddressedBaseline.GetValue();
+			} else Base = Source->FindBaselineUnit(Id);
+			FString Hash = Source->ReadBaselineUnitHash(Id);
+			if (!Edit || !Now || Hash.IsEmpty()) { Rebase.Changed(Id, TEXT("workspace_edited_target_removed"),
 				!Edit ? TEXT("The edited unit is missing from the authored workspace.") : !Now ? TEXT("The edited target was removed from the current asset.")
 				: TEXT("The edited unit has no recorded baseline.")); continue; }
 			const TCHAR* BindingField = BindingDifference(*Edit, *Now);
@@ -397,11 +529,68 @@ namespace UE::UAI::Composition::HjsonImport
 				FString::Printf(TEXT("The edited unit's %s binding differs from the current asset."), BindingField)); continue; }
 			Rebase.Dependencies(*Edit);
 			Rebase.Dependencies(*Now);
-			FString CurrentHash, EditHash;
+			TOptional<FSemanticUnit> ScopedCurrent, ScopedBaseline;
+			if (const auto* Scope = Coverage ? Coverage->KeyedValueScopes.Find(Id) : nullptr) {
+				FKeyedItemProjectionContract Contract;
+				const auto* BeforeItems = Base ? Base->GetValues().Find(Scope->RootField) : nullptr;
+				const auto* CurrentItems = Now->GetValues().Find(Scope->RootField);
+				const auto* EditedItems = Edit->GetValues().Find(Scope->RootField);
+				if (!TryGetKeyedItemProjectionContract(Scope->RootField, Contract)
+					|| (Contract.bIdentityFromMapKey && !Contract.bEmitOperationRecords)
+					|| !BeforeItems || !CurrentItems || !EditedItems
+					|| (*BeforeItems)->GetKind() != EUeAgentValueKind::Object || (*CurrentItems)->GetKind() != EUeAgentValueKind::Object
+					|| (*EditedItems)->GetKind() != EUeAgentValueKind::Object) {
+					Rebase.Issue(Id, FString(), TEXT("workspace_current_scope_incomplete"), TEXT("The partial keyed scope has no complete accepted baseline and current keyed observations.")); continue;
+				}
+				bool bComplete = true;
+				for (const auto& Item : (*EditedItems)->GetObjectItems()) bComplete &= Scope->ObservedKeys.Contains(Item.Key);
+				if (!bComplete) { Rebase.Issue(Id, FString(), TEXT("workspace_current_scope_incomplete"), TEXT("An authored keyed operation is outside the declared current key scope.")); continue; }
+				TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items, BeforeSubset;
+				for (const auto& Item : (*BeforeItems)->GetObjectItems())
+					if (Scope->ObservedKeys.Contains(Item.Key)) BeforeSubset.Add(Item);
+				for (const auto& Item : (*CurrentItems)->GetObjectItems())
+					if (Scope->ObservedKeys.Contains(Item.Key)) Items.Add(Item);
+				FUeAgentCanonicalValuePtr Observed, Captured;
+				FUeAgentStateSemanticError BuildError;
+				if (!FUeAgentCanonicalValue::TryObject(MoveTemp(Items), Resources, Observed, BuildError)) {
+					Rebase.AddIssue(Id, FString(), MoveTemp(BuildError), true); continue;
+				}
+				if (!FUeAgentCanonicalValue::TryObject(MoveTemp(BeforeSubset), Resources, Captured, BuildError)) {
+					Rebase.AddIssue(Id, FString(), MoveTemp(BuildError), true); continue;
+				}
+				// Compare only the actual addressed members. Unchanged membership
+				// stays in the source baseline, without copying or hashing its values.
+				TMap<FString, FUeAgentCanonicalValueRef> Values = Base->GetValues();
+				Values.Add(Scope->RootField, Captured.ToSharedRef());
+				ScopedBaseline.Emplace(Base->WithValues(MoveTemp(Values)));
+				Values = Base->GetValues();
+				Values.Add(Scope->RootField, Observed.ToSharedRef());
+				ScopedCurrent.Emplace(Base->WithValues(MoveTemp(Values)));
+				Base = &ScopedBaseline.GetValue();
+				Now = &ScopedCurrent.GetValue();
+			}
+			FString CurrentHash, EditHash, SemanticBaselineHash;
+			if (ScopedBaseline.IsSet()) {
+				bool bSame = false;
+				FWorkspaceError Error;
+				if (!TryAreSemanticUnitValuesEquivalent(*Base, *Now, Resources, bSame, Error)) {
+					Rebase.AddIssue(Id, FString(), Error.GetDiagnostic(), true); continue;
+				}
+				if (bSame) { Replacements.Add(Id, *Edit); continue; }
+				if (!TryAreSemanticUnitValuesEquivalent(*Edit, *Now, Resources, bSame, Error)) {
+					Rebase.AddIssue(Id, FString(), Error.GetDiagnostic(), true); continue;
+				}
+				if (bSame) continue;
+			} else {
+			if (Base) {
+				if (!Rebase.Hash(*Base, SemanticBaselineHash)) continue;
+				Hash = SemanticBaselineHash;
+			}
 			if (!Rebase.Hash(*Now, CurrentHash)) continue;
-			if (*Hash == CurrentHash) { Replacements.Add(Id, *Edit); continue; }
+			if (Hash == CurrentHash) { Replacements.Add(Id, *Edit); continue; }
 			if (!Rebase.Hash(*Edit, EditHash)) continue;
 			if (EditHash == CurrentHash) continue;
+			}
 			if (!Base) { Rebase.Issue(Id, FString(), TEXT("workspace_edit_baseline_unavailable"), TEXT("The captured baseline values for this edit are unavailable.")); continue; }
 			// Composition stores native object values as their top-level fields;
 			// scalar values and document property leaves use the explicit value wrapper.
@@ -479,6 +668,7 @@ namespace UE::UAI::Composition::HjsonImport
 			if (bWrapped) Values.Add(TEXT("value"), Merged.ToSharedRef());
 			else for (const auto& Pair : Merged->GetObjectItems()) Values.Add(Pair.Key, Pair.Value);
 			Replacements.Add(Id, Now->WithValues(MoveTemp(Values)));
+			bMergedSourceValues = true;
 		}
 		for (const auto& Edit : Source->GetStructuralEdits())
 		{
@@ -487,30 +677,58 @@ namespace UE::UAI::Composition::HjsonImport
 			for (const FString& Id : Affected)
 			{
 				if (Id.IsEmpty()) continue;
-				const auto* Hash = Source->GetBaselineUnitHashes().Find(Id);
+				const FString Hash = Source->ReadBaselineUnitHash(Id);
 				const auto* Now = Current->FindUnit(Id);
 				FString CurrentHash;
-				if (Hash && Now && !Rebase.Hash(*Now, CurrentHash)) continue;
-				if (Hash && (!Now || *Hash != CurrentHash)) Rebase.Changed(Id, TEXT("workspace_structure_changed"),
+				if (!Hash.IsEmpty() && Now && !Rebase.Hash(*Now, CurrentHash)) continue;
+				if (!Hash.IsEmpty() && (!Now || Hash != CurrentHash)) Rebase.Changed(Id, TEXT("workspace_structure_changed"),
 					Now ? TEXT("A target of the structural edit changed since export.") : TEXT("A target of the structural edit was removed since export."));
-				else if (!Hash && Now) Rebase.Issue(Id, FString(), TEXT("workspace_created_identity_conflict"),
+				else if (Hash.IsEmpty() && Now) Rebase.Issue(Id, FString(), TEXT("workspace_created_identity_conflict"),
 					TEXT("A unit created by this workspace already exists in the current asset."));
 				if (const auto* Unit = Proposed->FindUnit(Id)) Rebase.Dependencies(*Unit);
 			}
 		}
 		if (!Rebase.EvaluationFailure.IsEmpty() || !Rebase.Issues.IsEmpty()) return Rebase.Fail(OutError);
+		if (!Proposed->IsCompiled()) {
+			// Current facts/conflicts above concern the explicit edits. Keep their
+			// merged values as an overlay; no second complete Units array or graph.
+			const int32 Count = Replacements.Num();
+			OutWorkspace = Source->Rebind(FAuthoringModel::RebasePropertySourceView(Proposed,
+				Current->GetBaseRevision(), MoveTemp(Replacements)), Revision);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=property_intent_rebase replacements=%d full_compile=false complete_units_copy=false"), Count);
+			return true;
+		}
+		if (Coverage && !bMergedSourceValues) {
+			// The scoped current observation checked the edits and dependencies,
+			// but did not change the complete, already compiled authoring input.
+			// Bind that actual observation on the workspace; do not recompile the
+			// source solely to stamp a partial capture's revision into its digest.
+			OutWorkspace = Source->Rebind(Proposed, Revision);
+			UE_LOG(LogTemp, Display, TEXT("UAI import timing phase=structured_intent_rebase compiled_source_reused=true replacements=%d full_compile=false"), Replacements.Num());
+			return true;
+		}
+		if (bLocalState) {
+			FWorkspaceError Error;
+			FailWorkspaceDataflowHandoff(Error, TEXT("workspace_rebase"), TEXT("local merged-value view"), AcceptedRoot,
+				TEXT("compiled source would require a complete Units copy and compile"),
+				TEXT("the addressed source view with current facts"), TEXT("ReadDirectorySource / RebasePropertySourceView"));
+			OutError = Error.GetDiagnostic(); return false;
+		}
 		TArray<FSemanticUnit> Units;
-		for (const auto& Unit : Current->GetUnits())
+		// A scoped capture supplies actual facts only for its explicit coverage.
+		// Keep the complete accepted source elsewhere, without claiming it was read.
+		for (const auto& Unit : (Coverage ? Proposed : Current)->GetUnits())
 		{
 			const auto* Replacement = Replacements.Find(Unit.GetUnitId());
 			Units.Add(Replacement ? *Replacement : Unit);
 		}
-		for (const auto& Unit : Proposed->GetUnits())
+		if (!Coverage) for (const auto& Unit : Proposed->GetUnits())
 			if (!Source->GetBaselineUnitHashes().Contains(Unit.GetUnitId()) && !Current->FindUnit(Unit.GetUnitId())) Units.Add(Unit);
 		FAuthoringModelPtr Model;
 		FWorkspaceError Error;
 		if (!TryCompileAuthoringModel(Current->GetContractId(), Current->GetContractVersion(), Current->GetProfileId(),
-			Current->GetBaseRevision(), MoveTemp(Units), Current->GetTargetUnitIds(), Resources, Model, Error))
+			Current->GetBaseRevision(), MoveTemp(Units), (Coverage ? Proposed : Current)->GetTargetUnitIds(), Resources, Model, Error,
+			nullptr, &(Coverage ? Proposed : Current).Get(), nullptr))
 		{
 			OutError = Error.GetDiagnostic();
             if (OutError.Stage.IsEmpty()) OutError.Stage = TEXT("workspace_rebase");

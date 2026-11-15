@@ -155,6 +155,13 @@ namespace UE::UAI::AssetPreview
 		const FString& Target = FString());
 	bool AppendState(const FString& TargetKind,
 		TArray<UeAgentAuthoringState::FStateEntry>& Entries, UE::UAI::Contract::FDiagnostic& OutError);
+	// Read existing state without copying it; return only additional preview state.
+	bool CaptureAdditionalState(const FString& TargetKind,
+		const TArray<UeAgentAuthoringState::FStateEntry>& SourceEntries,
+		TArray<UeAgentAuthoringState::FStateEntry>& AdditionalEntries, UE::UAI::Contract::FDiagnostic& OutError);
+	bool CaptureAdditionalState(const FString& TargetKind,
+		UeAgentAuthoringState::FStateSnapshot::FEntryView SourceEntries,
+		TArray<UeAgentAuthoringState::FStateEntry>& AdditionalEntries, UE::UAI::Contract::FDiagnostic& OutError);
 	bool IsPreviewSemantic(const FString& SemanticId);
 	FString GroupFromSemantic(const FString& SemanticId);
 }

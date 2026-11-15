@@ -7,6 +7,7 @@
 class FJsonObject;
 class FJsonValue;
 class UBlackboardData;
+namespace UeAgentAuthoringState { class FStateSnapshot; }
 namespace UE::UAI::HjsonWorkspace { class FAuthoringModel; class FWorkspaceError; }
 namespace UE::UAI::Composition::HjsonImport
 {
@@ -20,6 +21,8 @@ namespace UeAgentBlackboardAuthoring
 		const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool ReadDocument(
 		UBlackboardData& Blackboard, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError);
+	bool ReadDocument(UBlackboardData& Blackboard, TSharedPtr<FJsonValue>& OutValue,
+		UE::UAI::Contract::FDiagnostic& OutError, TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure);
 	// Called inside the Reflection transaction, which owns checkpoint, persistence and reload.
 	UEAGENTINTERFACE_API bool ApplyDocument(
 		UBlackboardData& Blackboard, const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError);

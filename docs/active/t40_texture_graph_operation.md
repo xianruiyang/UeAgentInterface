@@ -75,19 +75,20 @@ inputs, and live GPU values are not converted into invented asset references.
 Integer inputs preserve their native width through export, import and readback;
 fractional or out-of-range numbers are diagnosed at the input instead of truncated.
 
-Setting edits join the same transaction and complete expected readback as graph
-edits. Invalid enum values fail before source mutation. A final-readback
-rejection restores original dirty memory, package bytes, settings and graph.
+Setting edits join the same native transaction as graph edits. Invalid enum
+values fail before source mutation. Native execution or persistence failures use
+the existing recovery owner. A difference or incomplete final observation is a
+warning; it does not replay or roll back an otherwise successful native change.
 Direct coverage includes IfThenElse settings and identity, Source references,
 OutputSettings structure edits, alias-only changes, and exact ArrayGrid integer
 inputs through public import and persistent reload. Other expressions and
 interface-changing settings have not been exhaustively validated.
 
-Semantic workspace updates use the shared atomic package transaction. Success
-includes persistent reload and final HJSON readback before commit. A failure
-at that final readback restores the pre-import in-memory graph and dirty state
-and the original package on disk. This guarantee belongs to the workspace
-update path; typed compatibility operations retain their own lifecycle contract.
+Workspace updates observe the persisted native result before commit. Default
+committed publication consumes the actual before/after facts; missing observation
+keeps synchronization pending without advancing its watermark or repeating the
+native operation. Explicit incremental/full exports remain available. Typed
+compatibility operations retain their own lifecycle contract.
 
 
 For a missing target, the same public import accepts an inline HJSON source
@@ -117,8 +118,8 @@ and initialization contract; no factory/class path or revision is required.
 Native factory defaults, including the Output node, are preserved. The root
 and requested graph content are created in one atomic transaction, saved and
 reloaded before final readback. Invalid candidates or unsupported fields fail
-before creating the target. A final-readback rejection restores the original
-absence in memory, the asset registry and on disk. Export the new asset to a
+before creating the target. Native creation/save failures retain the existing
+rollback contract; observation warnings do not undo successful creation. Export the new asset to a
 fresh workspace for subsequent edits. This limited initialization uses the
 existing expression-name resolver; it does not claim complete native menus.
 

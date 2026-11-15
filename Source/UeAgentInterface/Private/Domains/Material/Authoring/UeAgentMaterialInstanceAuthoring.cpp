@@ -9,6 +9,7 @@
 #include "VT/RuntimeVirtualTexture.h"
 #include "SparseVolumeTexture/SparseVolumeTexture.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "UObject/ObjectVersion.h"
 #include "Materials/MaterialFunctionInstance.h"
 #include "MaterialEditingLibrary.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
@@ -148,6 +149,116 @@ namespace UeAgentMaterialAuthoring
 			return true;
 		}
 
+		bool CaptureParameterValue(UMaterialInstanceConstant& Instance, const FMaterialParameterInfo& Info,
+			const FMaterialParameterValue& Native, FString& Kind, TSharedPtr<FJsonValue>& Value,
+			TSharedPtr<FJsonValue>& Definition, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			switch (Native.Type)
+			{
+			case EMaterialParameterType::Scalar:
+			{
+				Kind = TEXT("scalar"); FScalarParameterValue Carrier;
+				Carrier.ParameterValue = Native.AsScalar();
+				return CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FScalarParameterValue, ParameterValue), Value, Definition, Error);
+			}
+			case EMaterialParameterType::Vector:
+			{
+				Kind = TEXT("vector"); FVectorParameterValue Carrier;
+				Carrier.ParameterValue = Native.AsLinearColor();
+				return CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FVectorParameterValue, ParameterValue), Value, Definition, Error);
+			}
+			case EMaterialParameterType::Texture:
+			{
+				Kind = TEXT("texture"); FTextureParameterValue Carrier;
+				Carrier.ParameterValue = Native.Texture;
+				return CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FTextureParameterValue, ParameterValue), Value, Definition, Error);
+			}
+			case EMaterialParameterType::StaticSwitch:
+			{
+				Kind = TEXT("static_switch"); FStaticSwitchParameter Carrier;
+				Carrier.Value = Native.AsStaticSwitch();
+				return CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FStaticSwitchParameter, Value), Value, Definition, Error);
+			}
+			case EMaterialParameterType::DoubleVector:
+			{
+				Kind = TEXT("double_vector"); FDoubleVectorParameterValue Carrier;
+				Carrier.ParameterValue = Native.AsVector4d();
+				return CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FDoubleVectorParameterValue, ParameterValue), Value, Definition, Error);
+			}
+			case EMaterialParameterType::TextureCollection:
+			{
+				Kind = TEXT("texture_collection"); FTextureCollectionParameterValue Carrier;
+				Carrier.ParameterValue = Native.TextureCollection;
+				return CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FTextureCollectionParameterValue, ParameterValue), Value, Definition, Error);
+			}
+			case EMaterialParameterType::RuntimeVirtualTexture:
+			{
+				Kind = TEXT("runtime_virtual_texture"); FRuntimeVirtualTextureParameterValue Carrier;
+				Carrier.ParameterValue = Native.RuntimeVirtualTexture;
+				return CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FRuntimeVirtualTextureParameterValue, ParameterValue), Value, Definition, Error);
+			}
+			case EMaterialParameterType::SparseVolumeTexture:
+			{
+				Kind = TEXT("sparse_volume_texture"); FSparseVolumeTextureParameterValue Carrier;
+				Carrier.ParameterValue = Native.SparseVolumeTexture;
+				return CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FSparseVolumeTextureParameterValue, ParameterValue), Value, Definition, Error);
+			}
+			case EMaterialParameterType::Font:
+			{
+				Kind = TEXT("font"); FFontParameterValue Carrier(Info, Native.Font.Value, Native.Font.Page);
+				return CaptureCompound(Instance, Carrier, Value, Definition, Error);
+			}
+			case EMaterialParameterType::StaticComponentMask:
+			{
+				Kind = TEXT("static_component_mask"); FStaticComponentMaskParameter Carrier;
+				const auto Mask = Native.AsStaticComponentMask();
+				Carrier.R = Mask.R; Carrier.G = Mask.G; Carrier.B = Mask.B; Carrier.A = Mask.A;
+				return CaptureCompound(Instance, Carrier, Value, Definition, Error);
+			}
+			default:
+				Error = UnsupportedParameterKind(FString::FromInt(static_cast<int32>(Native.Type)), Info.Name.ToString());
+				Error.SourceKind = TEXT("native_result");
+				return false;
+			}
+		}
+
+		bool AppendParameterDefault(UMaterialInstanceConstant& Instance, EMaterialParameterType Type,
+			const FMaterialParameterInfo& Info, TArray<FInstanceParameterDefault>* Defaults,
+			UE::UAI::Contract::FDiagnostic& Error)
+		{
+			if (!Defaults) return true;
+			auto& Default = Defaults->AddDefaulted_GetRef();
+			if (Type == EMaterialParameterType::Scalar && Info.Association == EMaterialParameterAssociation::GlobalParameter
+				&& Info.Index == INDEX_NONE)
+			{
+				static const FName DepthBias(TEXT("RefractionDepthBias")), LegacyBias(TEXT("RefractionBias"));
+				const FName NativeName = Instance.GetLinkerUEVersion() >= VER_UE4_REFRACTION_BIAS_TO_REFRACTION_DEPTH_BIAS ? DepthBias : LegacyBias;
+				if (Info.Name == NativeName && Instance.ScalarParameterValues.ContainsByPredicate([&](const FScalarParameterValue& Local) {
+					return Local.ParameterInfo == Info;
+				}))
+				{
+					// The material instance editor resets this local scalar through
+					// the parent's native refraction setting, outside the expression parameter tree.
+					float Bias = 0.f;
+					if (!Instance.Parent || !Instance.Parent->GetRefractionSettings(Bias)) return true;
+					Default.SourceIdentity = Instance.Parent->GetPathName();
+					Default.Provenance = TEXT("UMaterialInstance parent GetRefractionSettings; excludes local refraction bias override");
+					FString Kind;
+					TSharedPtr<FJsonValue> Definition;
+					return CaptureParameterValue(Instance, Info, FMaterialParameterValue(Bias), Kind, Default.Value, Definition, Error);
+				}
+			}
+			Default.SourceIdentity = Instance.GetPathName();
+			Default.Provenance = TEXT("UMaterialInterface.GetParameterDefaultValue; inherited overrides and native layer mapping; excludes local override");
+			FMaterialParameterMetadata NativeDefault;
+			// The engine skips this instance's override, retains parent overrides,
+			// and remaps layer indices while traversing the native inheritance chain.
+			if (!Instance.GetParameterDefaultValue(Type, Info, NativeDefault)) return true;
+			FString Kind;
+			TSharedPtr<FJsonValue> Definition;
+			return CaptureParameterValue(Instance, Info, NativeDefault.Value, Kind, Default.Value, Definition, Error);
+		}
+
 		template <typename T>
 		bool DecodeValue(T& Carrier, const FName Field, const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError)
 		{
@@ -173,10 +284,12 @@ namespace UeAgentMaterialAuthoring
 
 	bool CaptureInstanceParameters(UMaterialInstanceConstant& Instance,
 		TArray<TSharedPtr<FJsonValue>>& OutParameters, UE::UAI::Contract::FDiagnostic& OutError,
-		TArray<TSharedPtr<FJsonValue>>* OutDefinitions)
+		TArray<TSharedPtr<FJsonValue>>* OutDefinitions,
+		TArray<FInstanceParameterDefault>* OutDefaults)
 	{
 		OutParameters.Reset();
 		if (OutDefinitions) OutDefinitions->Reset();
+		if (OutDefaults) OutDefaults->Reset();
 		TArray<FMaterialNiagaraGraphEffectiveParameter> Parameters;
 		FString Revision, Evidence;
 		FMaterialNiagaraGraphAdapterError Error;
@@ -216,55 +329,42 @@ namespace UeAgentMaterialAuthoring
 			Value->SetNumberField(TEXT("parameter_index"), Identity.GetParameterIndex());
 			Value->SetBoolField(TEXT("authored_override"), Parameter.IsOverridden());
 			TSharedPtr<FJsonValue> NativeValue, Definition;
+			const FMaterialParameterInfo Info(FName(*Identity.GetParameterName()),
+				Identity.GetParameterAssociation() == TEXT("global") ? EMaterialParameterAssociation::GlobalParameter
+				: Identity.GetParameterAssociation() == TEXT("layer") ? EMaterialParameterAssociation::LayerParameter : EMaterialParameterAssociation::BlendParameter,
+				Identity.GetParameterIndex());
+			FMaterialParameterValue Native;
 			switch (Identity.GetParameterType())
 			{
 			case EMaterialNiagaraGraphParameterType::Scalar:
-			{
-				Value->SetStringField(TEXT("parameter_kind"), TEXT("scalar"));
-				FScalarParameterValue Carrier;
-				Carrier.ParameterValue = Parameter.GetScalarValue();
-				if (!CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FScalarParameterValue, ParameterValue), NativeValue, Definition, OutError)) return false;
+				Native = FMaterialParameterValue(Parameter.GetScalarValue());
 				break;
-			}
 			case EMaterialNiagaraGraphParameterType::Vector:
-			{
-				Value->SetStringField(TEXT("parameter_kind"), TEXT("vector"));
-				FVectorParameterValue Carrier;
-				Carrier.ParameterValue = Parameter.GetVectorValue();
-				if (!CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FVectorParameterValue, ParameterValue), NativeValue, Definition, OutError)) return false;
+				Native = FMaterialParameterValue(Parameter.GetVectorValue());
 				break;
-			}
 			case EMaterialNiagaraGraphParameterType::Texture:
 			{
-				Value->SetStringField(TEXT("parameter_kind"), TEXT("texture"));
-				FTextureParameterValue Carrier;
-				const FMaterialParameterInfo Info(FName(*Identity.GetParameterName()),
-					Identity.GetParameterAssociation() == TEXT("global") ? EMaterialParameterAssociation::GlobalParameter
-					: Identity.GetParameterAssociation() == TEXT("layer") ? EMaterialParameterAssociation::LayerParameter : EMaterialParameterAssociation::BlendParameter,
-					Identity.GetParameterIndex());
 				UTexture* Texture = nullptr;
 				Instance.GetTextureParameterValue(Info, Texture);
 				if (const auto* Local = Instance.TextureParameterValues.FindByPredicate([&](const auto& P) { return P.ParameterInfo == Info; })) Texture = Local->ParameterValue;
-				Carrier.ParameterValue = Texture;
-				if (!CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FTextureParameterValue, ParameterValue), NativeValue, Definition, OutError)) return false;
+				Native = FMaterialParameterValue(Texture);
 				break;
 			}
 			case EMaterialNiagaraGraphParameterType::StaticSwitch:
-			{
-				Value->SetStringField(TEXT("parameter_kind"), TEXT("static_switch"));
-				FStaticSwitchParameter Carrier;
-				Carrier.Value = Parameter.GetBooleanValue();
-				if (!CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FStaticSwitchParameter, Value), NativeValue, Definition, OutError)) return false;
+				Native = FMaterialParameterValue(Parameter.GetBooleanValue());
 				break;
-			}
 			default:
 				OutError = UnsupportedParameterKind(FString::FromInt(static_cast<int32>(Identity.GetParameterType())), Identity.GetParameterName());
 				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
+			FString Kind;
+			if (!CaptureParameterValue(Instance, Info, Native, Kind, NativeValue, Definition, OutError)) return false;
+			Value->SetStringField(TEXT("parameter_kind"), Kind);
 			Value->SetField(TEXT("value"), NativeValue);
 			if (OutDefinitions) OutDefinitions->Add(Definition);
 			OutParameters.Add(MakeShared<FJsonValueObject>(Value));
+			if (!AppendParameterDefault(Instance, Native.Type, Info, OutDefaults, OutError)) return false;
 		}
 		for (const EMaterialParameterType Type : {EMaterialParameterType::DoubleVector, EMaterialParameterType::TextureCollection,
 			EMaterialParameterType::Font, EMaterialParameterType::RuntimeVirtualTexture,
@@ -288,52 +388,7 @@ namespace UeAgentMaterialAuthoring
 				const auto& Meta = Pair.Value;
 				FString Kind;
 				TSharedPtr<FJsonValue> NativeValue, Definition;
-				switch (Type)
-				{
-				case EMaterialParameterType::DoubleVector:
-				{
-					Kind = TEXT("double_vector"); FDoubleVectorParameterValue Carrier;
-					Carrier.ParameterValue = Meta.Value.AsVector4d();
-					if (!CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FDoubleVectorParameterValue, ParameterValue), NativeValue, Definition, OutError)) return false;
-					break;
-				}
-				case EMaterialParameterType::TextureCollection:
-				{
-					Kind = TEXT("texture_collection"); FTextureCollectionParameterValue Carrier;
-					Carrier.ParameterValue = Meta.Value.TextureCollection;
-					if (!CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FTextureCollectionParameterValue, ParameterValue), NativeValue, Definition, OutError)) return false;
-					break;
-				}
-				case EMaterialParameterType::RuntimeVirtualTexture:
-				{
-					Kind = TEXT("runtime_virtual_texture"); FRuntimeVirtualTextureParameterValue Carrier;
-					Carrier.ParameterValue = Meta.Value.RuntimeVirtualTexture;
-					if (!CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FRuntimeVirtualTextureParameterValue, ParameterValue), NativeValue, Definition, OutError)) return false;
-					break;
-				}
-				case EMaterialParameterType::SparseVolumeTexture:
-				{
-					Kind = TEXT("sparse_volume_texture"); FSparseVolumeTextureParameterValue Carrier;
-					Carrier.ParameterValue = Meta.Value.SparseVolumeTexture;
-					if (!CaptureValue(Instance, Carrier, GET_MEMBER_NAME_CHECKED(FSparseVolumeTextureParameterValue, ParameterValue), NativeValue, Definition, OutError)) return false;
-					break;
-				}
-				case EMaterialParameterType::Font:
-				{
-					Kind = TEXT("font"); FFontParameterValue Carrier(Info, Meta.Value.Font.Value, Meta.Value.Font.Page);
-					if (!CaptureCompound(Instance, Carrier, NativeValue, Definition, OutError)) return false;
-					break;
-				}
-				case EMaterialParameterType::StaticComponentMask:
-				{
-					Kind = TEXT("static_component_mask"); FStaticComponentMaskParameter Carrier;
-					const auto Mask = Meta.Value.AsStaticComponentMask();
-					Carrier.R = Mask.R; Carrier.G = Mask.G; Carrier.B = Mask.B; Carrier.A = Mask.A;
-					if (!CaptureCompound(Instance, Carrier, NativeValue, Definition, OutError)) return false;
-					break;
-				}
-				default: return false;
-				}
+				if (!CaptureParameterValue(Instance, Info, Meta.Value, Kind, NativeValue, Definition, OutError)) return false;
 				auto Value = MakeShared<FJsonObject>();
 				Value->SetStringField(TEXT("parameter_kind"), Kind);
 				Value->SetStringField(TEXT("parameter_name"), Info.Name.ToString());
@@ -344,6 +399,7 @@ namespace UeAgentMaterialAuthoring
 				Value->SetField(TEXT("value"), NativeValue);
 				OutParameters.Add(MakeShared<FJsonValueObject>(Value));
 				if (OutDefinitions) OutDefinitions->Add(Definition);
+				if (!AppendParameterDefault(Instance, Type, Info, OutDefaults, OutError)) return false;
 			}
 		}
 		return true;

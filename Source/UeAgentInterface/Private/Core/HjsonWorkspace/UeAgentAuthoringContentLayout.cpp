@@ -1,5 +1,6 @@
 #include "Core/HjsonWorkspace/UeAgentAuthoringContentLayout.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 #include "Utilities/UeAgentReadableName.h"
 
 #include "Misc/Paths.h"
@@ -8,6 +9,21 @@
 namespace UE::UAI::HjsonWorkspace
 {
 	using namespace StateSemantic;
+	EAuthoringContentDirectory GetAuthoringContentDirectoryRole(ESemanticUnitKind Kind, const FString& SemanticType)
+	{
+		if (Kind == ESemanticUnitKind::TargetState || Kind == ESemanticUnitKind::EntityState)
+			return EAuthoringContentDirectory::Placement;
+		if ((Kind == ESemanticUnitKind::ItemState || Kind == ESemanticUnitKind::StructureState)
+			&& !SemanticType.StartsWith(TEXT("uai.authoring.surface.")))
+			return EAuthoringContentDirectory::NamedChild;
+		return EAuthoringContentDirectory::Inherited;
+	}
+
+	bool IsInternalAuthoringStructureSurface(ESemanticUnitKind Kind, const FString& SemanticType, int32 ValueCount)
+	{
+		return Kind == ESemanticUnitKind::StructureState && ValueCount == 0 && SemanticType.StartsWith(TEXT("uai.authoring.surface."));
+	}
+
 	FString MakeAuthoringContentPathSegment(const FString& Name)
 	{
 		FString Result = FPaths::MakeValidFileName(Name);
@@ -41,6 +57,24 @@ namespace UE::UAI::HjsonWorkspace
 			const TCHAR* Name;
 			EContentType Type;
 		};
+
+		enum class EPropertyContent : uint8
+		{
+			None, Sequence, Montage, Pose, Skeleton, Physics, StaticMesh, Pcg, MaterialParameters, Curve
+		};
+
+		EPropertyContent PropertyContent(const FString& SemanticType, const FString& Role)
+		{
+			if (SemanticType == TEXT("uai.semantic.animation.anim_sequence.document")) return EPropertyContent::Sequence;
+			if (SemanticType == TEXT("uai.semantic.animation.anim_montage.document")) return EPropertyContent::Montage;
+			if (SemanticType == TEXT("uai.semantic.animation.pose_asset.document")) return EPropertyContent::Pose;
+			if (SemanticType == TEXT("uai.semantic.animation.skeleton.document")) return EPropertyContent::Skeleton;
+			if (SemanticType == TEXT("uai.semantic.reflection.physics_asset.profile_state")) return EPropertyContent::Physics;
+			if (SemanticType == TEXT("uai.semantic.reflection.static_mesh.profile_state")) return EPropertyContent::StaticMesh;
+			if (SemanticType == TEXT("uai.semantic.reflection.pcg_data_asset.profile_state")) return EPropertyContent::Pcg;
+			if (SemanticType == TEXT("uai.semantic.reflection.material_parameter_collection.profile_state")) return EPropertyContent::MaterialParameters;
+			return Role == TEXT("curve") ? EPropertyContent::Curve : EPropertyContent::None;
+		}
 
 		struct FContentContext
 		{
@@ -140,6 +174,11 @@ namespace UE::UAI::HjsonWorkspace
 		}
 	}
 
+	bool HasAuthoringPropertyContent(const FString& SemanticType, const FString& Role)
+	{
+		return PropertyContent(SemanticType, Role) != EPropertyContent::None;
+	}
+
 	bool TryOrganizeAuthoringContent(const FString& SemanticType, const FString& Role,
 		FUeAgentCanonicalValuePtr& VisibleRow, FPublishAuthoringContent Publish,
 		ContextResource::FUeAgentResourceTracker& Resources, FWorkspaceError& OutError)
@@ -183,8 +222,9 @@ namespace UE::UAI::HjsonWorkspace
 		});
 		if (!Value || Value->Value->GetKind() != EUeAgentValueKind::Object) return true;
 		FUeAgentCanonicalValuePtr Document = Value->Value;
+		const EPropertyContent Content = PropertyContent(SemanticType, Role);
 		auto OrganizeDocument = [&]() -> bool {
-		if (SemanticType == TEXT("uai.semantic.animation.anim_sequence.document"))
+		if (Content == EPropertyContent::Sequence)
 			return OrganizeFields(Document, {
 				{TEXT("bone_tracks"), EContentType::SampleMap},
 				{TEXT("float_curves"), EContentType::CurveMap},
@@ -192,30 +232,30 @@ namespace UE::UAI::HjsonWorkspace
 				{TEXT("notify_tracks"), EContentType::Events},
 				{TEXT("notifies"), EContentType::Events},
 				{TEXT("sync_markers"), EContentType::Events}}, FString(), Context);
-		if (SemanticType == TEXT("uai.semantic.animation.anim_montage.document"))
+		if (Content == EPropertyContent::Montage)
 			return OrganizeFields(Document, {
 				{TEXT("slots"), EContentType::Timeline}, {TEXT("sections"), EContentType::Timeline},
 				{TEXT("notify_tracks"), EContentType::Events}, {TEXT("notifies"), EContentType::Events}}, FString(), Context);
-		if (SemanticType == TEXT("uai.semantic.animation.pose_asset.document"))
+		if (Content == EPropertyContent::Pose)
 			return OrganizeFields(Document, {{TEXT("pose_data"), EContentType::Samples}}, FString(), Context);
-		if (SemanticType == TEXT("uai.semantic.animation.skeleton.document"))
+		if (Content == EPropertyContent::Skeleton)
 			return OrganizeFields(Document, {
 				{TEXT("sockets"), EContentType::Hierarchy}, {TEXT("virtual_bones"), EContentType::Hierarchy},
 				{TEXT("slot_groups"), EContentType::Hierarchy}, {TEXT("retargeting"), EContentType::Hierarchy},
 				{TEXT("bones"), EContentType::Hierarchy}}, FString(), Context);
-		if (SemanticType == TEXT("uai.semantic.reflection.physics_asset.profile_state"))
+		if (Content == EPropertyContent::Physics)
 			return OrganizeFields(Document, {
 				{TEXT("bodies"), EContentType::RecordMap}, {TEXT("constraints"), EContentType::RecordMap}}, FString(), Context);
-		if (SemanticType == TEXT("uai.semantic.reflection.static_mesh.profile_state"))
+		if (Content == EPropertyContent::StaticMesh)
 			return OrganizeFields(Document, {
 				{TEXT("collision"), EContentType::Settings}, {TEXT("build_settings"), EContentType::Settings},
 				{TEXT("sockets"), EContentType::Hierarchy}}, FString(), Context);
-		if (SemanticType == TEXT("uai.semantic.reflection.pcg_data_asset.profile_state"))
+		if (Content == EPropertyContent::Pcg)
 			return OrganizeFields(Document, {{TEXT("sets"), EContentType::Samples}}, FString(), Context);
-		if (SemanticType == TEXT("uai.semantic.reflection.material_parameter_collection.profile_state"))
+		if (Content == EPropertyContent::MaterialParameters)
 			return OrganizeFields(Document, {
 				{TEXT("scalars"), EContentType::Records}, {TEXT("vectors"), EContentType::Records}}, FString(), Context);
-		if (Role == TEXT("curve"))
+		if (Content == EPropertyContent::Curve)
 			return OrganizeValue(Document, EContentType::Curves, TEXT("curve"), Context);
 		return true;
 		};

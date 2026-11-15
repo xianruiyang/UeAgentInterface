@@ -47,6 +47,7 @@
 #include "Misc/SecureHash.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/SoftObjectPath.h"
@@ -122,11 +123,22 @@ namespace
 			// and persistence. Never publish it to the asset registry.
 			const EObjectFlags EligibilityFlags = RF_Public | RF_Transient;
 			const EObjectFlags OriginalFlags = InBlueprint.GetFlags() & EligibilityFlags;
+            UPackage* WorkingPackage = Cast<UPackage>(InBlueprint.GetOuter());
+            const bool bRestoreTransientPackage = WorkingPackage && WorkingPackage != GetTransientPackage()
+                && WorkingPackage->HasAnyFlags(RF_Transient);
+            ON_SCOPE_EXIT
+            {
+                InBlueprint.ClearFlags(EligibilityFlags);
+                InBlueprint.SetFlags(OriginalFlags);
+                if (bRestoreTransientPackage) WorkingPackage->SetFlags(RF_Transient);
+            };
 			InBlueprint.ClearFlags(RF_Transient);
 			InBlueprint.SetFlags(RF_Public);
+            // UObject::IsAsset also rejects a transient outer package. A private
+            // validation package must borrow eligibility for this synchronous
+            // registration only; never make the global transient package eligible.
+            if (bRestoreTransientPackage) WorkingPackage->ClearFlags(RF_Transient);
 			FBlueprintActionDatabase::Get().RefreshAssetActions(&InBlueprint);
-			InBlueprint.ClearFlags(EligibilityFlags);
-			InBlueprint.SetFlags(OriginalFlags);
 		}
 
 		~FWorkingBlueprintActionScope()
@@ -1409,6 +1421,66 @@ namespace
 			BlueprintCandidateScopeMessage(Params), TEXT("blueprint.node.candidates"));
 	}
 
+    void ReportMissingBlueprintMember(const FSearchParams& Params, const FString& Name,
+        TArray<FBlueprintActionEntry>& Entries)
+    {
+        UBlueprint* Blueprint = LoadBlueprint(Params.AssetPath);
+        if (!Blueprint) return;
+        FString Member = Params.RequiredAuthoringSelectors.FindRef(TEXT("variable_name"));
+        // Public inputs contain name/select only. This mapping is diagnostic
+        // evidence from this Blueprint's declarations, never a creation fallback.
+        if (Member.IsEmpty())
+            for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
+            {
+                const FString VariableName = Variable.VarName.ToString();
+                const FString Base = BuildCandidateBaseName(TEXT("blueprint_variable_node"), VariableName,
+                    ReadableSemanticName(VariableName) + TEXT(" (Self)"));
+                if (Name.Equals(TEXT("Get ") + Base, ESearchCase::IgnoreCase)
+                    || Name.Equals(TEXT("Set ") + Base, ESearchCase::IgnoreCase))
+                {
+                    Member = VariableName;
+                    break;
+                }
+            }
+        const FName MemberName(*Member);
+        const FProperty* SkeletonField = Blueprint->SkeletonGeneratedClass
+            ? FindFProperty<FProperty>(Blueprint->SkeletonGeneratedClass, MemberName) : nullptr;
+        const FProperty* GeneratedField = Blueprint->GeneratedClass
+            ? FindFProperty<FProperty>(Blueprint->GeneratedClass, MemberName) : nullptr;
+        int32 RegisteredMembers = 0, MenuMembers = 0, PreparedMembers = 0;
+        const auto* Registered = FBlueprintActionDatabase::Get().GetAllActions().Find(FObjectKey(Blueprint));
+        if (Registered)
+            for (const auto& Action : *Registered)
+                if (const auto* Variable = Cast<UBlueprintVariableNodeSpawner>(Action))
+                    if (const FProperty* Property = Variable->GetVarProperty(); Property && Property->GetFName() == MemberName)
+                        ++RegisteredMembers;
+        for (FBlueprintActionEntry& Entry : Entries)
+        {
+            if (!Entry.Action.IsValid() || Entry.Action->GetTypeId() != FBlueprintActionMenuItem::StaticGetTypeId()) continue;
+            const auto* Variable = Cast<UBlueprintVariableNodeSpawner>(
+                StaticCastSharedPtr<FBlueprintActionMenuItem>(Entry.Action)->GetRawAction());
+            const FProperty* Property = Variable ? Variable->GetVarProperty() : nullptr;
+            if (!Property || Property->GetFName() != MemberName) continue;
+            ++MenuMembers;
+            FDiagnostic Error;
+            if (PrepareCandidate(Params, Entry, &Entry - Entries.GetData(), Error))
+            {
+                ++PreparedMembers;
+                if (PreparedMembers <= 4)
+                    UE_LOG(LogTemp, Display, TEXT("UAI Blueprint missing member projection: requested=%s current=%s owner=%s self=%s"),
+                        *Name, *GetBlueprintActionPublicName(Entry.Candidate), *GetPathNameSafe(Property->GetOwnerClass()),
+                        IsAuthoringSelfClass(Blueprint, Property->GetOwnerClass()) ? TEXT("true") : TEXT("false"));
+            }
+        }
+        UE_LOG(LogTemp, Display, TEXT("UAI Blueprint missing member state: name=%s member=%s context=%s authoring=%s transient=%s skeleton=%s generated=%s skeleton_field=%s skeleton_flags=%llu generated_field=%s registered_actions=%d registered=%d menu=%d prepared=%d"),
+            *Name, *Member, *Blueprint->GetPathName(), *UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint),
+            Blueprint->HasAnyFlags(RF_Transient) ? TEXT("true") : TEXT("false"),
+            *GetPathNameSafe(Blueprint->SkeletonGeneratedClass), *GetPathNameSafe(Blueprint->GeneratedClass),
+            SkeletonField ? TEXT("true") : TEXT("false"), SkeletonField ? static_cast<uint64>(SkeletonField->GetPropertyFlags()) : 0ull,
+            GeneratedField ? TEXT("true") : TEXT("false"), Registered ? Registered->Num() : 0,
+            RegisteredMembers, MenuMembers, PreparedMembers);
+    }
+
 	TMap<FString, FString> BlueprintPublicSelectionFields(const FCandidate& Candidate)
 	{
 		TMap<FString, FString> Fields;
@@ -1542,7 +1614,7 @@ namespace
 		const FString& Id,
 		FBlueprintActionEntry& OutEntry,
 		FDiagnostic& OutError,
-		bool bAllowRegistrationRecovery = true)
+        bool bAllowRegistrationRecovery = true)
 	{
 		OutEntry = {};
 		if (Name.TrimStartAndEnd().IsEmpty()
@@ -1577,7 +1649,7 @@ namespace
 				Projection->Names.Reserve(Entries.Num());
 				for (FBlueprintActionEntry& Entry : Entries)
 				{
-					if (!MayMatchNativeName(Entry, QueryName)) continue;
+                    if (!MayMatchNativeName(Entry, QueryName)) continue;
 					if (!MayMatchNativeSelectors(Entry, Params.RequiredAuthoringSelectors)) continue;
 					if (!PrepareCandidate(Params, Entry, &Entry - Entries.GetData(), OutError))
 					{
@@ -1633,7 +1705,7 @@ namespace
 					FDiagnostic RegistrationError;
 					if (bAllowRegistrationRecovery
 						&& TryRegisterSelectedBlueprintCast(Params, QueryName, RegistrationError))
-						return TryResolveBlueprintActionEntry(Params, Name, Id, OutEntry, OutError, false);
+                        return TryResolveBlueprintActionEntry(Params, Name, Id, OutEntry, OutError, false);
 					if (!RegistrationError.IsEmpty())
 					{
 						OutError = MoveTemp(RegistrationError);
@@ -1641,7 +1713,10 @@ namespace
 					}
 					if (Params.RequiredAuthoringSelectors.IsEmpty()
 						|| !TryBuildBlueprintSelectionFailure(Params, Entries, QueryName, OutError))
-					SetBlueprintCandidateResolutionFailure(Params, Name, TEXT("blueprint_action_candidate_not_found"), OutError);
+                    {
+                        ReportMissingBlueprintMember(Params, Name, Entries);
+                        SetBlueprintCandidateResolutionFailure(Params, Name, TEXT("blueprint_action_candidate_not_found"), OutError);
+                    }
 				}
 				else
 				{

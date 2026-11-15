@@ -48,6 +48,11 @@ public:
   virtual FReflectionRoot GetProposedRoot() const = 0;
   virtual FReflectionRoot GetActualRoot() const = 0;
   virtual bool ShouldApplyPropertiesToActualRoot() const { return false; }
+  // A domain may choose direct scalar preparation from its native field types.
+  // Its persistence expectation is captured after native apply; the decoded
+  // authored intent remains an independent comparison. Template/owned-object
+  // actions select their preview lifecycle before preparation, never on failure.
+  virtual bool UsesProposedPropertyPreview() const { return true; }
   // Default previews retain native normalization. A domain may suppress all
   // preview notifications only when they are proven external side effects;
   // actual notifications and settle still follow the operation contract.
@@ -64,6 +69,10 @@ public:
       const UeAgentAuthoringObjectApply::FOptions& Options,
       FOperationFailure& OutFailure) { return true; }
   virtual void CollectRollbackObjects(TArray<UObject*>& OutObjects) const {}
+  // A fully prepared no-op has no native application/readback consumer.
+  // Retire its native preparation bindings without releasing another active
+  // operation's shared context or discarding its retained pure-value intent.
+  virtual void DiscardNoOpPreparation() {}
   virtual bool CaptureRollback(FOperationFailure &OutFailure) = 0;
   // Runs within the rollback boundary, after before-state/checkpoint capture
   // and before proposed property application or expected-state capture.
@@ -88,6 +97,9 @@ public:
     OutFailure.Diagnostic.InternalContext = GetTargetKey();
     return false;
   }
+  // Reflected fields changed by a prepared lifecycle action, independent of
+  // explicit property writes. They share the regular native property reader.
+  virtual TConstArrayView<FName> GetLifecycleReadbackProperties() const { return {}; }
   virtual bool BuildDomainExpectedReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const = 0;

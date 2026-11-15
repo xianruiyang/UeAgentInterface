@@ -1,33 +1,40 @@
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonDiagnostic.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonValidatedHeader.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonSyntaxCache.h"
+#include "Core/HjsonWorkspace/UeAgentTextLineDiff.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonPointerText.h"
 #include "Core/StateSemantic/UeAgentExactStringKeys.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
+#include "HAL/CriticalSection.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/PackageName.h"
 #include "Misc/ScopeExit.h"
+#include "Misc/ScopeLock.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include <cstring>
 
 namespace UE::UAI::HjsonWorkspace
 {
 	using namespace UE::UAI::ContextResource;
 	using namespace UE::UAI::StateSemantic;
 
+	struct FHjsonRootHeaderFacts
+	{
+		FString ContentHash;
+		TArray<TPair<FString, FString>> Strings;
+		TMap<EUeAgentResourceDimension, int64> ParseCharges;
+	};
+
 	namespace
 	{
-		struct FParsedRootHeader
-		{
-			FString ContentHash;
-			TArray<TPair<FString, FString>> Strings;
-			TMap<EUeAgentResourceDimension, int64> ParseCharges;
-		};
-		thread_local TSharedPtr<const FParsedRootHeader> PreviousParsedRootHeader;
+		thread_local FHjsonRootHeaderFactsPtr PreviousParsedRootHeader;
 
 		struct FHjsonJsonProjectionTask
 		{
@@ -40,6 +47,7 @@ namespace UE::UAI::HjsonWorkspace
 			FUeAgentResourceTracker& Resources,
 			FWorkspaceError& OutError)
 		{
+			if (!Resources.CollectsUsage()) return true;
 			const int64 ChildCount = Node.GetKind() == EHjsonNodeKind::Array
 				? Node.GetItems().Num()
 				: Node.GetKind() == EHjsonNodeKind::Object
@@ -101,8 +109,8 @@ namespace UE::UAI::HjsonWorkspace
 		struct FToken
 		{
 			ETokenKind Kind = ETokenKind::Bare;
-			FString Lexeme;
-			FString Value;
+			mutable FString Lexeme;
+			mutable FString Value;
 			int32 Start = 0;
 			int32 End = 0;
 			int64 ByteStart = 0;
@@ -110,6 +118,26 @@ namespace UE::UAI::HjsonWorkspace
 			int32 Line = 1;
 			int32 Column = 1;
 			bool bNewlineBefore = false;
+			FStringView BorrowedLexeme, BorrowedValue;
+			mutable bool bLexemeBorrowed = false, bValueBorrowed = false;
+			FStringView ReadLexeme() const { return bLexemeBorrowed ? BorrowedLexeme : FStringView(GetLexeme()); }
+			FStringView ReadValue() const { return Kind == ETokenKind::Bare ? ReadLexeme() : bValueBorrowed ? BorrowedValue : FStringView(Value); }
+			const FString& GetValue() const {
+				if (Kind == ETokenKind::Bare) return GetLexeme();
+				if (bValueBorrowed) { Value = FString(BorrowedValue); bValueBorrowed = false; }
+				return Value;
+			}
+		const FString& GetLexeme() const
+			{
+				// Delimiters have no owned text consumer in a successful parse.
+				// Their exact diagnostic spelling belongs to this tokenizer once.
+				if (Kind <= ETokenKind::Comma) {
+					static const FString Delimiters[]{TEXT("{"), TEXT("}"), TEXT("["), TEXT("]"), TEXT(":"), TEXT(",")};
+					return Delimiters[static_cast<uint8>(Kind)];
+					}
+				if (bLexemeBorrowed) { Lexeme = FString(BorrowedLexeme); bLexemeBorrowed = false; }
+				return Lexeme;
+			}
 		};
 
 		void SetSyntaxFailure(FWorkspaceError& Error, const FString& Code, const FString& Reason,
@@ -148,6 +176,14 @@ namespace UE::UAI::HjsonWorkspace
 			}
 		}
 
+		// Scan and implicit-root insertion finish before any frame. Key tokens
+		// then retain their text unchanged until every frame has been destroyed.
+		struct FParseKeyRefFuncs : DefaultKeyFuncs<FStringView>
+		{
+			static bool Matches(FStringView A, FStringView B) { return FExactStringKeyFuncs::MatchesView(A, B); }
+			static uint32 GetKeyHash(FStringView Key) { return FExactStringKeyFuncs::GetViewKeyHash(Key); }
+		};
+
 		enum class EFrameState : uint8
 		{
 			KeyOrEnd,
@@ -160,14 +196,16 @@ namespace UE::UAI::HjsonWorkspace
 		struct FParseFrame
 		{
 			bool bObject = false;
+			bool bRetain = true;
+			int32 ParsedItems = 0;
 			FString Pointer;
 			FString OriginalKey;
 			FToken StartToken;
 			EFrameState State = EFrameState::ValueOrEnd;
 			TArray<TPair<FString, FHjsonNodeRef>> Entries;
 			TArray<FHjsonNodeRef> Items;
-			TSet<FString, FExactStringKeyFuncs> Keys;
-			FString PendingKey;
+			TSet<FStringView, FParseKeyRefFuncs> Keys;
+			TOptional<FStringView> PendingKey; // Original immutable token/input, until attachment.
 		};
 
 		struct FSourceText
@@ -182,24 +220,38 @@ namespace UE::UAI::HjsonWorkspace
 			return Value;
 		}
 
-		FString EscapePointerSegment(FString Value)
+		FString JoinPointer(FStringView Parent, FStringView Segment)
 		{
-			Value.ReplaceInline(TEXT("~"), TEXT("~0"));
-			Value.ReplaceInline(TEXT("/"), TEXT("~1"));
-			return Value;
+			return PointerText::Child(Parent, Segment, PointerText::ENulMode::ReplaceCompatible);
 		}
 
-		FString JoinPointer(const FString& Parent, const FString& Segment)
+		struct FParseValueLocation
 		{
-			const FString Escaped = EscapePointerSegment(Segment);
-			return Parent == TEXT("/")
-				? TEXT("/") + Escaped
-				: Parent + TEXT("/") + Escaped;
-		}
+			FString Pointer;
+			const FString* Parent = nullptr;
+			FStringView Key;
+			int32 ArrayIndex = INDEX_NONE;
+			bool bResolved = true;
+			void SetRoot(FString InPointer, FStringView InKey) {
+				Pointer = MoveTemp(InPointer); Parent = nullptr; Key = InKey; ArrayIndex = INDEX_NONE; bResolved = true;
+			}
+			void SetChild(const FString& InParent, FStringView InKey, int32 InIndex = INDEX_NONE) {
+				Pointer.Reset(); Parent = &InParent; Key = InKey; ArrayIndex = InIndex; bResolved = false;
+			}
+			const FString& GetPointer() {
+				if (!bResolved) {
+					Pointer = ArrayIndex == INDEX_NONE ? JoinPointer(*Parent, Key) : JoinPointer(*Parent, ::LexToString(ArrayIndex));
+					bResolved = true;
+				}
+				return Pointer;
+			}
+			FString TakePointer() { GetPointer(); return MoveTemp(Pointer); }
+			FHjsonScalarLocation ReadProjectionLocation() const { return {Parent ? FStringView(*Parent) : FStringView(), Key, ArrayIndex}; }
+		};
 
 		bool Charge(
 			FUeAgentResourceTracker& Resources,
-			const TMap<EUeAgentResourceDimension, int64>& Amounts,
+			std::initializer_list<TPair<EUeAgentResourceDimension, int64>> Amounts,
 			const FString& Path,
 			FWorkspaceError& OutError)
 		{
@@ -233,40 +285,15 @@ namespace UE::UAI::HjsonWorkspace
 				OutError);
 		}
 
-		bool ScanUtf8Text(const FString& Text, TArray<int64>* Offsets, int64& Bytes,
-			FWorkspaceError& OutError, const FHjsonOperationCheckpoint* Checkpoint)
+		int32 Utf8WidthAt(const FString& Text, int32 Index, int32& CodeUnits)
 		{
-			Bytes = 0;
-			int32 NextCheckpoint = 0;
-			for (int32 Index = 0; Index < Text.Len(); ++Index)
-			{
-				if (Index >= NextCheckpoint)
-				{
-					if (Checkpoint && !(*Checkpoint)(Offsets ? TEXT("hjson_utf8_offsets") : TEXT("hjson_utf8_measure"), OutError)) return false;
-					NextCheckpoint = Index > MAX_int32 - 1024 ? MAX_int32 : Index + 1024;
-				}
-				if (Offsets) (*Offsets)[Index] = Bytes;
-				const uint32 Character = static_cast<uint32>(Text[Index]);
-				if (Character >= 0xD800 && Character <= 0xDBFF
-					&& Index + 1 < Text.Len())
-				{
-					const uint32 Low = static_cast<uint32>(Text[Index + 1]);
-					if (Low >= 0xDC00 && Low <= 0xDFFF)
-					{
-						Bytes += 4;
-						++Index;
-						if (Offsets) (*Offsets)[Index] = Bytes;
-						continue;
-					}
-				}
-				Bytes += Character <= 0x7F
-					? 1
-					: Character <= 0x7FF
-						? 2
-						: 3;
+			CodeUnits = 1;
+			const uint32 Character = static_cast<uint32>(Text[Index]);
+			if (Character >= 0xD800 && Character <= 0xDBFF && Index + 1 < Text.Len()) {
+				const uint32 Low = static_cast<uint32>(Text[Index + 1]);
+				if (Low >= 0xDC00 && Low <= 0xDFFF) { CodeUnits = 2; return 4; }
 			}
-			if (Offsets) (*Offsets)[Text.Len()] = Bytes;
-			return !Checkpoint || (*Checkpoint)(Offsets ? TEXT("hjson_utf8_offsets_complete") : TEXT("hjson_utf8_measure_complete"), OutError);
+			return Character <= 0x7F ? 1 : Character <= 0x7FF ? 2 : 3;
 		}
 
 		bool IsPunctuation(TCHAR Character)
@@ -292,27 +319,42 @@ namespace UE::UAI::HjsonWorkspace
 			}
 		}
 
-		bool IsIntegerLexeme(const FString& Value);
-		bool IsDecimalLexeme(const FString& Value);
+		bool IsIntegerLexeme(FStringView Value);
+		bool IsDecimalLexeme(FStringView Value);
+
+		TCHAR AdvanceSourcePosition(const FString& Text, int32& Index, int32& Line, int32& Column)
+		{
+			TCHAR Ch = Text[Index++];
+			if (Ch == TEXT('\r')) {
+				if (Index < Text.Len() && Text[Index] == TEXT('\n')) ++Index;
+				Ch = TEXT('\n');
+			}
+			if (Ch == TEXT('\n')) { ++Line; Column = 1; }
+			else ++Column;
+			return Ch;
+		}
 
 		bool ScanTokens(
 			const FString& Text,
 			const FString& SourceUnit,
 			FUeAgentResourceTracker& Resources,
 			TArray<FToken>& OutTokens,
+			int32& OutEndLine, int32& OutEndColumn,
+			int64& OutSourceBytes,
 			FWorkspaceError& OutError,
 			FWorkspaceError& Diagnostics,
-			const FHjsonOperationCheckpoint* Checkpoint)
+			const FHjsonOperationCheckpoint* Checkpoint, const FSourceProvenance* Origin, bool bBorrowScalarText,
+			int32* FirstContainerEnd = nullptr)
 		{
 			OutTokens.Reset();
-			TArray<int64> Utf8Offsets;
-			int32 TokenCount = 0;
-			// The first pass validates ranges and charges their maximum storage without
-			// constructing token strings or per-line multiline buffers. The second pass
-			// materializes only after all scanner storage has been admitted.
-			auto Scan = [&](bool bMaterialize) -> bool
+			if (FirstContainerEnd) *FirstContainerEnd = INDEX_NONE;
+			// Scan and materialize once. Accounting has no storage-admission limit;
+			// a second lexical pass cannot establish another syntax fact. The same
+			// scanner advancement supplies byte positions without an offset per char.
+			auto Scan = [&]() -> bool
 			{
-				int32 Index = 0, Line = 1, Column = 1;
+				int32 Index = 0, Line = Origin ? Origin->GetLine() : 1, Column = Origin ? Origin->GetColumn() : 1;
+				int64 SourceByte = 0;
 				int32 NextCheckpoint = 0;
 				bool bNewlineBefore = false;
 				struct FScanFrame
@@ -321,6 +363,7 @@ namespace UE::UAI::HjsonWorkspace
 					EFrameState State;
 				};
 				TArray<FScanFrame> Frames;
+				bool bMatchingExtent = true;
 				auto Check = [&](int32 Position) -> bool
 				{
 					if (Position < NextCheckpoint) return true;
@@ -330,19 +373,20 @@ namespace UE::UAI::HjsonWorkspace
 				auto Fail = [&](const TCHAR* Code, const TCHAR* Reason, int32 ErrorLine, int32 ErrorColumn,
 					const FString& Actual, const FString& Expected) -> bool
 				{
-					SetSyntaxFailure(OutError, Code, Reason, SourceUnit, TEXT("/"), ErrorLine, ErrorColumn, Actual, Expected);
+					SetSyntaxFailure(OutError, Code, Reason, SourceUnit, Origin ? Origin->GetJsonPointer() : TEXT("/"), ErrorLine, ErrorColumn, Actual, Expected);
 					return false;
 				};
 				auto Advance = [&]() -> TCHAR
 				{
-					TCHAR Ch = Text[Index++];
-					if (Ch == TEXT('\r'))
-					{
-						if (Index < Text.Len() && Text[Index] == TEXT('\n')) ++Index;
-						Ch = TEXT('\n');
-					}
-					if (Ch == TEXT('\n')) { ++Line; Column = 1; bNewlineBefore = true; }
-					else ++Column;
+					const int32 Before = Index;
+					const TCHAR Ch = AdvanceSourcePosition(Text, Index, Line, Column);
+					int32 CodeUnits = 1;
+					const uint32 Unit = static_cast<uint32>(Text[Before]);
+					const bool bTrailingSurrogate = Unit >= 0xDC00 && Unit <= 0xDFFF && Before > 0
+						&& static_cast<uint32>(Text[Before - 1]) >= 0xD800 && static_cast<uint32>(Text[Before - 1]) <= 0xDBFF;
+					if (!bTrailingSurrogate) SourceByte += Utf8WidthAt(Text, Before, CodeUnits);
+					if (Index == Before + 2) ++SourceByte; // The original Advance consumed CRLF together.
+					if (Ch == TEXT('\n')) bNewlineBefore = true;
 					return Ch;
 				};
 				auto IsIndent = [](TCHAR Ch) { return Ch == TEXT(' ') || Ch == TEXT('\t'); };
@@ -364,12 +408,13 @@ namespace UE::UAI::HjsonWorkspace
 						return Fail(TEXT("hjson_unsupported_feature"), TEXT("Block comments are not supported; use a line comment."), Line, Column, TEXT("/*"), TEXT("# or //"));
 
 					const int32 Start = Index, TokenLine = Line, TokenColumn = Column;
+					const int64 TokenByteStart = SourceByte;
 					const bool bTokenNewline = bNewlineBefore;
 					bNewlineBefore = false;
 					// The implicit object root has the same lexical key/value states
 					// as a braced object; quoted and bare values share one scanner.
 					if (Frames.IsEmpty() && Ch != TEXT('{') && Ch != TEXT('[')
-						&& (bMaterialize ? OutTokens.IsEmpty() : TokenCount == 0))
+						&& OutTokens.IsEmpty())
 					{
 						Frames.Add({true, EFrameState::KeyOrEnd});
 					}
@@ -381,7 +426,7 @@ namespace UE::UAI::HjsonWorkspace
 						&& Frames.Last().State == EFrameState::KeyOrEnd;
 					ETokenKind Kind = ETokenKind::Bare;
 					int32 ContentStart = Start, ContentEnd = Start, ClosingIndent = 0;
-					bool bMultiline = false;
+					bool bMultiline = false, bHasEscape = false;
 					if (IsPunctuation(Ch))
 					{
 						Kind = PunctuationKind(Ch);
@@ -426,14 +471,11 @@ namespace UE::UAI::HjsonWorkspace
 								}
 							if (Index < Text.Len() && Text[Index] != TEXT('\r') && Text[Index] != TEXT('\n'))
 							{
-								if (!bMaterialize)
-								{
-									FWorkspaceError Error;
-									SetSyntaxFailure(Error, TEXT("hjson_multiline_trailing_token"), TEXT("A multiline closing delimiter must be followed by a newline or end of input."),
+								FWorkspaceError Error;
+								SetSyntaxFailure(Error, TEXT("hjson_multiline_trailing_token"), TEXT("A multiline closing delimiter must be followed by a newline or end of input."),
 				SourceUnit, TEXT("/"), Line, Column, FString::Chr(Text[Index]), TEXT("newline or end of input"));
-									Error.MarkUnchecked(TEXT("syntax"), SourceUnit, TEXT("invalid_multiline_closing_line"), Line);
-									Diagnostics.Append(Error);
-								}
+								Error.MarkUnchecked(TEXT("syntax"), SourceUnit, TEXT("invalid_multiline_closing_line"), Line);
+								Diagnostics.Append(Error);
 								// The closing delimiter is known. Resume at the next line, without
 								// interpreting the malformed suffix as object/array punctuation.
 								while (Index < Text.Len() && Text[Index] != TEXT('\r') && Text[Index] != TEXT('\n'))
@@ -463,10 +505,18 @@ namespace UE::UAI::HjsonWorkspace
 						while (Index < Text.Len())
 						{
 							if (!Check(Index)) return false;
+							// Plain ASCII within a quoted token changes neither line nor
+							// UTF-16/UTF-8 width. Advance the original scanner's counters
+							// once per run; stop at the same checkpoint or special token.
+							const int32 RunStart = Index, RunEnd = FMath::Min(Text.Len(), NextCheckpoint);
+							while (Index < RunEnd && Text[Index] >= TEXT(' ') && Text[Index] < TCHAR(0x80)
+								&& Text[Index] != TEXT('"') && Text[Index] != TEXT('\\')) ++Index;
+							if (Index != RunStart) { Column += Index - RunStart; SourceByte += Index - RunStart; continue; }
 							if (Text[Index] == TEXT('"')) { ContentEnd = Index; Advance(); bClosed = true; break; }
 							if (Text[Index] < 0x20)
 								return Fail(TEXT("hjson_unescaped_control"), TEXT("A quoted string contains an unescaped control character."), Line, Column, FString::Printf(TEXT("U+%04X"), static_cast<uint32>(Text[Index])), TEXT("escaped control character"));
 							if (Advance() != TEXT('\\')) continue;
+							bHasEscape = true;
 							if (Index == Text.Len()) break;
 							const int32 EscapeLine = Line, EscapeColumn = Column;
 							const TCHAR Escaped = Advance();
@@ -499,13 +549,19 @@ namespace UE::UAI::HjsonWorkspace
 							if (bKey && (IsPunctuation(Current) || bComment)) break;
 							if (!bKey && bPossibleLiteral && (Current == TEXT(',') || Current == TEXT('}') || Current == TEXT(']') || bComment))
 							{
-								const FString Candidate = Text.Mid(Start, Index - Start).TrimEnd();
-								const FString Folded = Candidate.ToLower();
-								if (Folded == TEXT("true") || Folded == TEXT("false") || Folded == TEXT("null")
-									|| Folded == TEXT("nan") || Folded == TEXT("+nan") || Folded == TEXT("-nan")
-									|| Folded == TEXT("inf") || Folded == TEXT("+inf") || Folded == TEXT("-inf")
-									|| Folded == TEXT("infinity") || Folded == TEXT("+infinity") || Folded == TEXT("-infinity")
-									|| IsIntegerLexeme(Candidate) || IsDecimalLexeme(Candidate)) break;
+								const FStringView Candidate = FStringView(*Text + Start, Index - Start).TrimEnd();
+								// Numeric candidates need neither a temporary substring nor
+								// its lowercase copy. The original keyword comparison stays
+								// explicit for nonnumeric bare text and its Unicode/NUL edge.
+								bool bLiteral = IsIntegerLexeme(Candidate) || IsDecimalLexeme(Candidate);
+								if (!bLiteral) {
+									const FString Folded = FString(Candidate).ToLower();
+									bLiteral = Folded == TEXT("true") || Folded == TEXT("false") || Folded == TEXT("null")
+										|| Folded == TEXT("nan") || Folded == TEXT("+nan") || Folded == TEXT("-nan")
+										|| Folded == TEXT("inf") || Folded == TEXT("+inf") || Folded == TEXT("-inf")
+										|| Folded == TEXT("infinity") || Folded == TEXT("+infinity") || Folded == TEXT("-infinity");
+								}
+								if (bLiteral) break;
 								bPossibleLiteral = false;
 							}
 							Advance();
@@ -522,7 +578,13 @@ namespace UE::UAI::HjsonWorkspace
 					}
 					else if (Kind == ETokenKind::CloseObject || Kind == ETokenKind::CloseArray)
 					{
-						if (!Frames.IsEmpty()) Frames.Pop(EAllowShrinking::No);
+						if (!Frames.IsEmpty()) {
+							if (FirstContainerEnd && *FirstContainerEnd == INDEX_NONE) {
+								bMatchingExtent &= Frames.Last().bObject == (Kind == ETokenKind::CloseObject);
+								if (Frames.Num() == 1 && bMatchingExtent) *FirstContainerEnd = OutTokens.Num();
+							}
+							Frames.Pop(EAllowShrinking::No);
+						}
 					}
 					else if (!Frames.IsEmpty())
 					{
@@ -542,7 +604,8 @@ namespace UE::UAI::HjsonWorkspace
 						while (TokenEnd > Start && IsIndent(Text[TokenEnd - 1])) --TokenEnd;
 					}
 					const int32 RawLength = TokenEnd - Start;
-					if (bMaterialize) Value.Reserve(RawLength + 1);
+					const bool bBorrowValue = bBorrowScalarText && Kind == ETokenKind::String && !bMultiline && !bHasEscape;
+					if (Kind == ETokenKind::String && !bBorrowValue) Value.Reserve(RawLength + 1);
 					if (bMultiline)
 					{
 						int32 Cursor = ContentStart, ContentLine = TokenLine + 1;
@@ -558,10 +621,10 @@ namespace UE::UAI::HjsonWorkspace
 							if (Cursor < ContentEnd && Text[Cursor] != TEXT('\r') && Text[Cursor] != TEXT('\n') && Indent < ClosingIndent)
 								return Fail(TEXT("hjson_multiline_indentation"), TEXT("The multiline content is indented less than its closing delimiter."), ContentLine, Indent + 1, FString::FromInt(Indent), FString::Printf(TEXT("at least %d indentation characters"), ClosingIndent));
 							Cursor = LineStart + FMath::Min(Indent, ClosingIndent);
-							if (bMaterialize && LineStart != ContentStart) Value.AppendChar(TEXT('\n'));
+							if (LineStart != ContentStart) Value.AppendChar(TEXT('\n'));
 							while (Cursor < ContentEnd && Text[Cursor] != TEXT('\r') && Text[Cursor] != TEXT('\n'))
 							{
-								if (bMaterialize) Value.AppendChar(Text[Cursor]);
+								Value.AppendChar(Text[Cursor]);
 								++Cursor;
 								if (Checkpoint && (Cursor - LineStart) % 1024 == 0 && !(*Checkpoint)(TEXT("hjson_multiline_content"), OutError)) return false;
 							}
@@ -570,7 +633,11 @@ namespace UE::UAI::HjsonWorkspace
 							if (Checkpoint && !(*Checkpoint)(TEXT("hjson_multiline_line"), OutError)) return false;
 						}
 					}
-					else if (bMaterialize && Kind == ETokenKind::String)
+					else if (Kind == ETokenKind::String && !bHasEscape)
+					{
+						if (!bBorrowValue) Value.AppendChars(*Text + ContentStart, ContentEnd - ContentStart);
+					}
+					else if (Kind == ETokenKind::String)
 					{
 						int32 NextDecodeCheckpoint = ContentStart;
 						for (int32 Cursor = ContentStart; Cursor < ContentEnd; ++Cursor)
@@ -608,40 +675,34 @@ namespace UE::UAI::HjsonWorkspace
 							Value.AppendChar(Decoded);
 						}
 					}
-					if (!bMaterialize)
-					{
-						if (!Charge(Resources, {
+					if (Resources.CollectsUsage() && !Charge(Resources, {
 							{EUeAgentResourceDimension::WorkUnits, 1},
 							{EUeAgentResourceDimension::EstimatedMemoryBytes,
 								2ll * (static_cast<int64>(RawLength) + 1) * static_cast<int64>(sizeof(TCHAR))}},
 							TEXT("hjson-tokenize:") + SourceUnit, OutError)) return false;
-						++TokenCount;
-					}
-					else
-					{
-						if (Checkpoint && !(*Checkpoint)(TEXT("hjson_token_materialize"), OutError)) return false;
-						FString Lexeme = Text.Mid(Start, RawLength);
-						if (Kind != ETokenKind::String) Value.Append(Lexeme);
-						OutTokens.Add({Kind, MoveTemp(Lexeme), MoveTemp(Value), Start, TokenEnd,
-							Utf8Offsets[Start], Utf8Offsets[TokenEnd], TokenLine, TokenColumn, bTokenNewline});
-					}
+					if (Checkpoint && !(*Checkpoint)(TEXT("hjson_token_materialize"), OutError)) return false;
+					const bool bBorrowLexeme = bBorrowScalarText && (Kind == ETokenKind::Bare || Kind == ETokenKind::String);
+					FString Lexeme = !bBorrowLexeme && (Kind == ETokenKind::Bare || Kind == ETokenKind::String)
+						? Text.Mid(Start, RawLength) : FString();
+					auto& Token = OutTokens.Add_GetRef({Kind, MoveTemp(Lexeme), MoveTemp(Value), Start, TokenEnd,
+						TokenByteStart + (Origin ? Origin->GetByteStart() : 0),
+						SourceByte - (Index - TokenEnd) + (Origin ? Origin->GetByteStart() : 0), TokenLine, TokenColumn, bTokenNewline});
+					if (bBorrowLexeme) { Token.BorrowedLexeme = FStringView(*Text + Start, RawLength); Token.bLexemeBorrowed = true; }
+					if (bBorrowValue) { Token.BorrowedValue = FStringView(*Text + ContentStart, ContentEnd - ContentStart); Token.bValueBorrowed = true; }
 				}
+				OutEndLine = Line; OutEndColumn = Column;
+				OutSourceBytes = SourceByte;
 				return !Checkpoint || (*Checkpoint)(TEXT("hjson_scan_complete"), OutError);
 			};
-			if (!Scan(false)) return false;
-			if (!Charge(Resources, {
+			if (!Scan()) return false;
+			if (Resources.CollectsUsage() && !Charge(Resources, {
 				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					(static_cast<int64>(TokenCount) + 2) * static_cast<int64>(sizeof(FToken))
-					+ (static_cast<int64>(Text.Len()) + 1) * static_cast<int64>(sizeof(int64))}},
+					(static_cast<int64>(OutTokens.Num()) + 2) * static_cast<int64>(sizeof(FToken))}},
 				TEXT("hjson-scanner-storage:") + SourceUnit, OutError)) return false;
-			OutTokens.Reserve(TokenCount + 2);
-			Utf8Offsets.SetNumZeroed(Text.Len() + 1);
-			int64 SourceBytes = 0;
-			if (!ScanUtf8Text(Text, &Utf8Offsets, SourceBytes, OutError, Checkpoint)) return false;
-			return Scan(true);
+			return true;
 		}
 
-		bool IsIntegerLexeme(const FString& Value)
+		bool IsIntegerLexeme(FStringView Value)
 		{
 			if (Value.IsEmpty())
 			{
@@ -666,7 +727,7 @@ namespace UE::UAI::HjsonWorkspace
 			return true;
 		}
 
-		bool IsDecimalLexeme(const FString& Value)
+		bool IsDecimalLexeme(FStringView Value)
 		{
 			if (Value.IsEmpty())
 			{
@@ -724,84 +785,107 @@ namespace UE::UAI::HjsonWorkspace
 
 		FSourceProvenance MakeProvenance(
 			const FToken& Token,
-			const FString& SourceUnit,
-			const FString& Pointer,
-			const FString& OriginalKey)
+			const TSharedRef<const FString>& SourceUnit,
+			FString&& Pointer,
+			FString&& OriginalKey)
 		{
 			return FSourceProvenance(
 				SourceUnit,
-				Pointer,
+				MoveTemp(Pointer),
 				Token.Line,
 				Token.Column,
 				Token.ByteStart,
 				Token.ByteEnd,
-				OriginalKey);
+				MoveTemp(OriginalKey));
 		}
 
 		bool MakeScalarNode(
-			const FToken& Token,
+			FToken& Token,
 			const FString& SourceUnit,
-			const FString& Pointer,
-			const FString& OriginalKey,
+			const TSharedRef<const FString>& SharedSourceUnit,
+			FParseValueLocation& Location,
 			FUeAgentResourceTracker& Resources,
 			FHjsonNodePtr& OutNode,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError, bool bMaterialize = true,
+			TFunctionRef<bool(const FHjsonScalarLocation&, const FHjsonParsedScalar&)>* SelectScalar = nullptr)
 		{
 			if (Token.Kind != ETokenKind::Bare
 				&& Token.Kind != ETokenKind::String)
 			{
 				SetSyntaxFailure(OutError, TEXT("hjson_value_expected"), TEXT("Expected a scalar HJSON value at this position."),
-				SourceUnit, Pointer, Token.Line, Token.Column, Token.Lexeme, TEXT("string, number, boolean or null"));
+					SourceUnit, Location.GetPointer(), Token.Line, Token.Column, Token.GetLexeme(), TEXT("string, number, boolean or null"));
 				return false;
 			}
 			EHjsonNodeKind Kind = EHjsonNodeKind::String;
-			FString Text = Token.Value;
+			// The scanner already validated quoted-string grammar/escapes. The
+			// synchronous scalar consumer can use its exact text without making
+			// owned raw/decoded copies which no AST node will ever consume.
+			if (Token.Kind == ETokenKind::String && SelectScalar && (*SelectScalar)(Location.ReadProjectionLocation(),
+				{Kind, Token.ReadValue(), Token.ReadLexeme(), false, Token.Line, Token.Column, Token.ByteStart, Token.ByteEnd,
+					Token.bValueBorrowed, Token.bLexemeBorrowed})) {
+				OutNode.Reset(); return true;
+				}
+			FString Text;
 			bool bBoolean = false;
-			const FString Folded = Token.Value.ToLower();
+			const FStringView Value = Token.ReadValue();
+			// The former FString == TCHAR* tests were case-insensitive and
+			// terminated at the first NUL. A borrowed view must keep that grammar.
+			const TCHAR First = Value.IsEmpty() ? TCHAR(0) : FChar::ToLower(Value[0]);
+			const bool bKeywordCandidate = Token.Kind == ETokenKind::Bare
+				&& (First == TEXT('t') || First == TEXT('f') || First == TEXT('n') || First == TEXT('i') || First == TEXT('+') || First == TEXT('-'));
+			int32 ComparisonLength = 0;
+			if (bKeywordCandidate)
+				while (ComparisonLength < Value.Len() && Value[ComparisonLength] != TCHAR(0)) ++ComparisonLength;
+			const FStringView NativeComparison = Value.Left(ComparisonLength);
+			TCHAR Folded[10]; Folded[0] = TCHAR(0);
+			if (bKeywordCandidate && Value.Len() <= 9) {
+				for (int32 Index = 0; Index < Value.Len(); ++Index) Folded[Index] = FChar::ToLower(Value[Index]);
+				Folded[Value.Len()] = TCHAR(0);
+			}
 			if (Token.Kind == ETokenKind::Bare
-				&& (Folded == TEXT("true") || Folded == TEXT("false")
-					|| Folded == TEXT("null"))
-				&& Token.Value != Folded)
+				&& (FCString::Stricmp(Folded, TEXT("true")) == 0 || FCString::Stricmp(Folded, TEXT("false")) == 0
+					|| FCString::Stricmp(Folded, TEXT("null")) == 0)
+				&& !NativeComparison.Equals(FStringView(Folded), ESearchCase::IgnoreCase))
 			{
 				SetSyntaxFailure(OutError, TEXT("hjson_ambiguous_literal"), TEXT("Boolean and null literals must use lowercase; quote this token to use it as text."),
-				SourceUnit, Pointer, Token.Line, Token.Column, Token.Value, Folded);
+					SourceUnit, Location.GetPointer(), Token.Line, Token.Column, FString(Value), FString(Value.Len(), Folded));
 				return false;
 			}
-			if (Token.Kind == ETokenKind::Bare && Token.Value == TEXT("null"))
+			if (Token.Kind == ETokenKind::Bare && NativeComparison.Equals(TEXT("null"), ESearchCase::IgnoreCase))
 			{
 				Kind = EHjsonNodeKind::Null;
 				Text.Reset();
 			}
 			else if (Token.Kind == ETokenKind::Bare
-				&& (Token.Value == TEXT("true") || Token.Value == TEXT("false")))
+				&& (NativeComparison.Equals(TEXT("true"), ESearchCase::IgnoreCase) || NativeComparison.Equals(TEXT("false"), ESearchCase::IgnoreCase)))
 			{
 				Kind = EHjsonNodeKind::Boolean;
-				bBoolean = Token.Value == TEXT("true");
+				bBoolean = NativeComparison.Equals(TEXT("true"), ESearchCase::IgnoreCase);
 				Text.Reset();
 			}
 			else if (Token.Kind == ETokenKind::Bare
-				&& (Folded == TEXT("nan")
-					|| Folded == TEXT("+nan")
-					|| Folded == TEXT("-nan")
-					|| Folded == TEXT("infinity")
-					|| Folded == TEXT("+infinity")
-					|| Folded == TEXT("-infinity")
-					|| Folded == TEXT("inf")
-					|| Folded == TEXT("+inf")
-					|| Folded == TEXT("-inf")))
+				&& (FCString::Stricmp(Folded, TEXT("nan")) == 0
+					|| FCString::Stricmp(Folded, TEXT("+nan")) == 0
+					|| FCString::Stricmp(Folded, TEXT("-nan")) == 0
+					|| FCString::Stricmp(Folded, TEXT("infinity")) == 0
+					|| FCString::Stricmp(Folded, TEXT("+infinity")) == 0
+					|| FCString::Stricmp(Folded, TEXT("-infinity")) == 0
+					|| FCString::Stricmp(Folded, TEXT("inf")) == 0
+					|| FCString::Stricmp(Folded, TEXT("+inf")) == 0
+					|| FCString::Stricmp(Folded, TEXT("-inf")) == 0))
 			{
 				SetSyntaxFailure(OutError, TEXT("hjson_nonfinite_number"), TEXT("HJSON numbers must be finite."),
-				SourceUnit, Pointer, Token.Line, Token.Column, Token.Value, TEXT("finite number"));
+					SourceUnit, Location.GetPointer(), Token.Line, Token.Column, FString(Value), TEXT("finite number"));
 				return false;
 			}
 			else if (Token.Kind == ETokenKind::Bare
-				&& IsIntegerLexeme(Token.Value))
+				&& IsIntegerLexeme(Value))
 			{
 				Kind = EHjsonNodeKind::Integer;
 				Text.Reset();
 			}
 			else if (Token.Kind == ETokenKind::Bare
-				&& IsDecimalLexeme(Token.Value))
+				&& IsDecimalLexeme(Value))
 			{
 				// A decimal token is exact authoring data, not yet a native double.
 				// Its destination codec owns the native range check. NaN/Inf
@@ -809,8 +893,18 @@ namespace UE::UAI::HjsonWorkspace
 				Kind = EHjsonNodeKind::Decimal;
 				Text.Reset();
 			}
+			if (Token.Kind != ETokenKind::String && SelectScalar && (*SelectScalar)(Location.ReadProjectionLocation(),
+				{Kind, Value, Token.ReadLexeme(), bBoolean, Token.Line, Token.Column, Token.ByteStart, Token.ByteEnd,
+					Token.bValueBorrowed, Token.bLexemeBorrowed}))
+				bMaterialize = false;
+			if (!bMaterialize) { OutNode.Reset(); return true; }
+			Token.GetLexeme(); // A retained AST node owns its exact original spelling.
+			if (Kind == EHjsonNodeKind::String) {
+				if (Token.Kind == ETokenKind::String) { Token.GetValue(); Text = MoveTemp(Token.Value); }
+				else Text = FString(Value);
+			}
 			const int64 StringBytes = Token.ByteEnd - Token.ByteStart;
-			if (!ChargeNode(Resources, Pointer, StringBytes, 0, OutError))
+			if (!ChargeNode(Resources, Location.GetPointer(), StringBytes, 0, OutError))
 			{
 				return false;
 			}
@@ -818,10 +912,10 @@ namespace UE::UAI::HjsonWorkspace
 				Kind,
 				MakeProvenance(
 					Token,
-					SourceUnit,
-					Pointer,
-					OriginalKey),
-				Token.Lexeme,
+					SharedSourceUnit,
+					Location.TakePointer(),
+					FString(Location.Key)),
+				MoveTemp(Token.Lexeme),
 				MoveTemp(Text),
 				bBoolean,
 				TArray<FHjsonNodeRef>{},
@@ -1076,18 +1170,23 @@ namespace UE::UAI::HjsonWorkspace
 
 	FString EscapeJsonPointerSegment(FString Segment)
 	{
-		return EscapePointerSegment(Segment);
+		for (TCHAR Character : Segment) if (Character == TEXT('~') || Character == TEXT('/')) {
+			FString Result; Result.Reserve(Segment.Len());
+			PointerText::AppendEscaped(Result, Segment, PointerText::ENulMode::ReplaceCompatible);
+			return Result;
+		}
+		return Segment;
 	}
 
 	FUeAgentResourceTracker MakeSemanticWorkspaceResourceTracker()
 	{
-		return FUeAgentResourceTracker();
+		return FUeAgentResourceTracker(false);
 	}
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 	MakeSemanticWorkspaceResourceTrackerOwner()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(false);
 	}
 
 	namespace
@@ -1480,6 +1579,14 @@ namespace UE::UAI::HjsonWorkspace
 		int64 InByteStart,
 		int64 InByteEnd,
 		FString InOriginalKey)
+		: FSourceProvenance(MakeShared<const FString>(MoveTemp(InSourceUnit)),
+			MoveTemp(InJsonPointer), InLine, InColumn, InByteStart, InByteEnd, MoveTemp(InOriginalKey))
+	{
+	}
+
+	FSourceProvenance::FSourceProvenance(
+		TSharedRef<const FString> InSourceUnit, FString InJsonPointer,
+		int32 InLine, int32 InColumn, int64 InByteStart, int64 InByteEnd, FString InOriginalKey)
 		: SourceUnit(MoveTemp(InSourceUnit))
 		, JsonPointer(MoveTemp(InJsonPointer))
 		, Line(InLine)
@@ -1490,13 +1597,45 @@ namespace UE::UAI::HjsonWorkspace
 	{
 	}
 
-	const FString& FSourceProvenance::GetSourceUnit() const { return SourceUnit; }
+	const FString& FSourceProvenance::GetSourceUnit() const { return *SourceUnit; }
 	const FString& FSourceProvenance::GetJsonPointer() const { return JsonPointer; }
 	int32 FSourceProvenance::GetLine() const { return Line; }
 	int32 FSourceProvenance::GetColumn() const { return Column; }
 	int64 FSourceProvenance::GetByteStart() const { return ByteStart; }
 	int64 FSourceProvenance::GetByteEnd() const { return ByteEnd; }
 	const FString& FSourceProvenance::GetOriginalKey() const { return OriginalKey; }
+
+	struct FHjsonNodeRelocation
+	{
+		explicit FHjsonNodeRelocation(FHjsonNodeRef InStorage) : Storage(MoveTemp(InStorage)) {}
+		FHjsonNodeRef Storage;
+		FCriticalSection Lock;
+		bool bChildrenReady = false;
+		TArray<FHjsonNodeRef> Items;
+		TArray<TPair<FString, FHjsonNodeRef>> Entries;
+
+		void EnsureChildren(const FSourceProvenance& NewOrigin)
+		{
+			FScopeLock Guard(&Lock);
+			if (bChildrenReady) return;
+			const auto& OldOrigin = Storage->GetProvenance();
+			const int64 ByteDelta = NewOrigin.GetByteStart() - OldOrigin.GetByteStart();
+			const int32 LineDelta = NewOrigin.GetLine() - OldOrigin.GetLine();
+			const int32 ColumnDelta = NewOrigin.GetColumn() - OldOrigin.GetColumn();
+			auto MoveSource = [&](FHjsonNodeRef Child) -> FHjsonNodeRef {
+				const auto& P = Child->GetProvenance();
+				if (ByteDelta == 0 && LineDelta == 0 && (ColumnDelta == 0 || P.GetLine() != OldOrigin.GetLine())) return Child;
+				return MakeShared<FHjsonNode>(Child, FSourceProvenance(P.GetSourceUnitBacking(), P.GetJsonPointer(),
+					P.GetLine() + LineDelta, P.GetColumn() + (P.GetLine() == OldOrigin.GetLine() ? ColumnDelta : 0),
+					P.GetByteStart() + ByteDelta, P.GetByteEnd() + ByteDelta, P.GetOriginalKey()));
+			};
+			Items.Reserve(Storage->GetItems().Num());
+			for (const auto& Child : Storage->GetItems()) Items.Add(MoveSource(Child));
+			Entries.Reserve(Storage->GetEntries().Num());
+			for (const auto& Entry : Storage->GetEntries()) Entries.Emplace(Entry.Key, MoveSource(Entry.Value));
+			bChildrenReady = true;
+		}
+	};
 
 	FHjsonNode::FHjsonNode(
 		EHjsonNodeKind InKind,
@@ -1516,20 +1655,53 @@ namespace UE::UAI::HjsonWorkspace
 	{
 	}
 
+	FHjsonNode::FHjsonNode(FHjsonNodeRef Unchanged, FSourceProvenance InProvenance)
+		: Kind(Unchanged->GetKind()), Provenance(MoveTemp(InProvenance))
+		, Relocation(MakeShared<FHjsonNodeRelocation>(Unchanged->Relocation ? Unchanged->Relocation->Storage : Unchanged))
+	{
+	}
+
+	const FHjsonNode* FHjsonNode::GetValueStorageIdentity() const
+	{
+		return Relocation ? &Relocation->Storage.Get() : this;
+	}
+
+	int64 FHjsonNode::GetOwnedStorageBytes(TArray<const FHjsonNode*>& OutRetainedNodes) const
+	{
+		int64 Bytes = sizeof(*this) + 32 + Lexeme.GetAllocatedSize() + Text.GetAllocatedSize()
+			+ Provenance.GetJsonPointer().GetAllocatedSize() + Provenance.GetOriginalKey().GetAllocatedSize()
+			+ Items.GetAllocatedSize() + Entries.GetAllocatedSize();
+		for (const auto& Child : Items) OutRetainedNodes.Add(&Child.Get());
+		for (const auto& Entry : Entries) { Bytes += Entry.Key.GetAllocatedSize(); OutRetainedNodes.Add(&Entry.Value.Get()); }
+		if (Relocation) {
+			FScopeLock Guard(&Relocation->Lock);
+			Bytes += sizeof(FHjsonNodeRelocation) + 32 + Relocation->Items.GetAllocatedSize() + Relocation->Entries.GetAllocatedSize();
+			OutRetainedNodes.Add(&Relocation->Storage.Get());
+			for (const auto& Child : Relocation->Items) OutRetainedNodes.Add(&Child.Get());
+			for (const auto& Entry : Relocation->Entries) { Bytes += Entry.Key.GetAllocatedSize(); OutRetainedNodes.Add(&Entry.Value.Get()); }
+		}
+		return Bytes;
+	}
+
 	EHjsonNodeKind FHjsonNode::GetKind() const { return Kind; }
 	const FSourceProvenance& FHjsonNode::GetProvenance() const { return Provenance; }
-	const FString& FHjsonNode::GetLexeme() const { return Lexeme; }
-	const FString& FHjsonNode::GetText() const { return Text; }
-	bool FHjsonNode::GetBoolean() const { return bBoolean; }
-	const TArray<FHjsonNodeRef>& FHjsonNode::GetItems() const { return Items; }
+	const FString& FHjsonNode::GetLexeme() const { return Relocation ? Relocation->Storage->GetLexeme() : Lexeme; }
+	const FString& FHjsonNode::GetText() const { return Relocation ? Relocation->Storage->GetText() : Text; }
+	bool FHjsonNode::GetBoolean() const { return Relocation ? Relocation->Storage->GetBoolean() : bBoolean; }
+	const TArray<FHjsonNodeRef>& FHjsonNode::GetItems() const
+	{
+		if (!Relocation) return Items;
+		Relocation->EnsureChildren(Provenance); return Relocation->Items;
+	}
 	const TArray<TPair<FString, FHjsonNodeRef>>& FHjsonNode::GetEntries() const
 	{
-		return Entries;
+		if (!Relocation) return Entries;
+		Relocation->EnsureChildren(Provenance); return Relocation->Entries;
 	}
 
 	const FHjsonNode* FHjsonNode::Get(const FString& Key) const
 	{
-		for (const TPair<FString, FHjsonNodeRef>& Entry : Entries)
+		for (const TPair<FString, FHjsonNodeRef>& Entry : GetEntries())
 		{
 			if (Entry.Key.Equals(Key, ESearchCase::CaseSensitive))
 			{
@@ -1545,9 +1717,16 @@ namespace UE::UAI::HjsonWorkspace
 		: SourceUnit(MoveTemp(InSourceUnit))
 		, Root(MoveTemp(InRoot))
 	{
+		bSourceFromRoot = SourceUnit.Equals(Root->GetProvenance().GetSourceUnit(), ESearchCase::CaseSensitive);
+		if (bSourceFromRoot) SourceUnit.Empty();
 	}
 
-	const FString& FHjsonDocument::GetSourceUnit() const { return SourceUnit; }
+	FHjsonDocument::FHjsonDocument(FHjsonNodeRef InRoot)
+		: Root(MoveTemp(InRoot)), bSourceFromRoot(true)
+	{
+	}
+
+	const FString& FHjsonDocument::GetSourceUnit() const { return bSourceFromRoot ? Root->GetProvenance().GetSourceUnit() : SourceUnit; }
 	const FHjsonNodeRef& FHjsonDocument::GetRoot() const { return Root; }
 
 	const FHjsonNode* FHjsonDocument::Find(const FString& JsonPointer) const
@@ -1753,17 +1932,23 @@ namespace UE::UAI::HjsonWorkspace
 	FExportFilePlan::FExportFilePlan(
 		FString InRelativePath,
 		TArray<uint8> InCanonicalUtf8,
-		FString InContentHash)
+		FString InContentHash,
+		TArray<FIntPoint> InGeneratedFragmentSpans,
+		TSharedPtr<const FFragmentIdentities> InGeneratedFragmentIdentities)
 		: RelativePath(MoveTemp(InRelativePath))
-		, CanonicalUtf8(MoveTemp(InCanonicalUtf8))
+		, CanonicalUtf8(MakeShared<const TArray<uint8>>(MoveTemp(InCanonicalUtf8)))
 		, ContentHash(MoveTemp(InContentHash))
+		, RootHeaderFacts(FindHjsonRootHeaderFacts(ContentHash))
+		, GeneratedFragmentIdentities(MoveTemp(InGeneratedFragmentIdentities))
 	{
+		if (!InGeneratedFragmentSpans.IsEmpty())
+			GeneratedFragmentSpans = MakeShared<const TArray<FIntPoint>>(MoveTemp(InGeneratedFragmentSpans));
 	}
 
 	const FString& FExportFilePlan::GetRelativePath() const { return RelativePath; }
 	const TArray<uint8>& FExportFilePlan::GetCanonicalUtf8() const
 	{
-		return CanonicalUtf8;
+		return CanonicalUtf8.Get();
 	}
 	const FString& FExportFilePlan::GetContentHash() const { return ContentHash; }
 
@@ -1775,13 +1960,15 @@ namespace UE::UAI::HjsonWorkspace
 		FString InSnapshotEvidenceId,
 		TArray<FExportFilePlan> InFiles,
 		FString InPlanFingerprint,
-		int64 InObservedTokens)
+		int64 InObservedTokens, TMap<FString, FString> InRetainedFileHashes, TOptional<TSet<FString>> InPendingAuthorDocuments)
 		: WorkspaceKind(InWorkspaceKind)
 		, EntryFile(MoveTemp(InEntryFile))
 		, SnapshotId(MoveTemp(InSnapshotId))
 		, SnapshotRevision(MoveTemp(InSnapshotRevision))
 		, SnapshotEvidenceId(MoveTemp(InSnapshotEvidenceId))
 		, Files(MoveTemp(InFiles))
+		, RetainedFileHashes(MoveTemp(InRetainedFileHashes))
+		, PendingAuthorDocuments(MoveTemp(InPendingAuthorDocuments))
 		, PlanFingerprint(MoveTemp(InPlanFingerprint))
 		, ObservedTokens(InObservedTokens)
 	{
@@ -1816,7 +2003,7 @@ namespace UE::UAI::HjsonWorkspace
 	{
 		PreviousParsedRootHeader.Reset();
 		if (ContentHash.IsEmpty() || Document.GetRoot()->GetKind() != EHjsonNodeKind::Object) return;
-		auto Header = MakeShared<FParsedRootHeader>();
+		auto Header = MakeShared<FHjsonRootHeaderFacts>();
 		int64 Characters = 0;
 		for (const auto& Pair : Document.GetRoot()->GetEntries())
 		{
@@ -1830,30 +2017,61 @@ namespace UE::UAI::HjsonWorkspace
 		PreviousParsedRootHeader = MoveTemp(Header);
 	}
 
-	bool TryReuseParsedHjsonRootString(const FString& ContentHash, const FString& Field, FString& OutValue,
-		TMap<EUeAgentResourceDimension, int64>& OutParseCharges)
+	void RememberFormattedHjsonRootHeader(const FString& ContentHash, const FUeAgentCanonicalValue& Root)
 	{
-		if (!PreviousParsedRootHeader.IsValid()
-			|| !PreviousParsedRootHeader->ContentHash.Equals(ContentHash, ESearchCase::CaseSensitive)) return false;
-		for (const auto& Pair : PreviousParsedRootHeader->Strings)
+		PreviousParsedRootHeader.Reset();
+		if (ContentHash.IsEmpty() || Root.GetKind() != EUeAgentValueKind::Object) return;
+		auto Header = MakeShared<FHjsonRootHeaderFacts>();
+		int64 Characters = 0;
+		for (const auto& Pair : Root.GetObjectItems()) {
+			if (Pair.Key != TEXT("workspace_schema") && Pair.Key != TEXT("publication_generation") && Pair.Key != TEXT("publication_state")) continue;
+			if (Pair.Value->GetKind() != EUeAgentValueKind::String) continue;
+			Characters += Pair.Key.Len() + Pair.Value->GetText().Len();
+			if (Characters > 65536) return;
+			Header->Strings.Emplace(Pair.Key, Pair.Value->GetText());
+		}
+		Header->ContentHash = ContentHash;
+		PreviousParsedRootHeader = MoveTemp(Header);
+	}
+
+	FHjsonRootHeaderFactsPtr FindHjsonRootHeaderFacts(const FString& ContentHash)
+	{
+		return PreviousParsedRootHeader && PreviousParsedRootHeader->ContentHash == ContentHash ? PreviousParsedRootHeader : nullptr;
+	}
+
+	bool TryReadHjsonRootString(const FHjsonRootHeaderFactsPtr& Facts, const FString& ContentHash, const FString& Field, FString& OutValue,
+		TMap<EUeAgentResourceDimension, int64>* OutParseCharges)
+	{
+		if (!Facts || !Facts->ContentHash.Equals(ContentHash, ESearchCase::CaseSensitive)) return false;
+		for (const auto& Pair : Facts->Strings)
 			if (Pair.Key.Equals(Field, ESearchCase::CaseSensitive))
 			{
 				OutValue = Pair.Value;
-				OutParseCharges = PreviousParsedRootHeader->ParseCharges;
+				if (OutParseCharges) *OutParseCharges = Facts->ParseCharges;
 				return true;
 			}
 		return false;
 	}
 
-	bool TryParseHjsonDocument(
+	bool TryReuseHjsonRootString(const FString& ContentHash, const FString& Field, FString& OutValue,
+		TMap<EUeAgentResourceDimension, int64>* OutParseCharges)
+	{
+		return TryReadHjsonRootString(PreviousParsedRootHeader, ContentHash, Field, OutValue, OutParseCharges);
+	}
+
+	static bool TryParseHjsonDocumentImpl(
 		const FString& Text,
 		const FString& SourceUnit,
 		FUeAgentResourceTracker& Resources,
 		FHjsonDocumentPtr& OutDocument,
 		FWorkspaceError& OutError,
-		const FHjsonOperationCheckpoint* Checkpoint)
+		const FHjsonOperationCheckpoint* Checkpoint, const FSourceProvenance* Origin,
+		TFunctionRef<bool(const FString&, const FString&)>* IncludeSubtree = nullptr,
+		TFunctionRef<bool(const FHjsonScalarLocation&, const FHjsonParsedScalar&)>* SelectScalar = nullptr,
+		TArray<FToken>* ScalarTokenOwner = nullptr, bool* OutExtendsIntoParent = nullptr)
 	{
 		OutDocument.Reset();
+		if (OutExtendsIntoParent) *OutExtendsIntoParent = false;
 		OutError.Reset();
 		FWorkspaceError Diagnostics;
 		bool bReachedEnd = false;
@@ -1877,9 +2095,31 @@ namespace UE::UAI::HjsonWorkspace
 			OutError.SetSourceFailure(TEXT("hjson_source_unit_missing"), TEXT("Parsing HJSON requires a nonempty source unit."));
 			return false;
 		}
+		const auto SyntaxUsageBefore = Resources.Snapshot();
+		if (!Origin && !IncludeSubtree && !SelectScalar && TryRestoreHjsonSyntax(Text, SourceUnit, Resources, OutDocument, OutError, Checkpoint)) {
+			bReachedEnd = true;
+			return true;
+		}
+		if (OutError.HasErrors()) return false;
 		int64 SourceUtf8Length = 0;
-		if (!ScanUtf8Text(Text, nullptr, SourceUtf8Length, OutError, Checkpoint)) return false;
-		if (!Charge(
+		TArray<FToken> LocalTokens;
+		TArray<FToken>& Tokens = ScalarTokenOwner ? *ScalarTokenOwner : LocalTokens;
+		Tokens.Reset();
+		int32 EndLine = 1, EndColumn = 1;
+		int32 FirstContainerEnd = INDEX_NONE;
+		if (!ScanTokens(Text, SourceUnit, Resources, Tokens, EndLine, EndColumn, SourceUtf8Length, OutError, Diagnostics, Checkpoint, Origin, SelectScalar != nullptr,
+			OutExtendsIntoParent ? &FirstContainerEnd : nullptr))
+		{
+			return false;
+		}
+		// The mapped old delimiters may now enclose several siblings. Select
+		// their parent from the original scanner's frames before parsing a root.
+		if (OutExtendsIntoParent && !Diagnostics.HasErrors() && FirstContainerEnd != INDEX_NONE
+			&& FirstContainerEnd + 1 < Tokens.Num()) {
+			*OutExtendsIntoParent = true;
+			return true;
+		}
+		if (Resources.CollectsUsage() && !Charge(
 			Resources,
 			{
 				{EUeAgentResourceDimension::InputBytes, SourceUtf8Length},
@@ -1892,46 +2132,22 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return false;
 		}
-		TArray<FToken> Tokens;
-		if (!ScanTokens(Text, SourceUnit, Resources, Tokens, OutError, Diagnostics, Checkpoint))
-		{
-			return false;
-		}
 		if (Tokens.IsEmpty())
 		{
 			SetSyntaxFailure(OutError, TEXT("hjson_empty_document"), TEXT("The HJSON document contains no value."),
 				SourceUnit, TEXT("/"), 1, 1, TEXT("empty document"), TEXT("one root value"));
 			return false;
 		}
-		int32 EndLine = 1;
-		int32 EndColumn = 1;
-		for (int32 Index = 0; Index < Text.Len(); ++Index)
-		{
-			if (Checkpoint && Index % 1024 < 2
-				&& !(*Checkpoint)(TEXT("hjson_end_position"), OutError)) return false;
-			if (Text[Index] == TEXT('\r'))
-			{
-				if (Index + 1 < Text.Len() && Text[Index + 1] == TEXT('\n')) ++Index;
-				++EndLine;
-				EndColumn = 1;
-			}
-			else if (Text[Index] == TEXT('\n'))
-			{
-				++EndLine;
-				EndColumn = 1;
-			}
-			else
-			{
-				++EndColumn;
-			}
-		}
+		// Advance already consumed every code unit with this exact CRLF/column
+		// grammar. Preserve the stage checkpoint without rescanning the document.
+		if (Checkpoint && !(*Checkpoint)(TEXT("hjson_end_position"), OutError)) return false;
 		const bool bImplicitRootObject = Tokens.Num() >= 2
 			&& (Tokens[0].Kind == ETokenKind::Bare
 				|| Tokens[0].Kind == ETokenKind::String)
 			&& Tokens[1].Kind == ETokenKind::Colon;
 		if (bImplicitRootObject)
 		{
-			if (!Charge(Resources, {
+			if (Resources.CollectsUsage() && !Charge(Resources, {
 					{EUeAgentResourceDimension::WorkUnits, 2},
 					{EUeAgentResourceDimension::EstimatedMemoryBytes,
 						2 * static_cast<int64>(sizeof(FToken))}},
@@ -1939,22 +2155,24 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return false;
 			}
-			const FToken First = Tokens[0];
-			Tokens.Insert({ETokenKind::OpenObject, TEXT("{"), TEXT("{"),
-				0, 0, 0, 0, First.Line, First.Column, First.bNewlineBefore}, 0);
-			const int64 EndByte = SourceUtf8Length;
-			Tokens.Add({ETokenKind::CloseObject, TEXT("}"), TEXT("}"),
+			const int32 FirstLine = Tokens[0].Line, FirstColumn = Tokens[0].Column;
+			const bool bFirstNewline = Tokens[0].bNewlineBefore;
+			Tokens.Insert({ETokenKind::OpenObject, {}, {},
+				0, 0, Origin ? Origin->GetByteStart() : 0, Origin ? Origin->GetByteStart() : 0, FirstLine, FirstColumn, bFirstNewline}, 0);
+			const int64 EndByte = SourceUtf8Length + (Origin ? Origin->GetByteStart() : 0);
+			Tokens.Add({ETokenKind::CloseObject, {}, {},
 				Text.Len(), Text.Len(), EndByte, EndByte,
 				EndLine, EndColumn, true});
 		}
 
+		const TSharedRef<const FString> SharedSourceUnit = MakeShared<const FString>(SourceUnit);
 		int32 TokenIndex = 0;
 		FHjsonNodePtr Root;
 		TArray<FParseFrame> Frames;
-		FString ExpectedPointer = TEXT("/");
-		FString ExpectedKey;
+		FParseValueLocation Expected;
+		Expected.SetRoot(Origin ? Origin->GetJsonPointer() : TEXT("/"), Origin ? FStringView(Origin->GetOriginalKey()) : FStringView());
 		bool bExpectingValue = true;
-		auto Attach = [&](FHjsonNodeRef Node) -> bool
+		auto Attach = [&](FHjsonNodePtr Node) -> bool
 		{
 			if (Frames.IsEmpty())
 			{
@@ -1971,12 +2189,13 @@ namespace UE::UAI::HjsonWorkspace
 			FParseFrame& Parent = Frames.Last();
 			if (Parent.bObject)
 			{
-				Parent.Entries.Emplace(Parent.PendingKey, Node);
+				if (Parent.bRetain && Node) Parent.Entries.Emplace(FString(Parent.PendingKey.GetValue()), Node.ToSharedRef());
 				Parent.PendingKey.Reset();
 			}
 			else
 			{
-				Parent.Items.Add(Node);
+				if (Parent.bRetain && Node) Parent.Items.Add(Node.ToSharedRef());
+				++Parent.ParsedItems;
 			}
 			Parent.State = EFrameState::AfterValue;
 			bExpectingValue = false;
@@ -1994,17 +2213,17 @@ namespace UE::UAI::HjsonWorkspace
 				if (!Tokens.IsValidIndex(TokenIndex))
 				{
 					SetSyntaxFailure(OutError, TEXT("hjson_value_missing"), TEXT("A value is required before the next delimiter or end of input."),
-				SourceUnit, ExpectedPointer, EndLine, EndColumn, TEXT("end of input"), TEXT("HJSON value"));
+						SourceUnit, Expected.GetPointer(), EndLine, EndColumn, TEXT("end of input"), TEXT("HJSON value"));
 					return false;
 				}
-				FToken Token = Tokens[TokenIndex++];
+				FToken& Token = Tokens[TokenIndex++];
 				if (!Frames.IsEmpty() && (Token.Kind == ETokenKind::Comma
 					|| (Frames.Last().bObject && Token.Kind == ETokenKind::CloseObject)
 					|| (!Frames.Last().bObject && Token.Kind == ETokenKind::CloseArray)))
 				{
 					FWorkspaceError Error;
 					SetSyntaxFailure(Error, TEXT("hjson_value_missing"), TEXT("A value is required before the next delimiter or end of input."),
-				SourceUnit, ExpectedPointer, Token.Line, Token.Column, Token.Lexeme, TEXT("HJSON value"));
+						SourceUnit, Expected.GetPointer(), Token.Line, Token.Column, Token.GetLexeme(), TEXT("HJSON value"));
 					Diagnostics.Append(Error);
 					--TokenIndex;
 					Frames.Last().PendingKey.Reset();
@@ -2012,12 +2231,14 @@ namespace UE::UAI::HjsonWorkspace
 					bExpectingValue = false;
 					continue;
 				}
+				const bool bRetain = Frames.IsEmpty() || (Frames.Last().bRetain
+					&& (!IncludeSubtree || (*IncludeSubtree)(Expected.GetPointer(), FString(Expected.Key))));
 				if (Token.Kind == ETokenKind::OpenObject
 					|| Token.Kind == ETokenKind::OpenArray)
 				{
-					if (!ChargeNode(
+					if (bRetain && !ChargeNode(
 						Resources,
-						ExpectedPointer,
+							Expected.GetPointer(),
 						0,
 						0,
 						OutError))
@@ -2025,10 +2246,11 @@ namespace UE::UAI::HjsonWorkspace
 						return false;
 					}
 					FParseFrame Frame;
+					Frame.bRetain = bRetain;
 					Frame.bObject = Token.Kind == ETokenKind::OpenObject;
-					Frame.Pointer = ExpectedPointer;
-					Frame.OriginalKey = ExpectedKey;
-					Frame.StartToken = Token;
+					Frame.Pointer = Expected.TakePointer();
+					Frame.OriginalKey = FString(Expected.Key);
+					Frame.StartToken = MoveTemp(Token);
 					Frame.State = Frame.bObject
 						? EFrameState::KeyOrEnd
 						: EFrameState::ValueOrEnd;
@@ -2040,12 +2262,12 @@ namespace UE::UAI::HjsonWorkspace
 				if (!MakeScalarNode(
 					Token,
 					SourceUnit,
-					ExpectedPointer,
-					ExpectedKey,
+					SharedSourceUnit,
+					Expected,
 					Resources,
 					Scalar,
-					OutError)
-					|| !Attach(Scalar.ToSharedRef()))
+					OutError, bRetain, SelectScalar)
+					|| !Attach(Scalar))
 				{
 					return false;
 				}
@@ -2062,24 +2284,24 @@ namespace UE::UAI::HjsonWorkspace
 				return false;
 			}
 			FParseFrame& Frame = Frames.Last();
-			const FToken& Token = Tokens[TokenIndex];
+			FToken& Token = Tokens[TokenIndex];
 			if (Frame.bObject)
 			{
 				if (Frame.State == EFrameState::KeyOrEnd)
 				{
 					if (Token.Kind == ETokenKind::CloseObject)
 					{
-						const FToken EndToken = Token;
+						const FToken& EndToken = Token;
 						++TokenIndex;
 						FParseFrame Closed = MoveTemp(Frames.Last());
 						Frames.Pop(EAllowShrinking::No);
 						int64 KeyBytes = 0;
-						for (const TPair<FString, FHjsonNodeRef>& Entry
+						if (Resources.CollectsUsage()) for (const TPair<FString, FHjsonNodeRef>& Entry
 							: Closed.Entries)
 						{
 							KeyBytes += FTCHARToUTF8(*Entry.Key).Length();
 						}
-						if (!Charge(
+						if (Resources.CollectsUsage() && !Charge(
 							Resources,
 							{
 								{EUeAgentResourceDimension::Items,
@@ -2091,21 +2313,22 @@ namespace UE::UAI::HjsonWorkspace
 								{EUeAgentResourceDimension::EstimatedMemoryBytes,
 									Closed.Entries.Num() * 24ll},
 							},
-							Closed.Pointer,
+							MoveTemp(Closed.Pointer),
 							OutError))
 						{
 							return false;
 						}
-						FHjsonNodeRef Container = MakeShared<FHjsonNode>(
+						FHjsonNodePtr Container;
+						if (Closed.bRetain) Container = MakeShared<FHjsonNode>(
 							EHjsonNodeKind::Object,
 							FSourceProvenance(
-								SourceUnit,
-								Closed.Pointer,
+								SharedSourceUnit,
+								MoveTemp(Closed.Pointer),
 								Closed.StartToken.Line,
 								Closed.StartToken.Column,
 								Closed.StartToken.ByteStart,
 								EndToken.ByteEnd,
-								Closed.OriginalKey),
+								MoveTemp(Closed.OriginalKey)),
 							FString(),
 							FString(),
 							false,
@@ -2120,21 +2343,22 @@ namespace UE::UAI::HjsonWorkspace
 					if ((Token.Kind != ETokenKind::Bare
 						&& Token.Kind != ETokenKind::String)
 						|| (Token.Kind == ETokenKind::Bare
-							&& (Token.Value.Contains(TEXT(" ")) || Token.Value.Contains(TEXT("\t")))))
+						&& (Token.ReadValue().Contains(TEXT(" ")) || Token.ReadValue().Contains(TEXT("\t")))))
 					{
 						SetSyntaxFailure(OutError, TEXT("hjson_object_key_expected"), TEXT("Expected a quoted key or an unquoted key without whitespace."),
-				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.Lexeme, TEXT("object key"));
+				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.GetLexeme(), TEXT("object key"));
 						return false;
 					}
-					if (Frame.Keys.Contains(Token.Value))
+					bool bDuplicate = false;
+					Frame.Keys.Add(Token.ReadValue(), &bDuplicate);
+					if (bDuplicate)
 					{
 						SetSyntaxFailure(OutError, TEXT("hjson_duplicate_key"), TEXT("Each key must be unique within its object."),
-				SourceUnit, JoinPointer(Frame.Pointer, Token.Value), Token.Line, Token.Column, Token.Value, TEXT("unique object key"));
+				SourceUnit, JoinPointer(Frame.Pointer, Token.GetValue()), Token.Line, Token.Column, Token.GetValue(), TEXT("unique object key"));
 						Diagnostics.Append(OutError);
 						OutError.Reset();
 					}
-					Frame.Keys.Add(Token.Value);
-					Frame.PendingKey = Token.Value;
+					Frame.PendingKey = Token.ReadValue();
 					Frame.State = EFrameState::Colon;
 					++TokenIndex;
 					continue;
@@ -2144,22 +2368,18 @@ namespace UE::UAI::HjsonWorkspace
 					if (Token.Kind != ETokenKind::Colon)
 					{
 						SetSyntaxFailure(OutError, TEXT("hjson_colon_expected"), TEXT("Expected ':' after the object key."),
-				SourceUnit, JoinPointer(Frame.Pointer, Frame.PendingKey), Token.Line, Token.Column, Token.Lexeme, TEXT(":"));
+						SourceUnit, JoinPointer(Frame.Pointer, Frame.PendingKey.GetValue()), Token.Line, Token.Column, Token.GetLexeme(), TEXT(":"));
 						// Only resume where a value token is already unambiguous.
 						if (Token.Kind != ETokenKind::OpenObject && Token.Kind != ETokenKind::OpenArray
 							&& Token.Kind != ETokenKind::Bare && Token.Kind != ETokenKind::String) return false;
 						Diagnostics.Append(OutError);
 						OutError.Reset();
-						ExpectedPointer = JoinPointer(Frame.Pointer, Frame.PendingKey);
-						ExpectedKey = Frame.PendingKey;
+						Expected.SetChild(Frame.Pointer, Frame.PendingKey.GetValue());
 						Frame.State = EFrameState::AwaitingValue;
 						bExpectingValue = true;
 						continue;
 					}
-					ExpectedPointer = JoinPointer(
-						Frame.Pointer,
-						Frame.PendingKey);
-					ExpectedKey = Frame.PendingKey;
+					Expected.SetChild(Frame.Pointer, Frame.PendingKey.GetValue());
 					Frame.State = EFrameState::AwaitingValue;
 					++TokenIndex;
 					bExpectingValue = true;
@@ -2180,7 +2400,7 @@ namespace UE::UAI::HjsonWorkspace
 						continue;
 					}
 					SetSyntaxFailure(OutError, TEXT("hjson_object_separator_expected"), TEXT("Expected a comma, newline or closing brace after the object value."),
-				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.Lexeme, TEXT("comma, newline or }"));
+				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.GetLexeme(), TEXT("comma, newline or }"));
 					if ((Token.Kind != ETokenKind::Bare && Token.Kind != ETokenKind::String)
 						|| !Tokens.IsValidIndex(TokenIndex + 1)
 						|| Tokens[TokenIndex + 1].Kind != ETokenKind::Colon) return false;
@@ -2196,11 +2416,11 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					if (Token.Kind == ETokenKind::CloseArray)
 					{
-						const FToken EndToken = Token;
+						const FToken& EndToken = Token;
 						++TokenIndex;
 						FParseFrame Closed = MoveTemp(Frames.Last());
 						Frames.Pop(EAllowShrinking::No);
-						if (!Charge(
+						if (Resources.CollectsUsage() && !Charge(
 							Resources,
 							{
 								{EUeAgentResourceDimension::Items,
@@ -2210,21 +2430,22 @@ namespace UE::UAI::HjsonWorkspace
 								{EUeAgentResourceDimension::EstimatedMemoryBytes,
 									Closed.Items.Num() * 24ll},
 							},
-							Closed.Pointer,
+							MoveTemp(Closed.Pointer),
 							OutError))
 						{
 							return false;
 						}
-						FHjsonNodeRef Container = MakeShared<FHjsonNode>(
+						FHjsonNodePtr Container;
+						if (Closed.bRetain) Container = MakeShared<FHjsonNode>(
 							EHjsonNodeKind::Array,
 							FSourceProvenance(
-								SourceUnit,
-								Closed.Pointer,
+								SharedSourceUnit,
+								MoveTemp(Closed.Pointer),
 								Closed.StartToken.Line,
 								Closed.StartToken.Column,
 								Closed.StartToken.ByteStart,
 								EndToken.ByteEnd,
-								Closed.OriginalKey),
+								MoveTemp(Closed.OriginalKey)),
 							FString(),
 							FString(),
 							false,
@@ -2236,10 +2457,7 @@ namespace UE::UAI::HjsonWorkspace
 						}
 						continue;
 					}
-					ExpectedPointer = JoinPointer(
-						Frame.Pointer,
-						::LexToString(Frame.Items.Num()));
-					ExpectedKey.Reset();
+					Expected.SetChild(Frame.Pointer, FStringView(), Frame.ParsedItems);
 					Frame.State = EFrameState::AwaitingValue;
 					bExpectingValue = true;
 					continue;
@@ -2259,7 +2477,7 @@ namespace UE::UAI::HjsonWorkspace
 						continue;
 					}
 					SetSyntaxFailure(OutError, TEXT("hjson_array_separator_expected"), TEXT("Expected a comma, newline or closing bracket after the array value."),
-				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.Lexeme, TEXT("comma, newline or ]"));
+				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.GetLexeme(), TEXT("comma, newline or ]"));
 					if (Token.Kind != ETokenKind::Bare && Token.Kind != ETokenKind::String
 						&& Token.Kind != ETokenKind::OpenObject && Token.Kind != ETokenKind::OpenArray) return false;
 					Diagnostics.Append(OutError);
@@ -2279,7 +2497,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			const FToken& Trailing = Tokens[TokenIndex];
 			SetSyntaxFailure(OutError, TEXT("hjson_trailing_content"), TEXT("The document contains extra content after its root value."),
-				SourceUnit, TEXT("/"), Trailing.Line, Trailing.Column, Trailing.Lexeme, TEXT("end of input"));
+				SourceUnit, TEXT("/"), Trailing.Line, Trailing.Column, Trailing.GetLexeme(), TEXT("end of input"));
 			return false;
 		}
 		bReachedEnd = true;
@@ -2287,6 +2505,401 @@ namespace UE::UAI::HjsonWorkspace
 		OutDocument = MakeShared<FHjsonDocument>(
 			SourceUnit,
 			Root.ToSharedRef());
+		if (!Origin && !IncludeSubtree && !SelectScalar) RememberHjsonSyntax(Text, SourceUnit, *OutDocument, SyntaxUsageBefore, Resources.Snapshot());
+		return true;
+	}
+	bool TryParseHjsonDocument(const FString& Text, const FString& SourceUnit,
+		FUeAgentResourceTracker& Resources, FHjsonDocumentPtr& OutDocument, FWorkspaceError& OutError,
+		const FHjsonOperationCheckpoint* Checkpoint)
+	{
+		return TryParseHjsonDocumentImpl(Text, SourceUnit, Resources, OutDocument, OutError, Checkpoint, nullptr);
+	}
+	bool TryParseHjsonSelectedNodes(const FString& Text, const FString& SourceUnit,
+		FUeAgentResourceTracker& Resources, FHjsonNodePtr& OutRoot, FWorkspaceError& OutError,
+		TFunctionRef<bool(const FString&, const FString&)> IncludeSubtree,
+		const FHjsonOperationCheckpoint* Checkpoint)
+	{
+		OutRoot.Reset();
+		FHjsonDocumentPtr Projection;
+		if (!TryParseHjsonDocumentImpl(Text, SourceUnit, Resources, Projection, OutError, Checkpoint, nullptr, &IncludeSubtree)) return false;
+		OutRoot = Projection->GetRoot();
+		return true;
+	}
+
+	bool TryConsumeHjsonScalarProjection(const FString& Text, const FString& SourceUnit,
+		FUeAgentResourceTracker& Resources,
+		TFunctionRef<bool(const FHjsonScalarLocation&, const FHjsonParsedScalar&)> SelectScalar,
+		TFunctionRef<bool(const FHjsonNode&, FWorkspaceError&)> ConsumeRoot,
+		FWorkspaceError& OutError, const FHjsonOperationCheckpoint* Checkpoint)
+	{
+		TArray<FToken> Tokens;
+		FHjsonDocumentPtr Projection;
+		if (!TryParseHjsonDocumentImpl(Text, SourceUnit, Resources, Projection, OutError,
+			Checkpoint, nullptr, nullptr, &SelectScalar, &Tokens)) return false;
+		return ConsumeRoot(*Projection->GetRoot(), OutError);
+	}
+
+	bool TryParseHjsonDocumentSpan(const FString& Text, const FSourceProvenance& Span,
+		FUeAgentResourceTracker& Resources, FHjsonDocumentPtr& OutDocument, FWorkspaceError& OutError,
+		const FHjsonOperationCheckpoint* Checkpoint)
+	{
+		OutDocument.Reset(); OutError.Reset();
+		int32 Line = 1, Column = 1;
+		int32 Position = 0, Start = INDEX_NONE, End = INDEX_NONE, StartLine = 1, StartColumn = 1;
+		int32 NextCheckpoint = 0;
+		int64 Bytes = 0;
+		if (Span.GetByteStart() >= 0 && Span.GetByteEnd() > Span.GetByteStart()) {
+			while (Position <= Text.Len() && Bytes <= Span.GetByteEnd()) {
+				if (Bytes == Span.GetByteStart()) { Start = Position; StartLine = Line; StartColumn = Column; }
+				if (Bytes == Span.GetByteEnd()) { End = Position; break; }
+				if (Position == Text.Len()) break;
+				if (Position >= NextCheckpoint) {
+					if (Checkpoint && !(*Checkpoint)(TEXT("hjson_span_position"), OutError)) return false;
+					NextCheckpoint = Position > MAX_int32 - 1024 ? MAX_int32 : Position + 1024;
+				}
+				int32 CodeUnits = 1;
+				const int32 Width = Utf8WidthAt(Text, Position, CodeUnits), Before = Position;
+				AdvanceSourcePosition(Text, Position, Line, Column);
+				if (CodeUnits == 2) AdvanceSourcePosition(Text, Position, Line, Column);
+				Bytes += Width + (Position - Before - CodeUnits); // CRLF consumes both ASCII bytes.
+			}
+		}
+		if (Start == INDEX_NONE || End == INDEX_NONE) {
+			OutError.SetSourceFailure(TEXT("hjson_source_span_invalid"), TEXT("The requested source span is outside the observed document."), Span.GetSourceUnit());
+			return false;
+		}
+		const FSourceProvenance Origin(Span.GetSourceUnit(), Span.GetJsonPointer(), StartLine, StartColumn,
+			Span.GetByteStart(), Span.GetByteEnd(), Span.GetOriginalKey());
+		// No complete UTF-8 or prefix copy for every row. Only this consumed
+		// fragment is materialized; width and CRLF rules are the original scanner's.
+		return TryParseHjsonDocumentImpl(Text.Mid(Start, End - Start), Span.GetSourceUnit(),
+			Resources, OutDocument, OutError, Checkpoint, &Origin);
+	}
+
+    static TOptional<FSourceProvenance> LocateGeneratedSpan(const TArray<uint8>& Utf8, const FSourceProvenance& Span)
+    {
+		if (Span.GetByteStart() < 0 || Span.GetByteEnd() <= Span.GetByteStart() || Span.GetByteEnd() > Utf8.Num()) return {};
+		int32 Line = Span.GetLine(), Column = Span.GetColumn();
+		if (Line <= 0 || Column <= 0) {
+			// Only line/column are consumed. Do not manufacture and walk a
+			// complete decoded prefix for every requested row. UTF-8 cannot
+			// contain CR/LF inside a multibyte character; count those actual
+			// delimiters, then let the original scanner consume the final line.
+			const uint8* Begin = Utf8.GetData(); const uint8* End = Begin + Span.GetByteStart();
+			const uint8* LineStart = Begin; Line = Column = 1;
+			for (const uint8* Cursor = Begin; Cursor < End;) {
+				const auto* Newline = static_cast<const uint8*>(std::memchr(Cursor, '\n', End - Cursor));
+				if (!Newline) break;
+				++Line; LineStart = Newline + 1; Cursor = Newline + 1;
+			}
+			for (const uint8* Cursor = Begin; Cursor < End;) {
+				const auto* Return = static_cast<const uint8*>(std::memchr(Cursor, '\r', End - Cursor));
+				if (!Return) break;
+				if (Return + 1 == End && End < Begin + Utf8.Num() && *End == '\n') {
+					return {};
+				}
+				if (Return + 1 == End || Return[1] != '\n') { ++Line; if (Return >= LineStart) LineStart = Return + 1; }
+				Cursor = Return + 1;
+			}
+			const FUTF8ToTCHAR LastLine(reinterpret_cast<const ANSICHAR*>(LineStart), static_cast<int32>(End - LineStart));
+			const FString PrefixText(LastLine.Length(), LastLine.Get()); int32 Position = 0;
+			while (Position < PrefixText.Len()) AdvanceSourcePosition(PrefixText, Position, Line, Column);
+		}
+		return FSourceProvenance(Span.GetSourceUnit(), Span.GetJsonPointer(), Line, Column,
+			Span.GetByteStart(), Span.GetByteEnd(), Span.GetOriginalKey());
+    }
+	bool TryParseGeneratedHjsonSpan(const TArray<uint8>& Utf8, const FSourceProvenance& Span,
+		FUeAgentResourceTracker& Resources, FHjsonDocumentPtr& OutDocument, FWorkspaceError& OutError,
+		TFunctionRef<bool(const FString&, const FString&)>* IncludeSubtree)
+	{
+		OutDocument.Reset(); OutError.Reset();
+		if (Span.GetByteStart() < 0 || Span.GetByteEnd() <= Span.GetByteStart() || Span.GetByteEnd() > Utf8.Num()) {
+			OutError.SetSourceFailure(TEXT("hjson_source_span_invalid"),
+				TEXT("The generated source span is outside its formatter bytes."), Span.GetSourceUnit());
+			return false;
+		}
+		const FUTF8ToTCHAR Decoded(reinterpret_cast<const ANSICHAR*>(Utf8.GetData() + Span.GetByteStart()),
+			static_cast<int32>(Span.GetByteEnd() - Span.GetByteStart()));
+		const auto Origin = LocateGeneratedSpan(Utf8, Span);
+		if (!Origin) { OutError.SetSourceFailure(TEXT("hjson_source_span_invalid"), TEXT("The generated row starts inside a CRLF sequence."), Span.GetSourceUnit()); return false; }
+		return TryParseHjsonDocumentImpl(FString(Decoded.Length(), Decoded.Get()), Span.GetSourceUnit(),
+			Resources, OutDocument, OutError, nullptr, &Origin.GetValue(), IncludeSubtree);
+	}
+
+	bool TryConsumeGeneratedHjsonSpan(const TArray<uint8>& Utf8, const FSourceProvenance& Span,
+		FUeAgentResourceTracker& Resources, TFunctionRef<bool(const FHjsonNode&, FWorkspaceError&)> Consumer,
+		FWorkspaceError& OutError, TFunctionRef<bool(const FString&, const FString&)>* IncludeSubtree)
+	{
+		const bool bDeferred = Span.GetLine() <= 0 || Span.GetColumn() <= 0;
+		const FSourceProvenance Local(Span.GetSourceUnitBacking(), Span.GetJsonPointer(), bDeferred ? 1 : Span.GetLine(),
+			bDeferred ? 1 : Span.GetColumn(), Span.GetByteStart(), Span.GetByteEnd(), Span.GetOriginalKey());
+		FHjsonDocumentPtr Parsed;
+		if (TryParseGeneratedHjsonSpan(Utf8, Local, Resources, Parsed, OutError, IncludeSubtree)
+			&& Consumer(*Parsed->GetRoot(), OutError)) return true;
+		if (!OutError.HasErrors()) OutError.SetSourceFailure(TEXT("hjson_generated_fragment_consumer_failed"),
+			TEXT("The generated fragment consumer returned no result or diagnostic. No alternate parser was selected."), Span.GetSourceUnit(), Span.GetJsonPointer());
+		if (!bDeferred) return false;
+		RelocateGeneratedHjsonFragmentError(Utf8, Span, OutError);
+		return false;
+	}
+
+	bool TryConsumeGeneratedHjsonFragment(TConstArrayView<uint8> Bytes, const FSourceProvenance& Span,
+		FUeAgentResourceTracker& Resources, TFunctionRef<bool(const FHjsonNode&, FWorkspaceError&)> Consumer,
+		FWorkspaceError& OutError, TFunctionRef<bool(const FString&, const FString&)>* IncludeSubtree,
+		FHjsonFragmentConsumeTimes* Times)
+	{
+		OutError.Reset();
+		if (Span.GetByteStart() < 0 || Span.GetByteEnd() <= Span.GetByteStart()
+			|| Span.GetByteEnd() - Span.GetByteStart() != Bytes.Num()) {
+			OutError.SetSourceFailure(TEXT("hjson_source_span_invalid"), TEXT("The addressed bytes do not match their formatter row span."), Span.GetSourceUnit()); return false;
+		}
+		const bool bDeferred = Span.GetLine() <= 0 || Span.GetColumn() <= 0;
+		const FSourceProvenance Origin(Span.GetSourceUnitBacking(), Span.GetJsonPointer(), bDeferred ? 1 : Span.GetLine(),
+			bDeferred ? 1 : Span.GetColumn(), Span.GetByteStart(), Span.GetByteEnd(), Span.GetOriginalKey());
+		double Started = Times ? FPlatformTime::Seconds() : 0;
+		const FUTF8ToTCHAR Decoded(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()), Bytes.Num());
+		FString Text(Decoded.Length(), Decoded.Get());
+		if (Times) { Times->Decode += FPlatformTime::Seconds() - Started; Started = FPlatformTime::Seconds(); }
+		FHjsonDocumentPtr Parsed;
+		const bool bParsed = TryParseHjsonDocumentImpl(Text, Span.GetSourceUnit(),
+			Resources, Parsed, OutError, nullptr, &Origin, IncludeSubtree);
+		if (Times) Times->Parse += FPlatformTime::Seconds() - Started;
+		const bool bConsumed = bParsed && Consumer(*Parsed->GetRoot(), OutError);
+		Started = Times ? FPlatformTime::Seconds() : 0;
+		Parsed.Reset(); Text.Empty();
+		if (Times) Times->Retire += FPlatformTime::Seconds() - Started;
+		if (bConsumed) return true;
+		if (!OutError.HasErrors()) OutError.SetSourceFailure(TEXT("hjson_generated_fragment_consumer_failed"),
+			TEXT("The generated fragment consumer returned no result or diagnostic. No alternate parser was selected."), Span.GetSourceUnit(), Span.GetJsonPointer());
+		return false;
+	}
+
+	void RelocateGeneratedHjsonFragmentError(const TArray<uint8>& Utf8, const FSourceProvenance& Span, FWorkspaceError& OutError)
+	{
+		const auto Absolute = LocateGeneratedSpan(Utf8, Span);
+		if (!Absolute) return; // Keep the original parser/consumer diagnostic.
+		auto Failure = OutError.GetDiagnostic();
+		TFunction<void(Contract::FDiagnostic&)> Relocate = [&](Contract::FDiagnostic& Item) {
+			if (Item.SourceKind != TEXT("native_result") && Item.SourceKind != TEXT("command_input")
+				&& (Item.Source.SourceUnit == Span.GetSourceUnit() || Item.Source.SourceFile == Span.GetSourceUnit()
+					|| (Item.Source.SourceUnit.IsEmpty() && Item.Source.SourceFile.IsEmpty())) && Item.Source.Line > 0) {
+				if (Item.Source.Line == 1) Item.Source.Column += Absolute->GetColumn() - 1;
+				Item.Source.Line += Absolute->GetLine() - 1;
+			}
+			for (auto& Child : Item.Diagnostics) Relocate(Child);
+			if (Item.PublicCause) { auto Cause = MakeShared<Contract::FDiagnostic>(*Item.PublicCause); Relocate(*Cause); Item.PublicCause = MoveTemp(Cause); }
+			for (auto& Value : Item.Unchecked) if (Value && Value->Type == EJson::Object) {
+				const auto Object = Value->AsObject(); FString Path; double FromLine = 0;
+				if (Object->TryGetStringField(TEXT("source_file"), Path) && Path == Span.GetSourceUnit()
+					&& Object->TryGetNumberField(TEXT("from_line"), FromLine) && FromLine > 0) {
+					auto Copy = MakeShared<FJsonObject>(*Object); Copy->SetNumberField(TEXT("from_line"), FromLine + Absolute->GetLine() - 1);
+					Value = MakeShared<FJsonValueObject>(Copy);
+				}
+			}
+		};
+		Relocate(Failure); OutError.SetFailure(MoveTemp(Failure));
+	}
+
+	bool TryUpdateHjsonDocument(const FString& OldText, const FString& NewText, FHjsonDocumentRef Previous,
+		FUeAgentResourceTracker& Resources, FHjsonDocumentPtr& OutDocument, FWorkspaceError& OutError,
+		FHjsonDocumentUpdateMetrics* Metrics, const FHjsonOperationCheckpoint* Checkpoint)
+	{
+		OutDocument.Reset(); OutError.Reset();
+		if (Metrics) *Metrics = {};
+		const FTCHARToUTF8 OldUtf8(*OldText), NewUtf8(*NewText);
+		const std::string_view Old(OldUtf8.Get(), OldUtf8.Length()), New(NewUtf8.Get(), NewUtf8.Length());
+		const auto StopUpdate = [&](const TCHAR* Stage, const FString& Detail) {
+			OutError.SetSourceFailure(TEXT("workspace_incremental_syntax_unavailable"),
+				FString::Printf(TEXT("Incremental syntax update stopped at %s: %s. The original parser must provide the matching document version and safe boundary; no whole-document parser was selected."), Stage, *Detail), Previous->GetSourceUnit());
+			return false;
+		};
+		TextLineDiff::FResult Difference; TextLineDiff::FError DiffError;
+		if (!TextLineDiff::TryDiff(Old, New, Difference, DiffError))
+			return StopUpdate(TEXT("line_diff"), FString::Printf(TEXT("code=%d side=%d byte=%llu"), static_cast<int32>(DiffError.Code), static_cast<int32>(DiffError.Side), static_cast<uint64>(DiffError.ByteOffset)));
+		if (Metrics) Metrics->bComparedText = true;
+		if (Difference.Edits.empty()) { OutDocument = Previous; return true; }
+		if (Metrics) Metrics->DiffBlocks = Difference.Edits.size();
+
+		// A line block includes its unchanged key/indentation. Refine only equal
+		// bytes inside that block; neither line numbers nor array positions become
+		// semantic identities. Keep cuts on UTF-8 character boundaries.
+		struct FEdit { int64 OldBegin, OldEnd, NewBegin, NewEnd; };
+		TArray<FEdit> Edits;
+		for (const auto& Block : Difference.Edits) {
+			std::size_t A = Block.OldBytes.Begin, B = Block.NewBytes.Begin;
+			std::size_t AE = Block.OldBytes.End, BE = Block.NewBytes.End;
+			while (A < AE && B < BE && Old[A] == New[B]) { ++A; ++B; }
+			while (A > Block.OldBytes.Begin && A < Old.size() && (static_cast<uint8>(Old[A]) & 0xc0) == 0x80) { --A; --B; }
+			while (AE > A && BE > B && Old[AE - 1] == New[BE - 1]) { --AE; --BE; }
+			while (AE < Block.OldBytes.End && AE < Old.size() && (static_cast<uint8>(Old[AE]) & 0xc0) == 0x80) { ++AE; ++BE; }
+			Edits.Add({static_cast<int64>(A), static_cast<int64>(AE), static_cast<int64>(B), static_cast<int64>(BE)});
+		}
+		if (Metrics) {
+			Metrics->Changes.Reserve(Edits.Num());
+			for (const auto& Edit : Edits) Metrics->Changes.Add({Edit.OldBegin, Edit.OldEnd, Edit.NewBegin, Edit.NewEnd});
+		}
+		auto MapOffset = [&](int64 Offset, bool bEnd) {
+			int64 Delta = 0;
+			for (const auto& Edit : Edits) {
+				if (Offset < Edit.OldBegin || (Offset == Edit.OldBegin && bEnd)) break;
+				if (Offset < Edit.OldEnd) return Edit.NewBegin;
+				Delta = Edit.NewEnd - Edit.OldEnd;
+			}
+			return Offset + Delta;
+		};
+
+		// One bounded-density coordinate index for this observed text. It uses
+		// the original scanner's CRLF/UTF-16 column rules, not splitlines or a
+		// second lexer. Long single lines do not cause repeated prefix scans.
+		struct FPosition { int64 Byte; int32 Character, Line, Column; };
+		TArray<FPosition> Positions;
+		int32 Character = 0, Line = 1, Column = 1; int64 Byte = 0;
+		Positions.Add({0, 0, 1, 1});
+		while (Character < NewText.Len()) {
+			int32 Units = 1; const int32 Width = Utf8WidthAt(NewText, Character, Units), Before = Character;
+			const TCHAR Ch = AdvanceSourcePosition(NewText, Character, Line, Column);
+			if (Units == 2) AdvanceSourcePosition(NewText, Character, Line, Column);
+			Byte += Width + Character - Before - Units;
+			if (Ch == TEXT('\n') || Character - Positions.Last().Character >= 256)
+				Positions.Add({Byte, Character, Line, Column});
+		}
+		if (Positions.Last().Byte != Byte) Positions.Add({Byte, Character, Line, Column});
+		auto PositionAt = [&](int64 Wanted) {
+			int32 Low = 0, High = Positions.Num();
+			while (Low + 1 < High) { const int32 Mid = Low + (High - Low) / 2;
+				if (Positions[Mid].Byte <= Wanted) Low = Mid; else High = Mid; }
+			FPosition Result = Positions[Low];
+			while (Result.Byte < Wanted && Result.Character < NewText.Len()) {
+				int32 Units = 1; const int32 Width = Utf8WidthAt(NewText, Result.Character, Units), Before = Result.Character;
+				AdvanceSourcePosition(NewText, Result.Character, Result.Line, Result.Column);
+				if (Units == 2) AdvanceSourcePosition(NewText, Result.Character, Result.Line, Result.Column);
+				Result.Byte += Width + Result.Character - Before - Units;
+			}
+			return Result;
+		};
+		auto NewProvenance = [&](const FHjsonNode& Node) {
+			const auto& P = Node.GetProvenance();
+			const auto Start = PositionAt(MapOffset(P.GetByteStart(), false));
+			return FSourceProvenance(P.GetSourceUnitBacking(), P.GetJsonPointer(), Start.Line, Start.Column,
+				Start.Byte, MapOffset(P.GetByteEnd(), true), P.GetOriginalKey());
+		};
+		auto Reuse = [&](FHjsonNodeRef Node) -> FHjsonNodeRef {
+			if (Metrics) ++Metrics->ReusedSubtrees;
+			const auto& OldP = Node->GetProvenance(); auto NewP = NewProvenance(*Node);
+			if (OldP.GetByteStart() == NewP.GetByteStart() && OldP.GetLine() == NewP.GetLine() && OldP.GetColumn() == NewP.GetColumn()) return Node;
+			return MakeShared<FHjsonNode>(Node, MoveTemp(NewP));
+		};
+
+		// Trivia outside an unchanged explicit root is not a tree edit. Use the
+		// original scanner, including the boundary token, so an unterminated
+		// comment cannot silently swallow that token. All edits still relocate
+		// source coordinates; only proven exterior trivia is excluded below.
+		TArray<FEdit> TreeEdits;
+		const auto& RootP = Previous->GetRoot()->GetProvenance();
+		bool bLeadingTrivia = false, bTrailingTrivia = false;
+		for (const auto& Edit : Edits) {
+			if (Edit.OldEnd <= RootP.GetByteStart()) bLeadingTrivia = true;
+			else if (Edit.OldBegin >= RootP.GetByteEnd()) bTrailingTrivia = true;
+			else TreeEdits.Add(Edit);
+		}
+		auto CheckExterior = [&](bool bLeading) {
+			const int64 Boundary = bLeading ? MapOffset(RootP.GetByteStart(), false) : MapOffset(RootP.GetByteEnd(), true) - 1;
+			const int64 OldBoundary = bLeading ? RootP.GetByteStart() : RootP.GetByteEnd() - 1;
+			if (Boundary < 0 || Boundary >= static_cast<int64>(New.size()) || OldBoundary < 0
+				|| OldBoundary >= static_cast<int64>(Old.size()) || Old[OldBoundary] != New[Boundary]
+				|| (bLeading ? New[Boundary] != '{' && New[Boundary] != '[' : New[Boundary] != '}' && New[Boundary] != ']'))
+				return StopUpdate(TEXT("exterior_boundary"), RootP.GetJsonPointer());
+			const auto Start = PositionAt(bLeading ? 0 : Boundary);
+			const auto End = PositionAt(bLeading ? Boundary + 1 : static_cast<int64>(New.size()));
+			const FSourceProvenance Origin(RootP.GetSourceUnitBacking(), RootP.GetJsonPointer(), Start.Line, Start.Column,
+				Start.Byte, End.Byte, RootP.GetOriginalKey());
+			TArray<FToken> Tokens; int32 EndLine = 1, EndColumn = 1; int64 Bytes = 0;
+			FWorkspaceError Diagnostics;
+			if (!ScanTokens(NewText.Mid(Start.Character, End.Character - Start.Character), Previous->GetSourceUnit(),
+				Resources, Tokens, EndLine, EndColumn, Bytes, OutError, Diagnostics, Checkpoint, &Origin, true)) return false;
+			if (Diagnostics.HasErrors()) { OutError = MoveTemp(Diagnostics); return false; }
+			const ETokenKind Expected = bLeading ? (New[Boundary] == '{' ? ETokenKind::OpenObject : ETokenKind::OpenArray)
+				: (New[Boundary] == '}' ? ETokenKind::CloseObject : ETokenKind::CloseArray);
+			if (Tokens.Num() != 1 || Tokens[0].Kind != Expected || Tokens[0].ByteStart != Boundary)
+				return StopUpdate(TEXT("exterior_trivia"), RootP.GetJsonPointer());
+			return true;
+		};
+		if ((bLeadingTrivia && !CheckExterior(true)) || (bTrailingTrivia && !CheckExterior(false))) return false;
+		if (TreeEdits.IsEmpty()) {
+			OutDocument = MakeShared<FHjsonDocument>(Previous->GetSourceUnit(), Reuse(Previous->GetRoot())); return true;
+		}
+		struct FTask { FHjsonNodeRef Node; int32 First, End; bool bAssemble; const FHjsonNode* Parent; };
+		TArray<FTask> Tasks; Tasks.Add({Previous->GetRoot(), 0, TreeEdits.Num(), false, nullptr});
+		TMap<const FHjsonNode*, FHjsonNodeRef> Replacements;
+		TSet<const FHjsonNode*> EnclosingScopes;
+		while (!Tasks.IsEmpty()) {
+			if (Checkpoint && !(*Checkpoint)(TEXT("hjson_update"), OutError)) return false;
+			const FTask Task = Tasks.Pop(EAllowShrinking::No);
+			if (Task.Parent && EnclosingScopes.Contains(Task.Parent)) continue;
+			if (Task.bAssemble && !EnclosingScopes.Remove(&Task.Node.Get())) {
+				TArray<FHjsonNodeRef> Items; TArray<TPair<FString, FHjsonNodeRef>> Entries;
+				auto ChildResult = [&](FHjsonNodeRef Child) {
+					if (const auto* Result = Replacements.Find(&Child.Get())) return *Result;
+					return Reuse(Child);
+				};
+				for (const auto& Child : Task.Node->GetItems()) Items.Add(ChildResult(Child));
+				for (const auto& Entry : Task.Node->GetEntries()) Entries.Emplace(Entry.Key, ChildResult(Entry.Value));
+				Replacements.Add(&Task.Node.Get(), MakeShared<FHjsonNode>(Task.Node->GetKind(), NewProvenance(*Task.Node),
+					FString(), FString(), false, MoveTemp(Items), MoveTemp(Entries)));
+				continue;
+			}
+			// Descend only when every edit is strictly inside an existing child
+			// container. Keys, separators and insertion at a boundary belong to
+			// their parent, whose original parser checks duplicates and context.
+			if (!Task.bAssemble) {
+				TArray<FTask> Children; int32 NextEdit = Task.First;
+				auto SelectChild = [&](FHjsonNodeRef Child) {
+					if (NextEdit == Task.End) return;
+					const auto& P = Child->GetProvenance(); const int32 First = NextEdit;
+					if (Child->GetKind() != EHjsonNodeKind::Object && Child->GetKind() != EHjsonNodeKind::Array) return;
+					while (NextEdit < Task.End && P.GetByteStart() < TreeEdits[NextEdit].OldBegin && TreeEdits[NextEdit].OldEnd < P.GetByteEnd()) ++NextEdit;
+					if (NextEdit > First) Children.Add({Child, First, NextEdit, false, &Task.Node.Get()});
+				};
+				for (const auto& Child : Task.Node->GetItems()) SelectChild(Child);
+				for (const auto& Entry : Task.Node->GetEntries()) SelectChild(Entry.Value);
+				if (NextEdit == Task.End && !Children.IsEmpty()) {
+					Tasks.Add({Task.Node, Task.First, Task.End, true, Task.Parent});
+					for (int32 I = Children.Num() - 1; I >= 0; --I) Tasks.Add(Children[I]);
+					continue;
+				}
+			}
+			const auto& P = Task.Node->GetProvenance();
+			const int64 StartByte = MapOffset(P.GetByteStart(), false), EndByte = MapOffset(P.GetByteEnd(), true);
+			const bool bExplicitContainer = P.GetByteStart() >= 0 && P.GetByteStart() < static_cast<int64>(Old.size())
+				&& (Old[P.GetByteStart()] == '{' || Old[P.GetByteStart()] == '[');
+			if (!bExplicitContainer || TreeEdits[Task.First].OldBegin <= P.GetByteStart() || TreeEdits[Task.End - 1].OldEnd >= P.GetByteEnd()
+				|| StartByte < 0 || EndByte > static_cast<int64>(New.size()) || EndByte <= StartByte)
+				return StopUpdate(TEXT("container_boundary"), P.GetJsonPointer());
+			const auto Start = PositionAt(StartByte), End = PositionAt(EndByte);
+			if (Start.Byte != StartByte || End.Byte != EndByte) return StopUpdate(TEXT("source_coordinate"), P.GetJsonPointer());
+			FHjsonDocumentPtr Fragment; FWorkspaceError FragmentError;
+			const auto Origin = NewProvenance(*Task.Node);
+			bool bExtendsIntoParent = false;
+			if (!TryParseHjsonDocumentImpl(NewText.Mid(Start.Character, End.Character - Start.Character), Previous->GetSourceUnit(),
+				Resources, Fragment, FragmentError, Checkpoint, &Origin, nullptr, nullptr, nullptr,
+				Task.Parent ? &bExtendsIntoParent : nullptr)) {
+				// Keep the original fragment diagnostic. Failure never selects a
+				// larger parser or retries with a different document algorithm.
+				OutError = MoveTemp(FragmentError);
+				if (!OutError.HasErrors()) return StopUpdate(TEXT("fragment_parser"), P.GetJsonPointer());
+				return false;
+			}
+			if (bExtendsIntoParent) {
+				EnclosingScopes.Add(Task.Parent);
+				continue;
+			}
+			if (Metrics) { ++Metrics->ReparsedContainers; Metrics->ReparsedBytes += EndByte - StartByte;
+				Metrics->bWholeDocument |= &Task.Node.Get() == &Previous->GetRoot().Get(); }
+			Replacements.Add(&Task.Node.Get(), Fragment->GetRoot());
+		}
+		const auto* Root = Replacements.Find(&Previous->GetRoot().Get());
+		if (!Root) return StopUpdate(TEXT("replacement_root"), TEXT("the update produced no root"));
+		OutDocument = MakeShared<FHjsonDocument>(Previous->GetSourceUnit(), *Root);
 		return true;
 	}
 
@@ -2323,7 +2936,7 @@ namespace UE::UAI::HjsonWorkspace
 					Document->GetSourceUnit());
 				return false;
 			}
-			if (!Charge(
+			if (Resources.CollectsUsage() && !Charge(
 				Resources,
 				{{EUeAgentResourceDimension::WorkUnits, 1}},
 				Task.Node->GetProvenance().GetJsonPointer(),
@@ -2411,7 +3024,7 @@ namespace UE::UAI::HjsonWorkspace
 		}
 		Output += TEXT("\n");
 		OutCanonicalUtf8 = ToUtf8(Output);
-		if (!Charge(
+		if (Resources.CollectsUsage() && !Charge(
 			Resources,
 			{
 				{EUeAgentResourceDimension::OutputBytes,
@@ -2677,7 +3290,7 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					return false;
 				}
-				if (!Charge(
+				if (Resources.CollectsUsage() && !Charge(
 					Resources,
 					{{EUeAgentResourceDimension::Files, 1}},
 					TEXT("workspace:") + UnitId,
@@ -2698,7 +3311,7 @@ namespace UE::UAI::HjsonWorkspace
 					OutError.SetSourceFailure(TEXT("workspace_source_file_missing"), TEXT("The workspace source file does not exist."), Root);
 					return false;
 				}
-				if (!Charge(
+				if (Resources.CollectsUsage() && !Charge(
 					Resources,
 					{{EUeAgentResourceDimension::Files, 1}},
 					TEXT("workspace:") + Policy.GetEntryUnit(),
@@ -2749,7 +3362,7 @@ namespace UE::UAI::HjsonWorkspace
 				FPaths::NormalizeFilename(UnitId);
 				FPaths::RemoveDuplicateSlashes(UnitId);
 				UnitIds.Add(UnitId);
-				if (!Charge(
+				if (Resources.CollectsUsage() && !Charge(
 					Resources,
 					{{EUeAgentResourceDimension::Files, 1}},
 					TEXT("workspace:") + UnitId,
@@ -2926,7 +3539,7 @@ namespace UE::UAI::HjsonWorkspace
 									OutError.Locate(Entry.Value->GetProvenance());
 									return false;
 								}
-								if (!Charge(
+								if (Resources.CollectsUsage() && !Charge(
 									Resources,
 									{{EUeAgentResourceDimension::ReferenceEdges, 1}},
 									Entry.Value->GetProvenance().GetJsonPointer(),

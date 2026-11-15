@@ -188,7 +188,8 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 
 	bool TryExecuteHlodContentGraph(const FString& CommandId,
 		const FString& TargetIdentity, const FString& CanonicalParamsJson,
-		FString& OutPayloadJson, bool& bOutReadOnly, FWorkspaceError& OutError, const FString& RootType)
+		FString& OutPayloadJson, bool& bOutReadOnly, FWorkspaceError& OutError, const FString& RootType,
+		FPreparedWorkspaceExport* PreparedExport)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
@@ -240,7 +241,7 @@ namespace UE::UAI::DomainAdapters::WorldCommands
 			}
 			bOutReadOnly = true;
 			return Composition::HjsonImport::TryExportReflectionRootWorkspace(
-				*Profile, Target, WorkspacePath, OutPayloadJson, OutError);
+				*Profile, Target, WorkspacePath, OutPayloadJson, OutError, PreparedExport);
 		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{

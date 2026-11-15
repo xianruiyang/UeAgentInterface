@@ -164,7 +164,8 @@ bool BuildReusableVerificationState(UBlueprint &Blueprint,
 
 bool ExportAssetWorkspace(
     UObject &Asset, const FString &WorkspaceRoot, const FString &ProfileId,
-    UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult) {
+    UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult,
+    UE::UAI::HjsonWorkspace::FPreparedWorkspaceExport* PreparedExport) {
   auto& OutError = OutResult.Diagnostic;
   OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
   OutError.Reset();
@@ -184,7 +185,7 @@ bool ExportAssetWorkspace(
     return false;
   }
 
-  const bool bExported = UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(TEXT("ue.blueprint.asset"), ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
+  const bool bExported = UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(TEXT("ue.blueprint.asset"), ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult, PreparedExport);
   if (!bExported) {
     UE_LOG(LogTemp, Error, TEXT("Blueprint workspace export projection failed for %s: %s %s"),
            *Asset.GetPathName(), *OutResult.Diagnostic.Code, *OutError.ToPublicDetail());

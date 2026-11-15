@@ -314,8 +314,38 @@ namespace UeAgentEqsAuthoring
 
 	bool ReadGraphDocument(UEnvQuery& Query, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& Error)
 	{
+		return ReadGraphDocument(Query, OutValue, Error, nullptr);
+	}
+
+	bool ReadGraphDocument(UEnvQuery& Query, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& Error,
+		TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
+	{
 		FGraphCapture Capture;
 		if (!CaptureGraph(Query, Capture, Error)) return false;
+		TMap<FString, TSharedPtr<FJsonObject>> ObservedNodes;
+		TMap<FString, TSharedPtr<FJsonValue>> ObservedEdges;
+		TMap<FString, TArray<UeAgentAuthoringState::FStateEntry>> ObservedProperties;
+		if (OutStructure)
+		{
+			TArray<UeAgentAuthoringState::FReadRequest> Requests;
+			if (!AppendGraphExportRequests(Query, Capture, Requests, Error)) return false;
+			UeAgentAuthoringState::FCaptureResult Public;
+			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Public)) { Error = Public.Diagnostic; return false; }
+			for (const auto& Entry : Public.Snapshot.ReadEntries())
+			{
+				const FString& NodeId = Entry.TargetIdentity.GetSelector(TEXT("node_id"));
+				if (Entry.SemanticId == NodePropertySemanticId) ObservedProperties.FindOrAdd(NodeId).Add(Entry);
+				else if (Entry.SemanticId == NodeSemanticId || Entry.SemanticId == EdgeSemanticId)
+				{
+					if (!Entry.Value || Entry.Value->Type != EJson::Object)
+						return NativeFail(Error, TEXT("eqs_graph_observation_missing"),
+							TEXT("The native graph observation is missing its node or connection object."), Entry.TargetIdentity.CanonicalKey);
+					if (Entry.SemanticId == NodeSemanticId) ObservedNodes.Add(NodeId, Entry.Value->AsObject());
+					else ObservedEdges.Add(Entry.TargetIdentity.GetSelector(TEXT("edge_key")), Entry.Value);
+				}
+			}
+			OutStructure->Emplace(MoveTemp(Public.Snapshot));
+		}
 		const auto Document = MakeShared<FJsonObject>();
 		const auto Nodes = MakeShared<FJsonObject>();
 		TMap<FString, const UEdGraphNode*> Native;
@@ -323,17 +353,35 @@ namespace UeAgentEqsAuthoring
 		{
 			Native.Add(Item.Id, Item.NativeNode);
 			TSharedPtr<FJsonObject> State;
-			if (!CaptureNodeState(*Item.NativeNode, State, Error)) return false;
+			if (OutStructure)
+			{
+				const auto* Observed = ObservedNodes.Find(Item.Id);
+				if (!Observed) return NativeFail(Error, TEXT("eqs_graph_observation_missing"),
+					TEXT("The captured native node has no matching public node state."), Item.Id);
+				// The public node omits its graph-node class. The verifier still
+				// owns it, and drops only the pin interface from its own copy.
+				State = MakeShared<FJsonObject>(**Observed);
+				State->SetStringField(TEXT("node_class"), Item.NativeNode->GetClass()->GetPathName());
+			}
+			else if (!CaptureNodeState(*Item.NativeNode, State, Error)) return false;
 			State->RemoveField(TEXT("pin_interface"));
 			State->SetStringField(TEXT("payload_class"), State->GetStringField(TEXT("class_path")));
 			if (const UObject* Payload = GetNodePropertyObject(*Item.NativeNode))
 			{
-				UeAgentDetailsAuthoringService::FCapturePolicy Policy;
-				Policy.bShowDefaultsOnly = true;
-				UeAgentAuthoringState::FStateSnapshot Snapshot;
 				TSharedPtr<FJsonObject> Properties;
-				if (!UeAgentDetailsAuthoringService::CaptureObjectProperties(Payload, Policy, Snapshot, Properties, Error)) return false;
-				Snapshot.ReleaseNativeValues();
+				if (OutStructure)
+				{
+					if (!UeAgentDetailsAuthoringService::BuildPropertiesDocument(
+						ObservedProperties.FindOrAdd(Item.Id), {}, Properties, Error)) return false;
+				}
+				else
+				{
+					UeAgentDetailsAuthoringService::FCapturePolicy Policy;
+					Policy.bShowDefaultsOnly = true;
+					UeAgentAuthoringState::FStateSnapshot Snapshot;
+					if (!UeAgentDetailsAuthoringService::CaptureObjectProperties(Payload, Policy, Snapshot, Properties, Error)) return false;
+					Snapshot.ReleaseNativeValues();
+				}
 				State->SetObjectField(TEXT("properties"), Properties);
 			}
 			Nodes->SetObjectField(Item.Id, State);
@@ -341,6 +389,14 @@ namespace UeAgentEqsAuthoring
 		TArray<TSharedPtr<FJsonValue>> Edges;
 		for (const auto& Item : Capture.Connections)
 		{
+			if (OutStructure)
+			{
+				const auto* Edge = ObservedEdges.Find(Item.Id);
+				if (!Edge) return NativeFail(Error, TEXT("eqs_graph_observation_missing"),
+					TEXT("The captured native connection has no matching public endpoints."), Item.Id);
+				Edges.Add(*Edge);
+				continue;
+			}
 			const auto Edge = MakeShared<FJsonObject>();
 			Edge->SetObjectField(TEXT("from"), Endpoint(Item.SourceId, *Native.FindChecked(Item.SourceId), Item.SourcePin));
 			Edge->SetObjectField(TEXT("to"), Endpoint(Item.TargetId, *Native.FindChecked(Item.TargetId), Item.TargetPin));

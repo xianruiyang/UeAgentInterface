@@ -103,9 +103,16 @@ Invalid paths, incompatible types, duplicate targets and non-bindable targets
 Removing a referenced parameter or slot lets native binding refresh clean unchanged
 bindings; import does not replay them afterward. Explicit binding edits must survive
 native refresh or produce a diagnostic.
-Empty-path whole-struct/context sources remain unsupported. The candidate source
-covers loaded native types and intrinsic Slot/Binding items, not the complete
-native editor menu.
+Empty-path whole-struct/context sources remain unsupported. For definition data,
+use `attachment_kind="definition_data"`. Omit `parent` for the definition or
+pass an exported slot alias. Each position uses its own native struct metadata
+and StructViewer visibility settings. The definition can have an empty list.
+The intrinsic `Slot` and `Binding` are available at the definition. With
+`attachment_kind="behavior"`, a named description checks class constraints
+on native and unloaded Blueprint classes. Creation checks the actual destination
+element's inline class picker. A read-only list that may match behaviors returns
+`candidate_catalog_incomplete` because an appended array element has no
+Details handle yet. This also applies to an unscoped search that matches behaviors.
 
 WorldCondition bindings use the editable condition path, for example
 `SelectionPreconditions.EditableConditions[0].Condition.TagQuery` for a slot's
@@ -233,10 +240,21 @@ Use those names unchanged as `content_graph.properties` owners; scoped fields su
 as `state.Description` retain the common canonical type, default and presence
 contract. Read-side snapshot validation covers non-node native carrier types too.
 
-The candidate query uses the native StateTree class cache filtered by the target
-Schema. `State`, `Transition`, `Binding`, and `Color` are structural candidates; task and condition names
-come from the query. Ordinary import supports creating a state and a task beneath
-that new state, and resolving a transition to an existing state in the same import.
+For a StateTree node menu, pass the exported state alias as `parent` and one of
+`task`, `single_task`, `enter_condition`, or `consideration` as `attachment_kind`.
+Use a transition alias for `transition_condition`. For `evaluator` and
+`global_task` omit the parent. Each placement uses its native class and struct
+caches and the target schema's visibility and type restrictions. A valid menu
+can be empty. For property functions use `attachment_kind="property_function"`,
+the exported receiving item as `parent` and its relative `target_path`. The UE
+5.6 adapter resolves the native binding path, current target value and Details
+field. Use the returned `choose.type` or `choose.output` when names coincide.
+For example, a function with `select.output="Result.Max"` uses `Result.Max`
+as the binding's `source_path`. Its parent is the binding's target item.
+An unscoped query combines current placements, compatible function outputs and
+the fixed `State`, `Transition` (when a state exists), `Binding` and `Color`. Ordinary
+import supports creating a state and task under it, and resolving a transition
+to an existing state in the same import.
 New node defaults come from native initialization and the same complete capture.
 New-item initial properties use `categories` with the common `type`/`value` format
 and scoped property paths, for example `Parameter` → `instance.Duration` →

@@ -1,6 +1,7 @@
 #include "DomainAdapters/DataTableCurveTable/UeAgentDataTableAuthoringApply.h"
 
 #include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -157,7 +158,7 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			TMap<FName, TSharedPtr<FStructOnScope>> Storage;
 			TMap<FName, const uint8*> Views;
 			TArray<FRowIntent> Intents;
-			const auto Escape = [](const FString& Key) { return Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")); };
+			const auto Escape = [](const FString& Key) { return HjsonWorkspace::EscapeJsonPointerSegment(Key); };
 			const auto LocateInput = [&](UE::UAI::Contract::FDiagnostic& Error, const FString& Pointer)
 			{
 				if (!SourceUnit.IsValid()) { Error.SourceKind = TEXT("native_result"); return; }
@@ -179,9 +180,9 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 			{
 				const FString RowPath = TEXT("/rows/") + Escape(Pair.Key);
 				const FName Name(*Pair.Key);
-				if (Name.IsNone() || Storage.Contains(Name) || !Pair.Value.IsValid() || Pair.Value->Type != EJson::Object)
+				if (Name.IsNone() || Views.Contains(Name) || !Pair.Value.IsValid() || Pair.Value->Type != EJson::Object)
 				{
-					if (Name.IsNone() || Storage.Contains(Name))
+					if (Name.IsNone() || Views.Contains(Name))
 					{
 						Failure.Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("data_table_row_name_invalid"), RowPath,
 							MakeShared<FJsonValueString>(TEXT("a unique non-None row name")), MakeShared<FJsonValueString>(Pair.Key),
@@ -197,9 +198,6 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 				if (!Pair.Value->AsObject()->TryGetObjectField(TEXT("properties"), Properties))
 					return Invalid(TEXT("data_table_row_properties_missing"), TEXT("The DataTable row requires a properties object."), RowPath + TEXT("/properties"),
 						TEXT("object"), Pair.Value->AsObject()->TryGetField(TEXT("properties")));
-				const auto Data = MakeShared<FStructOnScope>(Target.GetRowStruct());
-				if (const uint8* const* Row = Baseline.GetRowMap().Find(Name))
-					Target.GetRowStruct()->CopyScriptStruct(Data->GetStructMemory(), *Row);
 				TArray<TSharedPtr<FJsonValue>> Descriptors;
 				for (const auto& Property : (*Properties)->Values)
 				{
@@ -213,21 +211,37 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 					Descriptor->SetField(TEXT("value"), Value);
 					Descriptors.Add(MakeShared<FJsonValueObject>(Descriptor));
 				}
+				const uint8* const* BeforeRow = Baseline.GetRowMap().Find(Name);
+				if (BeforeRow && &Baseline == &Target && Descriptors.IsEmpty()) {
+					Views.Add(Name, *BeforeRow);
+					continue;
+				}
 				UeAgentAuthoringObjectApply::FOptions Options;
 				Options.bEmitEditorNotifications = false;
 				Options.bMarkPackageDirty = false;
 				Options.DiagnosticTargetPath = LogicalTarget;
-				if (SourceUnit.IsValid())
-				{
+				const auto BindSource = [&](const void* SourceData) {
+					if (!SourceUnit.IsValid()) return;
 					const UStruct* SourceStruct = Target.RowStruct.Get();
-					const void* SourceData = Data->GetStructMemory();
 					Options.SupplementDiagnosticSource = [SourceUnit, RowPath, SourceStruct, SourceData](
-						UE::UAI::Contract::FDiagnostic& Error, const FJsonObject& Descriptor, const UStruct* RootStruct, const void* RootData, int32)
-					{
-						if (RootStruct == SourceStruct && RootData == SourceData)
-							BindDataTableRowSource(Error, *SourceUnit, RowPath, Descriptor);
+						UE::UAI::Contract::FDiagnostic& Error, const FJsonObject& Descriptor, const UStruct* RootStruct, const void* RootData, int32) {
+						if (RootStruct == SourceStruct && RootData == SourceData) BindDataTableRowSource(Error, *SourceUnit, RowPath, Descriptor);
 					};
+				};
+				if (BeforeRow && &Baseline == &Target) {
+					BindSource(*BeforeRow);
+					UeAgentAuthoringObjectApply::FPreparedApply Probe;
+					UeAgentAuthoringObjectApply::FFailure ProbeFailure;
+					if (!UeAgentAuthoringObjectApply::PrepareStruct(Target.RowStruct.Get(), const_cast<uint8*>(*BeforeRow),
+						&Target, Descriptors, Options, Probe, ProbeFailure)) return Fail(Failure, ProbeFailure.Diagnostic);
+					if (Probe.NumProperties() == 0) {
+						Views.Add(Name, *BeforeRow);
+						continue;
+					}
 				}
+				const auto Data = MakeShared<FStructOnScope>(Target.GetRowStruct());
+				if (BeforeRow) Target.GetRowStruct()->CopyScriptStruct(Data->GetStructMemory(), *BeforeRow);
+				BindSource(Data->GetStructMemory());
 				UeAgentAuthoringObjectApply::FPreparedApply Prepared;
 				UeAgentAuthoringObjectApply::FFailure PropertyFailure;
 				UeAgentAuthoringObjectApply::FApplyResult Result;
@@ -503,7 +517,9 @@ namespace UE::UAI::DomainAdapters::DataTableCurveTable
 					return Fail(Failure, DataInputFailure(TEXT("data_table_row_struct_read_only"), TEXT("The row structure of an existing DataTable cannot be changed by this import."), Path, TEXT("/provider_extension/row_struct_ref"), MakeShared<FJsonValueString>(StructPath), MakeShared<FJsonValueString>(Actual->GetRowStruct()->GetPathName())));
 				TStrongObjectPtr<UDataTable> Proposed(bCreate ? NewObject<UDataTable>(GetTransientPackage()) : DuplicateObject<UDataTable>(Actual, GetTransientPackage()));
 				if (!Proposed.IsValid()) return Fail(Failure, DataLifecycleFailure(TEXT("data_table_prepare_failed"), TEXT("The proposed DataTable could not be created or duplicated."), Path, TEXT("/proposed_object_present"), false, true));
-				Proposed->ClearFlags(RF_Public | RF_Standalone);
+				// Native editor row-list changes call Modify(). The preview copy
+				// is never an object in the user's undo transaction.
+				Proposed->ClearFlags(RF_Public | RF_Standalone | RF_Transactional);
 				if (bCreate)
 				{
 					UScriptStruct* Struct = LoadObject<UScriptStruct>(nullptr, *StructPath);

@@ -12,6 +12,10 @@
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringExport.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Utilities/AuthoringCore/UeAgentPropertyReadScope.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 #include "CommandRegistry/UeAgentActiveCommandManifest.h"
 #include "NetworkTransport/UeAgentHttpTransportAdapter.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -246,6 +250,10 @@ void FUeAgentInterfaceModule::ShutdownModule()
 	UE::UAI::SceneAnalysis::Shutdown();
 	UE::UAI::AssetPreview::ShutdownAssetEditorTracking();
 	UeAgentLevelAuthoring::StopLevelCaptureObservation();
+	UE::UAI::HjsonWorkspace::ResetSemanticWorkspaceReuse();
+	UE::UAI::HjsonWorkspace::ResetCanonicalCaptureReuse();
+	UeAgentAuthoringState::ResetPropertyReadTemplates();
+	UE::UAI::HjsonWorkspace::ResetCompiledAuthoringReuse();
 	UninstallStartMinimizedMainFrameHook();
 	UE::UAI::AssetPreview::StopSequencerObservation();
 	FEditorDelegates::StartPIE.Remove(StartPieScratchCleanupHandle);
@@ -795,6 +803,10 @@ void FUeAgentInterfaceModule::StopServerInternal()
 		TransportService.Reset();
 	}
 	CommandService.Reset();
+	UE::UAI::HjsonWorkspace::ResetSemanticWorkspaceReuse();
+	UE::UAI::HjsonWorkspace::ResetCanonicalCaptureReuse();
+	UeAgentAuthoringState::ResetPropertyReadTemplates();
+	UE::UAI::HjsonWorkspace::ResetCompiledAuthoringReuse();
 	FUeAgentInterfaceLogger::Log(
 		TEXT("StopServerInternal: owned transport stopped"));
 }

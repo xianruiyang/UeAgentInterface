@@ -83,11 +83,11 @@ public:
         TArray<UeAgentAuthoringState::FReadRequest> Requests;
         UE::UAI::Contract::FDiagnostic Detail;
         UeAgentAuthoringState::FCaptureResult Capture;
-        if (!BuildSettingsReadRequests(*Object, Requests, Detail) || !UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
-        { Error.SetFailure(Detail.IsEmpty() ? Capture.Diagnostic : Detail, Request.GetTargetIdentity()); return false; }
         FString Payload;
         if (Request.GetCommandId() == TEXT("content_graph.export_workspace"))
         {
+            if (!BuildSettingsReadRequests(*Object, Requests, Detail) || !UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+            { Error.SetFailure(Detail.IsEmpty() ? Capture.Diagnostic : Detail, Request.GetTargetIdentity()); return false; }
             TSharedPtr<FJsonObject> Params;
             FString Path;
             UE::UAI::Contract::FDiagnostic ParseError;
@@ -108,7 +108,8 @@ public:
             FString Profile = TEXT("llm_authoring");
             Params->TryGetStringField(TEXT("profile_id"), Profile);
             UeAgentExportWorkspaceWriter::FWorkspaceResult Result;
-            if (!TryExportCompositionWorkspace(TEXT("ue.project_settings.config"), Profile, Capture.Snapshot, Path, Result))
+            if (!TryExportCompositionWorkspace(TEXT("ue.project_settings.config"), Profile, Capture.Snapshot, Path, Result,
+                Request.GetWorkspaceExportPreparation().Get()))
             { Error.SetFailure(Result.Diagnostic, Request.GetTargetIdentity()); return false; }
             if (!TryCanonicalizeObject(Result.ToPublicJsonObject(), Payload, Error)) return false;
             Response = FImportInitializationDomainResponse(MoveTemp(Payload), true);
@@ -138,9 +139,14 @@ public:
             return false;
         }
         auto Resources = MakeSemanticWorkspaceResourceTracker();
+        if (!BuildSettingsReadRequests(*Object, Requests, Detail))
+        { Error.SetFailure(Detail, Request.GetTargetIdentity()); return false; }
+        SelectPropertyImportReadRequests(*Document.SemanticWorkspace, Requests);
+        if (!CapturePropertyImportState(*Document.SemanticWorkspace, Requests, Capture))
+        { Error.SetFailure(Capture.Diagnostic, Request.GetTargetIdentity()); return false; }
         StateSemantic::FUeAgentCanonicalSnapshotPtr Snapshot;
         FAuthoringModelPtr Model;
-        if (!TryBuildCanonicalAuthoringCapture(TEXT("ue.project_settings.config"), TEXT("llm_authoring"),
+        if (!TryBuildPropertyImportCurrentCapture(Document.SemanticWorkspace.Get(), TEXT("ue.project_settings.config"), TEXT("llm_authoring"),
             Capture.Snapshot, Resources, Snapshot, Model, Error)) return false;
         Capture.Snapshot.ReleaseNativeValues();
         TMap<FName, FString> Before;
@@ -150,7 +156,7 @@ public:
         const FString RootType = Request.GetRootTypeIdentity();
         if (!TryCoordinateSemanticWorkspaceImport(Document.SemanticWorkspace.ToSharedRef(),
             Model.ToSharedRef(), Snapshot.ToSharedRef(),
-            Contract::FUeAgentDescriptorIdentity(TEXT("project_settings.semantic_workspace"), 1, Model->GetSemanticFingerprint()),
+            BuildSemanticWorkspaceImportDescriptor(TEXT("project_settings.semantic_workspace"), *Model),
             Target, Resources,
             {ProviderId, Target, Target, TEXT("project-settings"), TEXT("settings_prepare_failed"), TEXT("settings_apply_failed"),
                 TEXT("settings_readback_invalid"), TEXT("settings_schema_invalid"),

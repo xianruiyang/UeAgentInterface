@@ -46,6 +46,17 @@ namespace UE::UAI::ServiceComposition::Query
 			virtual FUeAgentTransportReply Handle(
 				const FUeAgentTransportIngress& Ingress) override
 			{
+				return HandleInternal(Ingress, false).GetValue();
+			}
+			TOptional<FUeAgentTransportReply> TryHandleConcurrent(const FUeAgentTransportIngress& Ingress) override
+			{
+				// Ordinary control requests are tiny. Large/unknown requests keep
+				// their one original decode on GT instead of duplicating it here.
+				if (Ingress.Frame.GetPayload().Num() > 64 * 1024) return {};
+				return HandleInternal(Ingress, true);
+			}
+			TOptional<FUeAgentTransportReply> HandleInternal(const FUeAgentTransportIngress& Ingress, bool bConcurrent)
+			{
 				TOptional<FUeAgentCommandRequest> Request;
 				FUeAgentCommandProtocolDiagnostic Diagnostic;
 				if (!Codec.DecodeRequest(Ingress.Frame.GetPayload(), Request, Diagnostic))
@@ -71,6 +82,11 @@ namespace UE::UAI::ServiceComposition::Query
 					Ingress.Peer.Principal.Subject,
 					AuthorityScopes,
 					Request->GetCorrelationId());
+				if (bConcurrent) {
+					auto Result = Dispatch->TrySubmitConcurrent(Request.GetValue(), Caller, MakeShared<FNeverCancelled>());
+					if (!Result.IsSet()) return {};
+					return Reply(Ingress, Result.GetValue());
+				}
 				FString Target;
 				if (SceneAnalysis::IsAnalysisCommand(Request->GetCommandId()))
 				{

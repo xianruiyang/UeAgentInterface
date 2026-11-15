@@ -680,16 +680,19 @@ namespace UE::UAI::PlanningPreflight
 			TArray<uint8> Bytes;
 		};
 
-		const FUeAgentStateEntry* FindEntry(
+		TOptional<FUeAgentStateEntry> FindEntry(
 			const FUeAgentCanonicalSnapshotRef& Snapshot,
-			const FString& CanonicalKey)
+			const FUeAgentCanonicalIdentity& Identity)
 		{
-			return Snapshot->GetEntries().FindByPredicate(
-				[&CanonicalKey](const FUeAgentStateEntry& Entry)
-				{
-					return Entry.GetIdentity().GetCanonicalKey()
-						== CanonicalKey;
-				});
+			int32 SemanticCount = 0;
+			const auto Candidates = Snapshot->FindTargetEntryIndices(Identity.GetSemanticId(),
+				Identity.GetCanonicalKey(), FString(), SemanticCount);
+			for (const int32 Index : Candidates)
+			{
+				auto Entry = Snapshot->ReadEntry(Index);
+				if (Entry.GetIdentity().GetCanonicalKey() == Identity.GetCanonicalKey()) return Entry;
+			}
+			return {};
 		}
 	}
 
@@ -877,16 +880,53 @@ namespace UE::UAI::PlanningPreflight
 		FChangeSetDraft InDraft,
 		FUeAgentCallerContext InCallerContext,
 		const bool bInDryRun)
+		: FPlanningRequest(MakeShared<const FChangeSetDraft>(MoveTemp(InDraft)), MoveTemp(InCallerContext), bInDryRun)
+	{
+	}
+
+	FPlanningRequest::FPlanningRequest(TSharedRef<const FChangeSetDraft> InDraft,
+		FUeAgentCallerContext InCallerContext, const bool bInDryRun)
 		: Draft(MoveTemp(InDraft))
 		, CallerContext(MoveTemp(InCallerContext))
 		, bDryRun(bInDryRun)
 	{
-		if (!Draft.IsValid()) ValidationDiagnostic = Draft.GetValidationDiagnostic();
+		if (!Draft->IsValid()) ValidationDiagnostic = Draft->GetValidationDiagnostic();
 		else if (!CallerContext.IsValid())
 			ValidationDiagnostic = AtPlanningField(CallerContext.GetValidationDiagnostic(), TEXT("/caller"));
+		if (!ValidationDiagnostic.IsEmpty()) return;
+		// Authority and unique-target validation belong to the immutable request,
+		// including native consumers which do not consume an execution Plan.
+		// They are not repeated when a real Plan consumer asks for its view.
+		TArray<const FChangeDraft*> Ordered;
+		for (const auto& Change : Draft->GetChanges()) Ordered.Add(&Change);
+		Ordered.Sort([](const FChangeDraft& A, const FChangeDraft& B) {
+			return A.GetIdentity().GetCanonicalKey() < B.GetIdentity().GetCanonicalKey();
+		});
+		const TSet<FString> Scopes(CallerContext.GetAuthorityScopes());
+		FString Previous;
+		bool bHasPrevious = false;
+		for (const auto* Change : Ordered) {
+			const FString& Key = Change->GetIdentity().GetCanonicalKey();
+			if (bHasPrevious && Key == Previous) {
+				ValidationDiagnostic = FPlanningPreflightError::Failure(TEXT("planning_duplicate_target"),
+					TEXT("one plan cannot change the same canonical target twice"), TEXT("planning"), FString(), Key);
+				return;
+			}
+			Previous = Key; bHasPrevious = true;
+			TArray<TSharedPtr<FJsonValue>> Missing;
+			for (const auto& Scope : Change->GetRequiredAuthorityScopes())
+				if (!Scopes.Contains(Scope)) Missing.Add(MakeShared<FJsonValueString>(Scope));
+			if (!Missing.IsEmpty()) {
+				ValidationDiagnostic = PlanningValidationFailure(TEXT("planning_authority_denied"),
+					TEXT("The caller lacks authority scopes required by the planned change."), TEXT("/required_authority_scopes"));
+				ValidationDiagnostic.SubjectId = Key;
+				ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Missing));
+				return;
+			}
+		}
 	}
 
-	const FChangeSetDraft& FPlanningRequest::GetDraft() const { return Draft; }
+	const FChangeSetDraft& FPlanningRequest::GetDraft() const { return *Draft; }
 	const FUeAgentCallerContext& FPlanningRequest::GetCallerContext() const
 	{
 		return CallerContext;
@@ -1360,40 +1400,6 @@ namespace UE::UAI::PlanningPreflight
 					< Right.GetIdentity().GetCanonicalKey();
 			});
 
-		const TSet<FString> CallerScopes(Caller.GetAuthorityScopes());
-		TSet<FString> Seen;
-		for (const FChangeDraft* Change : OrderedDrafts)
-		{
-			const FString& Key =
-				Change->GetIdentity().GetCanonicalKey();
-			if (Seen.Contains(Key))
-			{
-				OutError = FPlanningPreflightError::Failure(TEXT("planning_duplicate_target"), TEXT(
-						"one plan cannot change the same canonical target twice"), TEXT("planning"), FString(), Key);
-				return false;
-			}
-			Seen.Add(Key);
-			TArray<FString> MissingScopes;
-			for (const FString& Scope :
-				Change->GetRequiredAuthorityScopes())
-			{
-				if (!CallerScopes.Contains(Scope))
-				{
-					MissingScopes.Add(Scope);
-				}
-			}
-			if (!MissingScopes.IsEmpty())
-			{
-				OutError = PlanningValidationFailure(TEXT("planning_authority_denied"),
-					TEXT("The caller lacks authority scopes required by the planned change."), TEXT("/required_authority_scopes"));
-				OutError.SubjectId = Key;
-				TArray<TSharedPtr<FJsonValue>> Missing;
-				for (const auto& Scope : MissingScopes) Missing.Add(MakeShared<FJsonValueString>(Scope));
-				OutError.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Missing));
-				return false;
-			}
-		}
-
 		TArray<FPlannedChange> PlannedChanges;
 		TArray<FPrecondition> Preconditions;
 		TMap<FString, FImpact> ImpactsByKey;
@@ -1401,8 +1407,8 @@ namespace UE::UAI::PlanningPreflight
 		{
 			const FString& Key =
 				Change->GetIdentity().GetCanonicalKey();
-			const FUeAgentStateEntry* Current =
-				FindEntry(Draft.GetSnapshot(), Key);
+			const auto CurrentEntry = FindEntry(Draft.GetSnapshot(), Change->GetIdentity());
+			const FUeAgentStateEntry* Current = CurrentEntry.IsSet() ? &CurrentEntry.GetValue() : nullptr;
 			FUeAgentCanonicalValuePtr Before;
 			FString Existence;
 			if (Change->GetIntent() == EChangeIntent::Create)
@@ -1585,12 +1591,12 @@ namespace UE::UAI::PlanningPreflight
 		return true;
 	}
 
-	bool TryRevalidatePlan(
+	static bool RevalidatePlan(
 		const FPlanningPreflightPlanRef& Plan,
 		const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
 		const FUeAgentCallerContext& CallerContext,
 		FUeAgentResourceTracker& Resources,
-		FPlanningPreflightError& OutError)
+		FPlanningPreflightError& OutError, const bool bRequireCompleteRevision)
 	{
 		OutError = FPlanningPreflightError();
 		if (!TryCharge(
@@ -1624,7 +1630,7 @@ namespace UE::UAI::PlanningPreflight
 			OutError = FPlanningPreflightError::Failure(TEXT("planning_authority_context_changed"), TEXT("caller identity or authority scopes changed"), TEXT("planning"), FString());
 			return false;
 		}
-		if (CurrentSnapshot->GetRevision() != Plan->GetObservedRevision())
+		if (bRequireCompleteRevision && CurrentSnapshot->GetRevision() != Plan->GetObservedRevision())
 		{
 			OutError = FPlanningPreflightError::Failure(TEXT("planning_revision_stale"), TEXT(
 					"current snapshot revision differs from planned revision"), TEXT("planning"), FString());
@@ -1636,8 +1642,8 @@ namespace UE::UAI::PlanningPreflight
 		{
 			const FString& Key =
 				Precondition.GetIdentity().GetCanonicalKey();
-			const FUeAgentStateEntry* Current =
-				FindEntry(CurrentSnapshot, Key);
+			const auto CurrentEntry = FindEntry(CurrentSnapshot, Precondition.GetIdentity());
+			const FUeAgentStateEntry* Current = CurrentEntry.IsSet() ? &CurrentEntry.GetValue() : nullptr;
 			if (Precondition.GetExistence() == TEXT("must_be_absent"))
 			{
 				if (Current != nullptr)
@@ -1671,5 +1677,17 @@ namespace UE::UAI::PlanningPreflight
 			}
 		}
 		return true;
+	}
+
+	bool TryRevalidatePlan(const FPlanningPreflightPlanRef& Plan, const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
+		const FUeAgentCallerContext& CallerContext, FUeAgentResourceTracker& Resources, FPlanningPreflightError& OutError)
+	{
+		return RevalidatePlan(Plan, CurrentSnapshot, CallerContext, Resources, OutError, true);
+	}
+
+	bool TryRevalidateFieldPlan(const FPlanningPreflightPlanRef& Plan, const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
+		const FUeAgentCallerContext& CallerContext, FUeAgentResourceTracker& Resources, FPlanningPreflightError& OutError)
+	{
+		return RevalidatePlan(Plan, CurrentSnapshot, CallerContext, Resources, OutError, false);
 	}
 }

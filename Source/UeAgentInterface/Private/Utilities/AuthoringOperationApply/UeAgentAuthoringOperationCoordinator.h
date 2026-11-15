@@ -58,6 +58,9 @@ struct UEAGENTINTERFACE_API FPackageDurablePlan {
   // Native-owned packages may become empty tombstones during an edit. Their
   // absence is staged in the same journal as the containing asset/map.
   FString OwningPackageName;
+  // Domain scope for the existing ownership collector. Empty retains the
+  // ordinary package closure; a scoped World supplies its selected actors.
+  TFunction<void(UPackage*, TArray<UPackage*>&)> CollectOwnedPackages;
 };
 
 class UEAGENTINTERFACE_API IDurablePackageStager {
@@ -83,6 +86,8 @@ struct UEAGENTINTERFACE_API FApplyRequestContext {
   FString RequestId;
   FString JournalRoot;
 };
+
+UEAGENTINTERFACE_API FString GetAuthoringDurableJournalRoot();
 
 UEAGENTINTERFACE_API bool MakeCommandApplyRequestContext(
     const FString &RequestId, FApplyRequestContext &OutContext,
@@ -131,6 +136,7 @@ public:
   virtual void CollectRollbackObjects(TArray<UObject *> &OutObjects) const {}
   virtual bool CaptureRollback(FOperationFailure &OutFailure) = 0;
   virtual bool ApplyProposed(FOperationFailure &OutFailure) = 0;
+  virtual bool CaptureExpectedAfterLifecycle() const { return false; }
   virtual bool BuildExpectedReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const = 0;
@@ -270,6 +276,7 @@ struct FOperationReadback {
   UeAgentApplyInputContract::EOperation Operation;
   TArray<UeAgentAuthoringState::FReadRequest> Requests;
   const UeAgentAuthoringState::FStateSnapshot* Expected = nullptr;
+  const UeAgentAuthoringState::FStateSnapshot* Before = nullptr;
 };
 
 struct UEAGENTINTERFACE_API FBackendOptions {
@@ -359,6 +366,7 @@ private:
       UeAgentAuthoringWorkspaceTransaction::IPreparedMutation &Mutation,
       FOperationFailure &OutFailure) const;
   void CapturePackageDirtyStates(const IPreparedOperationState &State);
+  void CapturePackageDirtyState(UPackage* Package);
   void RestorePackageDirtyStates();
   bool
   CaptureRequests(const TArray<UeAgentAuthoringState::FReadRequest> &Requests,
@@ -366,7 +374,7 @@ private:
                   FOperationFailure &OutFailure) const;
   bool BuildReadbackRequests(TArray<FOperationReadback>& OutReadbacks,
                             FOperationFailure& OutFailure);
-  bool VerifyReadbackRequests(const TArray<FOperationReadback>& Readbacks,
+  bool VerifyReadbackRequests(TArray<FOperationReadback>& Readbacks,
                              FOperationFailure& OutFailure);
 
   FBackendOptions Options;
@@ -375,11 +383,13 @@ private:
   TArray<FPreparedOperationMutation *> AppliedMutations;
   TArray<FPreparedOperationMutation *> CapturedMutations;
   TArray<FPackageDirtySnapshot> PackageDirtySnapshots;
+  TMap<FString, int32> PackageDirtySnapshotIndex;
   TArray<FPackageDurablePlan> DurablePackagePlans;
   TArray<FPublishedPackageReadback> PublishedReadbackPackages;
   bool bWorkspaceOpen = false;
   bool bAwaitingDurableFinalization = false;
   bool bNativeStateReleased = false;
+  bool bObservingPublishedState = false;
   bool UnloadForReadback(FOperationFailure &OutFailure, bool bRestoringBefore = false);
   bool ReloadForReadback(FOperationFailure &OutFailure, bool bRestoringBefore = false);
 };

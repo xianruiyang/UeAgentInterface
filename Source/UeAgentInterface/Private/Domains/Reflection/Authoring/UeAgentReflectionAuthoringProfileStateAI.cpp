@@ -43,18 +43,20 @@ namespace UeAgentReflectionAuthoring::ProfileStateAI
 			return Error;
 		}
 
-		bool ReadBehaviorTree(UObject& Asset, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
+		bool ReadBehaviorTree(UObject& Asset, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError,
+			TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
 		{
 			UBehaviorTree* Tree = Cast<UBehaviorTree>(&Asset);
 			if (!Tree) { OutError = ProfileState::TargetFailure(TEXT("behavior_tree_asset_invalid"), Asset, *UBehaviorTree::StaticClass()); return false; }
-			return UeAgentBehaviorTreeAuthoring::ReadGraphDocument(*Tree, OutValue, OutError);
+			return UeAgentBehaviorTreeAuthoring::ReadGraphDocument(*Tree, OutValue, OutError, OutStructure);
 		}
 
-		bool ReadEqs(UObject& Asset, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
+	bool ReadEqs(UObject& Asset, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& OutError,
+		TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
 		{
 			UEnvQuery* Query = Cast<UEnvQuery>(&Asset);
 			if (!Query) { OutError = ProfileState::TargetFailure(TEXT("eqs_asset_invalid"), Asset, *UEnvQuery::StaticClass()); return false; }
-			return UeAgentEqsAuthoring::ReadGraphDocument(*Query, OutValue, OutError);
+		return UeAgentEqsAuthoring::ReadGraphDocument(*Query, OutValue, OutError, OutStructure);
 		}
 
 		bool ApplyBehaviorTree(UObject& Asset, const TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& OutError,
@@ -109,15 +111,21 @@ namespace UeAgentReflectionAuthoring::ProfileStateAI
 		TSharedPtr<FJsonValue>& OutValue,
 		UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		return Read(Profile, Asset, OutValue, OutError, nullptr);
+	}
+
+	bool Read(const FProfile& Profile, UObject& Asset, TSharedPtr<FJsonValue>& OutValue,
+		UE::UAI::Contract::FDiagnostic& OutError, TOptional<UeAgentAuthoringState::FStateSnapshot>* OutStructure)
+	{
 		OutValue.Reset();
-		if (Profile.TypeId == BehaviorTreeTypeId) return ReadBehaviorTree(Asset, OutValue, OutError);
+		if (Profile.TypeId == BehaviorTreeTypeId) return ReadBehaviorTree(Asset, OutValue, OutError, OutStructure);
 		if (Profile.TypeId == BlackboardTypeId)
 		{
 			auto* Blackboard = Cast<UBlackboardData>(&Asset);
 			if (!Blackboard) { OutError = ProfileState::TargetFailure(TEXT("blackboard_asset_invalid"), Asset, *UBlackboardData::StaticClass()); return false; }
-			return UeAgentBlackboardAuthoring::ReadDocument(*Blackboard, OutValue, OutError);
+			return UeAgentBlackboardAuthoring::ReadDocument(*Blackboard, OutValue, OutError, OutStructure);
 		}
-		if (Profile.TypeId == EqsTypeId) return ReadEqs(Asset, OutValue, OutError);
+		if (Profile.TypeId == EqsTypeId) return ReadEqs(Asset, OutValue, OutError, OutStructure);
 		if (Profile.TypeId == SmartObjectTypeId)
 		{
 			auto* Definition = Cast<USmartObjectDefinition>(&Asset);
@@ -131,7 +139,7 @@ namespace UeAgentReflectionAuthoring::ProfileStateAI
 				OutError.ExpectedValue = MakeShared<FJsonValueString>(USmartObjectDefinition::StaticClass()->GetPathName());
 				return false;
 			}
-			return UeAgentSmartObjectAuthoring::ReadDefinitionDocument(*Definition, OutValue, OutError);
+		return UeAgentSmartObjectAuthoring::ReadDefinitionDocument(*Definition, OutValue, OutError, OutStructure);
 		}
 		OutError = Unsupported(Profile);
 		return false;

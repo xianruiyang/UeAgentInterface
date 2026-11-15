@@ -65,7 +65,8 @@ namespace UE::UAI::OperationOwners::WorldCommands
 				FString Payload; bool bReadOnly = false;
 				if (!DomainAdapters::WorldCommands::TryExecuteHlodContentGraph(
 					Request.GetCommandId(), Request.GetTargetIdentity(),
-					Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError, Request.GetRootTypeIdentity())) return false;
+					Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError, Request.GetRootTypeIdentity(),
+					Request.GetWorkspaceExportPreparation().Get())) return false;
 				OutResponse = FImportInitializationDomainResponse(MoveTemp(Payload), bReadOnly);
 				if (!OutResponse.IsValid()) {
 					OutError.SetFailure(OutResponse.GetValidationDiagnostic(), Request.GetTargetIdentity());

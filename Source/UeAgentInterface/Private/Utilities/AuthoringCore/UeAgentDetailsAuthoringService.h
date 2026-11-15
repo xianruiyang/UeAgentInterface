@@ -63,6 +63,10 @@ namespace UeAgentDetailsAuthoringService
 		TSharedPtr<FJsonObject>& OutDocument,
 		FDiagnostic& OutError);
 
+	UEAGENTINTERFACE_API bool CaptureObjectSnapshot(
+		const UObject* Object, const FCapturePolicy& Policy,
+		UeAgentAuthoringState::FStateSnapshot& OutSnapshot, FDiagnostic& OutError);
+
 	UEAGENTINTERFACE_API bool CaptureStructProperties(
 		UStruct* StructType,
 		const void* StructData,
@@ -72,6 +76,11 @@ namespace UeAgentDetailsAuthoringService
 		UeAgentAuthoringState::FStateSnapshot& OutSnapshot,
 		TSharedPtr<FJsonObject>& OutDocument,
 		FDiagnostic& OutError);
+
+	UEAGENTINTERFACE_API bool CaptureStructSnapshot(
+		UStruct* StructType, const void* StructData, const FString& RootOwnerPath,
+		const UObject* NotificationOwner, const FCapturePolicy& Policy,
+		UeAgentAuthoringState::FStateSnapshot& OutSnapshot, FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool AppendStructPropertyReadRequests(
 		UStruct* StructType,
@@ -142,6 +151,10 @@ namespace UeAgentDetailsAuthoringService
 		const UeAgentAuthoringState::FStateSnapshot& Snapshot,
 		const TSharedPtr<FJsonValue>& Categories,
 		TArray<TSharedPtr<FJsonValue>>& OutDescriptors, FDiagnostic& OutError);
+	/** Returns only readable rows actually bound to the supplied native schema and passed to ObjectApply. */
+	UEAGENTINTERFACE_API bool DecodeReadableProperties(
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot, const TSharedPtr<FJsonValue>& Categories,
+		TArray<TSharedPtr<FJsonValue>>& OutDescriptors, FDiagnostic& OutError, TSharedPtr<FJsonObject>* BoundRows);
 	/** Resolve unbound property failures against these exact rows and confirmed encoded-value leaves. */
 	UEAGENTINTERFACE_API void LocateReadablePropertyFailure(FDiagnostic& Error,
 		const TSharedPtr<FJsonValue>& Categories, const FString& DocumentPointer);
